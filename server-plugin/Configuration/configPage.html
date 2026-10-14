@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Litefin Client Configuration</title>
+</head>
+<body>
+    <div id="LitefinWebConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+                <form id="LitefinWebConfigForm">
+                    <div style="margin-bottom: 1.5em;">
+                        <img src="https://raw.githubusercontent.com/MoazSalem/litefin/development/assets/icon_oblong.png" alt="Litefin" style="max-height: 70px; border-radius: 6px; display: block;" />
+                    </div>
+                    <div class="sectionTitleContainer flex align-items-center">
+                        <h2 class="sectionTitle">Litefin Client Hosting</h2>
+                        <a is="emby-linkbutton" class="raised button-accent emby-button" style="margin-left: 1.5em;" href="/litefin" target="_blank" rel="noopener noreferrer">
+                            <span>Open Litefin Client</span>
+                        </a>
+                    </div>
+
+                    <p class="fieldDescription">
+                        The Litefin Client is hosted directly from your Jellyfin server at <code>/litefin</code>. It features hardware-accelerated playback with the Movi WebAssembly video player and ultra-fast navigation.
+                    </p>
+
+                    <div class="checkboxContainer checkboxContainer-withDescription">
+                        <label>
+                            <input is="emby-checkbox" type="checkbox" id="chkEnableCrossOriginIsolation" />
+                            <span>Enable Cross-Origin Isolation (COOP / COEP)</span>
+                        </label>
+                        <div class="fieldDescription checkboxFieldDescription">
+                            Supplies Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy headers required for WebAssembly multi-threading (SharedArrayBuffer) and hardware video demuxing. Enabled by default.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label class="inputLabel inputLabelUnfocused" for="txtPluginMenuTitle">Menu Title</label>
+                        <input is="emby-input" type="text" id="txtPluginMenuTitle" class="emby-input" />
+                        <div class="fieldDescription">
+                            Display name shown in the main server menu.
+                        </div>
+                    </div>
+
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block emby-button">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <script type="text/javascript">
+            var LitefinWebConfig = {
+                // Fallback plugin unique identifier
+                pluginUniqueId: "b4a2c918-7e3f-4d92-a1b8-6e54f0a9d123"
+            };
+
+            // Dynamically resolve plugin GUID matching the current tier by name or URL parameter
+            function resolvePluginId() {
+                var params = new URLSearchParams(window.location.search);
+                var pageName = params.get('name');
+                if (pageName && typeof ApiClient !== 'undefined' && ApiClient.getInstalledPlugins) {
+                    return ApiClient.getInstalledPlugins().then(function (plugins) {
+                        var match = (plugins || []).find(function (p) {
+                            return p.Name === pageName;
+                        });
+                        return match ? match.Id : LitefinWebConfig.pluginUniqueId;
+                    }).catch(function () {
+                        return LitefinWebConfig.pluginUniqueId;
+                    });
+                }
+                return Promise.resolve(LitefinWebConfig.pluginUniqueId);
+            }
+
+            document.getElementById('LitefinWebConfigPage').addEventListener('pageshow', function () {
+                Dashboard.showLoadingMsg();
+                resolvePluginId().then(function (pluginId) {
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        document.getElementById('chkEnableCrossOriginIsolation').checked = config.EnableCrossOriginIsolation !== false;
+                        document.getElementById('txtPluginMenuTitle').value = config.PluginMenuTitle || 'Litefin Client';
+                        Dashboard.hideLoadingMsg();
+                    }).catch(function () {
+                        Dashboard.hideLoadingMsg();
+                    });
+                });
+            });
+
+            document.getElementById('LitefinWebConfigForm').addEventListener('submit', function (e) {
+                e.preventDefault();
+                Dashboard.showLoadingMsg();
+                resolvePluginId().then(function (pluginId) {
+                    ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                        config.EnableCrossOriginIsolation = document.getElementById('chkEnableCrossOriginIsolation').checked;
+                        config.PluginMenuTitle = document.getElementById('txtPluginMenuTitle').value;
+                        ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
+                            Dashboard.processPluginConfigurationUpdateResult(result);
+                        });
+                    });
+                });
+                return false;
+            });
+        </script>
+    </div>
+</body>
+</html>

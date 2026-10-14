@@ -9,16 +9,23 @@
 
 import { api } from '../api/ApiClient.js';
 import { seerr } from '../api/seerrClient.js';
-import { SEERR_STATUS, seerrStatusKey, seerrSeasonStatusKey } from '../api/seerrNormalize.js';
+import { SEERR_STATUS, seerrStatusKey, seerrSeasonStatusKey, isSeerrAnimeItem } from '../api/seerrNormalize.js';
 import { focusManager } from '../ui/FocusManager.js';
 import { router } from '../core/Router.js';
 import { toast } from '../ui/Toast.js';
 import { i18n } from '../utils/i18n.js';
 import { logger } from '../utils/Logger.js';
+import { state } from '../core/StateManager.js';
+import { storage } from '../utils/StorageService.js';
 
 const log = logger.create('SeerrRequestModal');
 
 const OVERLAY_ID = 'seerr-request-modal';
+
+// Storage keys for preserving user-selected request defaults per media type
+const STORAGE_KEY_DEFAULT_SERVER = 'seerr:defaultServer:';
+const STORAGE_KEY_DEFAULT_PROFILE = 'seerr:defaultProfile:';
+const STORAGE_KEY_DEFAULT_FOLDER = 'seerr:defaultFolder:';
 
 function escapeHtml(value) {
     if (!value) return '';
@@ -70,12 +77,16 @@ class SeerrRequestModal {
         const isAvailable = item._seerrStatus === SEERR_STATUS.AVAILABLE;
         const statusKey = seerrStatusKey(item._seerrStatus);
 
-        const isPartialOrPending =
+        // Inside the modal the submit button always says "Request More" when
+        // the series has any active/pending request — the modal context makes
+        // the intent clear (season picker is shown). The outer details button
+        // is the one that says "View Request" for PENDING/PROCESSING.
+        const isPartiallyAvailableOrActive =
             isTv &&
-            (item._seerrStatus === SEERR_STATUS.PENDING ||
-                item._seerrStatus === SEERR_STATUS.PROCESSING ||
-                item._seerrStatus === SEERR_STATUS.PARTIALLY_AVAILABLE);
-        const requestBtnLabel = i18n.t(isPartialOrPending ? 'SeerrRequestMore' : 'SeerrRequest');
+            (item._seerrStatus === SEERR_STATUS.PARTIALLY_AVAILABLE ||
+                item._seerrStatus === SEERR_STATUS.PENDING ||
+                item._seerrStatus === SEERR_STATUS.PROCESSING);
+        const requestBtnLabel = i18n.t(isPartiallyAvailableOrActive ? 'SeerrRequestMore' : 'SeerrRequest');
 
         const itemTitle = `${item.Name}${item.ProductionYear ? ` (${item.ProductionYear})` : ''}`;
         const modalHeaderTitle = isTv ? `${i18n.t('SeerrRequestSeries')} - ${itemTitle}` : i18n.t('SeerrRequestMovie');
@@ -140,6 +151,7 @@ class SeerrRequestModal {
 
         if (requestBtn) {
             requestBtn.addEventListener('click', async () => {
+                // Ensure at least one season is picked when requesting television series
                 if (isTv && selectedSeasons.length === 0) {
                     const errorEl = overlay.querySelector('#seerr-season-error');
                     if (errorEl) {
@@ -150,27 +162,49 @@ class SeerrRequestModal {
                 }
                 requestBtn.disabled = true;
                 try {
+                    // Extract advanced options safely with defensive fallback
+                    let extraOptions = {};
+                    if (typeof requestOptions === 'function') {
+                        try {
+                            extraOptions = requestOptions() || {};
+                        } catch (optErr) {
+                            // Non-fatal options extraction error: log warning and proceed with default request
+                            log.warn('Could not serialize advanced request options, falling back to basic payload:', optErr);
+                        }
+                    }
+
+                    // Dispatch media request to Seerr via companion plugin
                     const res = await seerr.createRequest({
                         mediaType: item._mediaType,
                         tmdbId: item._tmdbId,
                         seasons: isTv ? selectedSeasons.slice() : undefined,
-                        ...requestOptions()
+                        ...extraOptions
                     });
+
+                    // Notify user and propagate status update
                     toast.show(i18n.t('SeerrRequestSent'));
                     if (onRequested) onRequested(SEERR_STATUS.PENDING, res?.id);
                     close();
                 } catch (err) {
                     requestBtn.disabled = false;
-                    // 409 means Jellyseerr already knows about this request —
-                    // not an error from the viewer's point of view.
+
+                    // 409 Conflict: media has already been requested by a user
                     if (err.status === 409) {
                         toast.show(i18n.t('SeerrAlreadyRequested'));
                         if (onRequested) onRequested(SEERR_STATUS.PENDING);
                         close();
                         return;
                     }
-                    log.warn('Request failed', err);
-                    toast.show(i18n.t('SeerrRequestFailed'));
+
+                    // Log detailed diagnostic information to console
+                    log.error('Seerr media request failed:', err);
+
+                    // Surface exact server error message or status so TV user can see why it failed
+                    const detailMsg = err?.message || err?.statusText || (err?.status ? `HTTP ${err.status}` : null);
+                    const toastMsg = detailMsg
+                        ? `${i18n.t('SeerrRequestFailed')}: ${detailMsg}`
+                        : i18n.t('SeerrRequestFailed');
+                    toast.show(toastMsg);
                 }
             });
         }
@@ -190,21 +224,90 @@ class SeerrRequestModal {
             return () => ({});
         }
 
-        const hasAdvancedOptions = options && options.servers && options.servers.length > 0;
+        // --------------------------------------------------------------------
+        // Check Admin Status (Seerr-side):
+        //
+        // We check the current user's OWN Seerr permissions — NOT the API key
+        // owner's permissions (`options.user` is always the admin key holder),
+        // and NOT Jellyfin's IsAdministrator flag (a user can be a Jellyfin
+        // admin without being a Seerr admin, e.g. BigTv).
+        //
+        // Strategy: match the current Jellyfin user ID against the `users` list
+        // (which we already fetched), then read their Seerr `permissions` bitmask.
+        // ADMIN = 2, MANAGE_REQUESTS = 8192.
+        // --------------------------------------------------------------------
+
+        // Normalize the current Jellyfin user ID for comparison (strip hyphens)
+        const currentJfId = (api.userId || '').replace(/-/g, '').toLowerCase();
+
+        // Find this user's Seerr account by matching their Jellyfin user ID
+        const currentSeerrUser = Array.isArray(users)
+            ? users.find((u) => {
+                const uJfId = (u.jellyfinUserId || '').replace(/-/g, '').toLowerCase();
+                return currentJfId && uJfId && uJfId === currentJfId;
+            }) || null
+            : null;
+
+        // Check if the current user's Seerr permissions include ADMIN (2) or MANAGE_REQUESTS (8192)
+        const isAdmin = !!((currentSeerrUser?.permissions || 0) & (2 | 8192));
+
+        // If user is not an administrator, disable advanced server options and user switching
+        const hasAdvancedOptions = isAdmin && options && options.servers && options.servers.length > 0;
         const hasUsers = Array.isArray(users) && users.length > 0;
+
+        // --------------------------------------------------------------------
+        // Auto-Detect "Request As" User:
+        // We already matched the current Jellyfin user to their Seerr account
+        // above (`currentSeerrUser`). Use that directly, falling back to the
+        // first user in the list if no match was found.
+        // --------------------------------------------------------------------
+        let selectedUser = null;
+        if (hasUsers) {
+            // Primary match: exact Jellyfin user ID match (already resolved above)
+            // Secondary: match by username/display name in case jellyfinUserId wasn't set
+            selectedUser = currentSeerrUser || users.find((u) => {
+                const uJfName = (u.jellyfinUsername || '').trim().toLowerCase();
+                const uName = (u.username || '').trim().toLowerCase();
+                const uDisplay = (u.displayName || '').trim().toLowerCase();
+                // Try to match against Jellyfin username from state if available
+                const profile = state.get('user:profile') || state.get('user') || {};
+                const currentUsername = (profile.Name || profile.name || '').trim().toLowerCase();
+                return currentUsername && (uJfName === currentUsername || uName === currentUsername || uDisplay === currentUsername);
+            }) || users[0];
+        }
+
+        // For non-admin users, all advanced parameters (including explicitly specifying userId)
+        // are forbidden by Seerr. Seerr Controller automatically identifies and attributes the request
+        // to the authenticated user via X-Api-User header derived from their Jellyfin session.
+        if (!isAdmin) {
+            return () => ({});
+        }
 
         if (!hasAdvancedOptions && !hasUsers) return () => ({});
 
-        let selectedUser = null;
-        if (hasUsers) {
-            selectedUser =
-                users.find((u) => u.id === options?.user?.id) ||
-                users[0];
+        // --------------------------------------------------------------------
+        // Auto-Detect Default Server, Profile, and Root Folder:
+        // Based on media type ('movie' vs 'tv'), the anime sub-type for TV
+        // series (Seerr routes anime to its dedicated profile/directory),
+        // and cached user preferences.
+        // --------------------------------------------------------------------
+        const mediaType = item._mediaType || 'movie';
+        const isAnime = isSeerrAnimeItem(item);
+        const subType = isAnime ? 'anime' : mediaType;
+        const savedServerId = storage.getItem(`${STORAGE_KEY_DEFAULT_SERVER}${mediaType}`);
+
+        let selectedServer = null;
+        if (hasAdvancedOptions) {
+            // Check if user previously picked a preferred server for this media type
+            if (savedServerId != null) {
+                selectedServer = options.servers.find((s) => String(s.id) === String(savedServerId));
+            }
+            // Fall back to default non-4K server configured in Seerr, or first available server
+            if (!selectedServer) {
+                selectedServer = options.servers.find((server) => server.isDefault && !server.is4k) || options.servers[0];
+            }
         }
 
-        let selectedServer = hasAdvancedOptions
-            ? options.servers.find((server) => server.isDefault && !server.is4k) || options.servers[0]
-            : null;
         let selectedProfile = null;
         let selectedRootFolder = null;
 
@@ -279,16 +382,46 @@ class SeerrRequestModal {
         }
 
         if (hasAdvancedOptions) {
+            // ----------------------------------------------------------------
+            // Synchronize Selected Profile and Root Folder for Current Server:
+            // Safely finds server details from options.details regardless of
+            // whether the response is nested (entry.server) or flat (entry).
+            // ----------------------------------------------------------------
             const sync = () => {
-                const detail = options.details.find((entry) => entry.server.id === selectedServer.id);
+                if (!selectedServer) return;
+
+                // Match server detail entry either via nested server.id or direct id
+                const detail = (options?.details || []).find((entry) => {
+                    if (!entry) return false;
+                    const entryId = entry.server?.id ?? entry.id;
+                    return entryId === selectedServer.id;
+                });
+
+                // Resolve the server configuration object (handles both schemas)
+                const serverObj = detail?.server || detail;
+                const serverId = selectedServer.id;
+
+                // 1. Quality Profile: check cached preference for this server, then server active profile, then first.
+                // Anime series prefer the server's dedicated anime profile when one is configured.
+                const savedProfileId = storage.getItem(`${STORAGE_KEY_DEFAULT_PROFILE}${subType}:${serverId}`);
+                const activeProfileId = (isAnime && serverObj?.activeAnimeProfileId) || serverObj?.activeProfileId;
                 selectedProfile =
-                    detail?.profiles?.find((profile) => profile.id === detail.server.activeProfileId) ||
+                    (savedProfileId != null ? detail?.profiles?.find((p) => String(p.id) === String(savedProfileId)) : null) ||
+                    detail?.profiles?.find((profile) => profile.id === activeProfileId) ||
                     detail?.profiles?.[0] ||
                     null;
+
+                // 2. Root Folder: check cached preference for this server, then server active directory, then first.
+                // Anime series prefer the server's dedicated anime directory when one is configured.
+                const savedFolder = storage.getItem(`${STORAGE_KEY_DEFAULT_FOLDER}${subType}:${serverId}`);
+                const activeDirectory = (isAnime && serverObj?.activeAnimeDirectory) || serverObj?.activeDirectory;
                 selectedRootFolder =
-                    detail?.rootFolders?.find((folder) => folder.path === detail.server.activeDirectory) ||
+                    (savedFolder ? detail?.rootFolders?.find((f) => f.path === savedFolder) : null) ||
+                    detail?.rootFolders?.find((folder) => folder.path === activeDirectory) ||
                     detail?.rootFolders?.[0] ||
                     null;
+
+                // Update UI button displays with active server and path information
                 serverButton.querySelector('.seerr-option-value').textContent =
                     `${selectedServer.name}${selectedServer.is4k ? ' (4K)' : ''}`;
                 profileButton.querySelector('.seerr-option-value').textContent = selectedProfile?.name || '-';
@@ -297,6 +430,7 @@ class SeerrRequestModal {
                 rootButton.disabled = !selectedRootFolder;
             };
 
+            // Server selection click listener
             serverButton.addEventListener('click', async () => {
                 const choice = await SeerrRequestModal._chooseOption(
                     i18n.t('SeerrServer'),
@@ -308,11 +442,19 @@ class SeerrRequestModal {
                 );
                 if (choice) {
                     selectedServer = choice;
+                    // Persist selected server preference for this media type
+                    storage.setItem(`${STORAGE_KEY_DEFAULT_SERVER}${mediaType}`, String(selectedServer.id));
                     sync();
                 }
             });
+
+            // Quality profile selection click listener
             profileButton.addEventListener('click', async () => {
-                const detail = options.details.find((entry) => entry.server.id === selectedServer.id);
+                const detail = (options?.details || []).find((entry) => {
+                    if (!entry) return false;
+                    const entryId = entry.server?.id ?? entry.id;
+                    return entryId === selectedServer?.id;
+                });
                 const choice = await SeerrRequestModal._chooseOption(
                     i18n.t('SeerrQualityProfile'),
                     (detail?.profiles || []).map((profile) => ({
@@ -323,11 +465,19 @@ class SeerrRequestModal {
                 );
                 if (choice) {
                     selectedProfile = choice;
+                    // Persist selected quality profile preference for this server and media type
+                    storage.setItem(`${STORAGE_KEY_DEFAULT_PROFILE}${subType}:${selectedServer.id}`, String(choice.id));
                     profileButton.querySelector('.seerr-option-value').textContent = choice.name;
                 }
             });
+
+            // Root folder destination selection click listener
             rootButton.addEventListener('click', async () => {
-                const detail = options.details.find((entry) => entry.server.id === selectedServer.id);
+                const detail = (options?.details || []).find((entry) => {
+                    if (!entry) return false;
+                    const entryId = entry.server?.id ?? entry.id;
+                    return entryId === selectedServer?.id;
+                });
                 const choice = await SeerrRequestModal._chooseOption(
                     i18n.t('SeerrRootFolder'),
                     (detail?.rootFolders || []).map((folder) => ({
@@ -338,28 +488,54 @@ class SeerrRequestModal {
                 );
                 if (choice) {
                     selectedRootFolder = choice;
+                    // Persist selected root folder preference for this server and media type
+                    storage.setItem(`${STORAGE_KEY_DEFAULT_FOLDER}${subType}:${selectedServer.id}`, choice.path);
                     rootButton.querySelector('.seerr-option-value').textContent = choice.path;
                 }
             });
+
             sync();
         }
 
         focusManager.invalidateCache('__trap__');
 
+        // --------------------------------------------------------------------
+        // Request Options Supplier Closure:
+        // Invoked upon pressing the Request button to assemble the final payload.
+        // --------------------------------------------------------------------
         return () => {
-            if (!hasAdvancedOptions) {
+            // Check if the viewer selected a different user than their own account
+            // Only send userId when requesting on behalf of someone else
+            const isDifferentUser = selectedUser && currentSeerrUser && selectedUser.id !== currentSeerrUser.id;
+            const targetUserId = isDifferentUser ? selectedUser.id : undefined;
+
+            // If advanced server targeting is not available, return minimal payload
+            if (!hasAdvancedOptions || !selectedServer) {
                 return {
-                    userId: selectedUser ? selectedUser.id : undefined
+                    userId: targetUserId
                 };
             }
-            const detail = options.details.find((entry) => entry.server.id === selectedServer.id);
+
+            // Locate matching server configuration safely
+            const detail = (options?.details || []).find((entry) => {
+                if (!entry) return false;
+                const entryId = entry.server?.id ?? entry.id;
+                return entryId === selectedServer.id;
+            });
+            const serverObj = detail?.server || detail;
+
+            // Anime series prefer the server's dedicated anime language profile when one is configured
+            const activeLanguageProfileId =
+                (isAnime && serverObj?.activeAnimeLanguageProfileId) || serverObj?.activeLanguageProfileId;
+
+            // Return fully resolved request payload attributes
             return {
                 serverId: selectedServer.id,
                 profileId: selectedProfile?.id,
                 rootFolder: selectedRootFolder?.path,
-                languageProfileId: detail?.server.activeLanguageProfileId,
-                is4k: !!detail?.server.is4k,
-                userId: selectedUser ? selectedUser.id : undefined
+                languageProfileId: activeLanguageProfileId,
+                is4k: !!(serverObj?.is4k ?? selectedServer.is4k),
+                userId: targetUserId
             };
         };
     }
@@ -514,9 +690,15 @@ class SeerrRequestModal {
 
         if (seasons.length === 0) return selected;
 
-        // A season already available or already requested cannot be re-requested
-        const isLocked = (s) => s.status > SEERR_STATUS.NOT_REQUESTED && s.status !== SEERR_STATUS.DELETED;
+        // A season is locked only if it is already available, pending, or processing.
+        // Seasons with NOT_REQUESTED, UNKNOWN (unmonitored/missing), PARTIALLY_AVAILABLE,
+        // or DELETED status remain requestable by the user.
+        const isLocked = (s) =>
+            s.status === SEERR_STATUS.AVAILABLE ||
+            s.status === SEERR_STATUS.PENDING ||
+            s.status === SEERR_STATUS.PROCESSING;
 
+        // Hide the request button if all seasons are already locked (available or requested)
         if (seasons.every((s) => isLocked(s)) && requestBtn) {
             requestBtn.classList.add('hidden');
             requestBtn.tabIndex = -1;

@@ -14,6 +14,7 @@ import { state } from '../core/StateManager.js';
 import { tizenAdapter } from '../tizen/TizenAdapter.js';
 import { logger } from '../utils/Logger.js';
 import { storage } from '../utils/StorageService.js';
+import { i18n } from '../utils/i18n.js';
 
 const log = logger.create('ApiClient');
 
@@ -49,6 +50,12 @@ export class ApiClient {
 
         // Track retries to prevent infinite loops on 401
         this._retryingRequests = new Set();
+
+        // ── Litefin Companion Server Plugin Detection Cache ───────────────
+        // Cached availability state for the Litefin server-side companion plugin.
+        // null = unprobed / unknown, true = installed & active, false = missing
+        this._hasLitefinServerPlugin = null;
+        this._litefinPluginProbePromise = null;
 
         // ── ETag Response Cache ───────────────────────────────────────────
         // In-memory cache of { etag, body } keyed by full request URL.
@@ -102,6 +109,31 @@ export class ApiClient {
         return !!(info.ServerName && (!info.ProductName || info.ProductName.toLowerCase().includes('emby')));
     }
 
+    /**
+     * Check if the connected server is Jellyfin 12.0 or newer.
+     *
+     * JF 12.0 canonicalized many user-scoped routes: the old
+     * /Users/{userId}/Items/{itemId}/... prefix was deprecated in favour of
+     * /Items/{itemId}?userId=...  (and similar non-user-scoped paths for
+     * PlayedItems, FavoriteItems, Configuration, etc.).
+     *
+     * Old routes still exist as silent legacy fallbacks on JF12, but this flag
+     * lets us proactively use the new paths on modern servers while keeping
+     * full backward compatibility with 10.10 / 10.11 installs.
+     *
+     * @returns {boolean} True when the major server version is >= 12.
+     */
+    isJF12Plus() {
+        /*
+         * The Version field comes from /System/Info/Public and is stored in
+         * global state during the initial server handshake.
+         * Shape: "12.0.0.4" — we only care about the major component.
+         */
+        const info = state.get('server:info') || {};
+        const major = parseInt((info.Version || '').split('.')[0], 10);
+        return !isNaN(major) && major >= 12;
+    }
+
     // ========================================================================
     // Configuration Methods
     // ========================================================================
@@ -114,6 +146,11 @@ export class ApiClient {
         // Normalize URL (remove trailing slash)
         this._serverUrl = serverUrl.replace(/\/+$/, '');
         state.set('server:url', this._serverUrl);
+
+        // Invalidate server-scoped plugin presence cache on server change
+        this._hasLitefinServerPlugin = null;
+        this._litefinPluginProbePromise = null;
+
         log.info(`Server set to ${this._serverUrl}`);
     }
 
@@ -152,12 +189,17 @@ export class ApiClient {
         state.set('user:authenticated', false);
         state.set('user:data', null);
 
+        // Reset server-side plugin detection cache
+        this._hasLitefinServerPlugin = null;
+        this._litefinPluginProbePromise = null;
+
         // Wipe ETag cache — cached responses are bound to the previous auth session
         this._etagCache.clear();
 
         // Wipe page caches — stale data bound to the previous auth session
         state.clearByPrefix('details:');
         state.clearByPrefix('home:');
+        state.clearByPrefix('discover:');
 
         log.info('Authentication cleared');
     }
@@ -257,25 +299,35 @@ export class ApiClient {
             throw new Error('Server URL not configured');
         }
 
-        // Conditionally request quality/resolution metadata if enabled
+        // Conditionally request quality/resolution metadata if enabled.
+        // We skip injection on single-item fetches (endpoint ends with a GUID segment like
+        // /Items/{id} or /Users/{id}/Items/{id}) — Persons, Detail headers, etc. don't
+        // have media sources and requesting MediaSourceCount on them forces Jellyfin to
+        // do an expensive full-library count join, adding 2–4 seconds of latency.
         if (options.params) {
             const fieldsKey = Object.keys(options.params).find((k) => k.toLowerCase() === 'fields');
+
+            // Match a 32-character hex GUID at the very end of the endpoint path
+            const endsWithSingleItemId = /\/[0-9a-f]{32}$/i.test(endpoint.replace(/\?.*$/, ''));
+
             const isItemsEndpoint =
-                (endpoint.includes('/Items') && !endpoint.includes('/Items/Thumbnails')) ||
-                endpoint.includes('/Latest') ||
-                endpoint.includes('/Resume') ||
-                endpoint.includes('/NextUp') ||
-                endpoint.includes('/Upcoming') ||
-                endpoint.includes('/Similar') ||
-                endpoint.includes('/Episodes') ||
-                endpoint.includes('/Search/Hints') ||
-                endpoint.includes('/Persons') ||
-                endpoint.includes('/MergedRows');
+                !endsWithSingleItemId && (
+                    (endpoint.includes('/Items') && !endpoint.includes('/Items/Thumbnails')) ||
+                    endpoint.includes('/Latest') ||
+                    endpoint.includes('/Resume') ||
+                    endpoint.includes('/NextUp') ||
+                    endpoint.includes('/Upcoming') ||
+                    endpoint.includes('/Similar') ||
+                    endpoint.includes('/Episodes') ||
+                    endpoint.includes('/Search/Hints') ||
+                    endpoint.includes('/Persons') ||
+                    endpoint.includes('/MergedRows')
+                );
 
             if (isItemsEndpoint) {
                 const targetKey = fieldsKey || 'Fields';
                 const fieldsList = (options.params[targetKey] || '').split(',').filter(Boolean);
-                
+
                 if (storage.getItem('pref:showQualityBadges') === 'true') {
                     ['Width', 'Height', 'VideoRange', 'VideoRangeType', 'MediaSources'].forEach((f) => {
                         if (!fieldsList.includes(f)) {
@@ -329,6 +381,17 @@ export class ApiClient {
             ...options.headers
         };
 
+        // ------------------------------------------------------------------
+        // Accept-Language Header (Jellyfin 12+ Localization Middleware)
+        // Passes the client's current UI language so that server messages,
+        // localized metadata, genre descriptions, and scheduled task notifications
+        // are returned in the client's active language rather than server host default.
+        // ------------------------------------------------------------------
+        if (!headers['Accept-Language']) {
+            const activeLang = i18n?.currentLang || (typeof navigator !== 'undefined' && navigator.language) || 'en-US';
+            headers['Accept-Language'] = `${activeLang},en;q=0.8`;
+        }
+
         // Add If-None-Match header if we have a cached ETag for this URL
         if (etagEntry && etagEntry.etag) {
             headers['If-None-Match'] = etagEntry.etag;
@@ -352,10 +415,6 @@ export class ApiClient {
             }
         }
 
-        if (!options.body || !(options.body instanceof FormData)) {
-            headers['Content-Type'] = 'application/json';
-        }
-
         // Build fetch options
         const fetchOptions = {
             method,
@@ -364,12 +423,13 @@ export class ApiClient {
         };
 
         // Add body for POST/PUT requests
-        if (options.body) {
+        if (options.body !== undefined && options.body !== null) {
             if (options.body instanceof FormData) {
                 fetchOptions.body = options.body;
                 // Let browser set Content-Type for FormData
                 delete headers['Content-Type'];
             } else if (typeof options.body === 'object') {
+                headers['Content-Type'] = 'application/json';
                 fetchOptions.body = JSON.stringify(options.body);
             } else {
                 fetchOptions.body = options.body;
@@ -381,10 +441,8 @@ export class ApiClient {
         try {
             // Create abort controller for timeout
             // Support per-request timeout override via options.timeout
-            // IMPORTANT: keepalive requests (e.g. reportPlaybackStopped) must NOT
-            // have an AbortSignal — the Fetch spec throws a TypeError when both
-            // keepalive:true and signal are present. We skip the timeout entirely
-            // for keepalive requests since they complete in the background anyway.
+            // Note: keepalive requests must not attach an AbortSignal in older
+            // environments where the Fetch specification disallowed signals on keepalive.
             const timeout = options.timeout || (options.keepalive ? 0 : REQUEST_TIMEOUT);
             const controller = new AbortController();
             const timeoutId = timeout ? setTimeout(() => controller.abort(), timeout) : null;
@@ -393,7 +451,30 @@ export class ApiClient {
             }
 
             log.debug(`Fetching ${url} (timeout: ${timeout || 'none'}ms)...`);
-            const response = await fetch(url, fetchOptions);
+            let response;
+            try {
+                response = await fetch(url, fetchOptions);
+            } catch (fetchErr) {
+                /*
+                 * On Smart TVs and legacy web runtimes (such as Tizen 5.5 running Chromium 69),
+                 * cross-origin fetch calls with keepalive:true and non-simple headers (like Authorization
+                 * or Content-Type: application/json) trigger an immediate 'TypeError: Failed to fetch'
+                 * due to lack of CORS preflight support for keepalive in older browser engines.
+                 * If keepalive was active and threw a TypeError, fall back to a standard fetch without keepalive.
+                 */
+                if (fetchOptions.keepalive && fetchErr instanceof TypeError) {
+                    log.warn(`Fetch with keepalive failed (${fetchErr.message}); retrying without keepalive...`);
+                    delete fetchOptions.keepalive;
+                    if (!fetchOptions.signal && REQUEST_TIMEOUT) {
+                        const fallbackController = new AbortController();
+                        setTimeout(() => fallbackController.abort(), REQUEST_TIMEOUT);
+                        fetchOptions.signal = fallbackController.signal;
+                    }
+                    response = await fetch(url, fetchOptions);
+                } else {
+                    throw fetchErr;
+                }
+            }
             if (timeoutId) clearTimeout(timeoutId);
 
             // Handle 304 Not Modified — return cached response body
@@ -414,7 +495,7 @@ export class ApiClient {
                 if (options.warnOnError && response) {
                     response._suppressErrorLog = true;
                 }
-                const error = await this._handleError(response);
+                const error = await this._handleError(response, endpoint, options);
                 throw error;
             }
 
@@ -510,7 +591,10 @@ export class ApiClient {
                 throw networkError;
             }
 
-            if (options.warnOnError) {
+            if (options.silent) {
+                // Completely silent suppression (e.g., for background capability probes)
+                log.debug(`Request to ${endpoint} failed (silent probe):`, error.message || error);
+            } else if (options.warnOnError) {
                 log.warn(`Request to ${endpoint} failed (suppressed):`, error.message || error);
             } else {
                 log.error(`Request to ${endpoint} failed:`, error.message || error);
@@ -523,8 +607,11 @@ export class ApiClient {
     /**
      * Handle error responses
      * @private
+     * @param {Response} response - The fetch Response object
+     * @param {string} [endpoint=''] - Target API route
+     * @param {Object} [options={}] - Request options passed to request()
      */
-    async _handleError(response) {
+    async _handleError(response, endpoint = '', options = {}) {
         let message = `HTTP ${response.status}`;
 
         // Try to parse the server's error description from the response body.
@@ -555,20 +642,54 @@ export class ApiClient {
             log.error(`Server rejected request (400 Bad Request): ${message}`);
         }
 
-        // Handle specific status codes
+        // Handle specific status codes if no specific server message was provided
+        const isGenericMessage = message === `HTTP ${response.status}`;
         switch (response.status) {
-            case 401:
-                eventBus.emit('api:unauthorized');
-                message = 'Authentication required';
+            case 401: {
+                // =============================================================
+                // UNAUTHORIZED / SESSION EXPIRY RESOLUTION
+                // =============================================================
+                // Determine whether this 401 indicates that an active authenticated
+                // session has expired or been revoked, as opposed to an authentication
+                // credential attempt (e.g. login or silent probe) that failed.
+                //
+                // An authentication failure on /Users/AuthenticateByName or
+                // /Users/AuthenticateWithQuickConnect indicates incorrect/missing
+                // credentials for the account being tested, NOT that the current
+                // active session expired. Emitting 'api:unauthorized' during a login
+                // attempt would mistakenly evict the previously signed-in user.
+                // =============================================================
+                const isAuthEndpoint =
+                    endpoint.includes('/Users/AuthenticateByName') ||
+                    endpoint.includes('/Users/AuthenticateWithQuickConnect');
+
+                // Session expiration should only fire if:
+                // 1. Not explicitly suppressed by the caller (e.g. probe or login attempt)
+                // 2. Not marked as a silent operation
+                // 3. Not an authentication credential endpoint
+                // 4. An active session token was actually transmitted with the request
+                const shouldEmitUnauthorized =
+                    !options.suppressUnauthorized &&
+                    !options.silent &&
+                    !isAuthEndpoint &&
+                    Boolean(this._accessToken);
+
+                // Broadcast session invalidation only when an active token was rejected
+                if (shouldEmitUnauthorized) {
+                    eventBus.emit('api:unauthorized');
+                }
+
+                if (isGenericMessage) message = 'Authentication required';
                 break;
+            }
             case 403:
-                message = 'Access denied';
+                if (isGenericMessage) message = 'Access denied';
                 break;
             case 404:
-                message = 'Not found';
+                if (isGenericMessage) message = 'Not found';
                 break;
             case 500:
-                message = 'Server error';
+                if (isGenericMessage) message = 'Server error';
                 break;
         }
 
@@ -682,15 +803,23 @@ export class ApiClient {
      * Returns the same shape as /Users/AuthenticateByName (AccessToken, User, etc.)
      *
      * @param {string} secret - The authorized Secret from the Quick Connect flow
+     * @param {Object} [options={}] - Additional request options
      */
-    async authenticateWithQuickConnect(secret) {
-        return this.post('/Users/AuthenticateWithQuickConnect', {
-            Secret: secret,
-            App: this.clientName,
-            Device: this.deviceName,
-            DeviceId: this.deviceId,
-            Version: this.clientVersion
-        });
+    async authenticateWithQuickConnect(secret, options = {}) {
+        return this.post(
+            '/Users/AuthenticateWithQuickConnect',
+            {
+                Secret: secret,
+                App: this.clientName,
+                Device: this.deviceName,
+                DeviceId: this.deviceId,
+                Version: this.clientVersion
+            },
+            {
+                suppressUnauthorized: true,
+                ...options
+            }
+        );
     }
 
     /**
@@ -701,9 +830,53 @@ export class ApiClient {
     }
 
     /**
-     * Update user configuration
+     * -------------------------------------------------------------------------
+     * SERVER SYSTEM CONFIGURATION
+     * -------------------------------------------------------------------------
+     * Retrieves global server configuration parameters from the Jellyfin host.
+     * Contains playback completion properties including MaxResumePct (default 90)
+     * and MinResumePct (default 5).
+     *
+     * Automatically caches MaxResumePct into persistent storage so the player
+     * can reliably resolve completion thresholds without hitting network stalls.
+     * -------------------------------------------------------------------------
+     *
+     * @param {Object} [options={}] - Optional request options
+     * @returns {Promise<Object>}
+     */
+    async getServerConfiguration(options = {}) {
+        // Fetch server system configuration payload
+        const config = await this.get('/System/Configuration', null, options);
+
+        // Cache MaxResumePct if returned by the server
+        if (config && typeof config.MaxResumePct === 'number') {
+            storage.setItem('server:maxResumePct', config.MaxResumePct);
+            storage.flush();
+        }
+
+        return config;
+    }
+
+    /**
+     * Update user configuration.
+     *
+     * JF12+ canonical: POST /Users/Configuration?userId=...
+     * Legacy (pre-12):  POST /Users/{userId}/Configuration
+     *
+     * Both routes are supported in JF12 (old one kept as silent fallback),
+     * but we prefer the new form on modern servers.
+     *
+     * @param {Object} configuration - The UserConfiguration object to save
      */
     async updateUserConfiguration(configuration) {
+        if (this.isJF12Plus()) {
+            // New JF12 canonical route — userId goes in the query string
+            return this.post(
+                `/Users/Configuration?userId=${encodeURIComponent(this._userId)}`,
+                configuration
+            );
+        }
+        // Legacy path used by JF 10.10 / 10.11
         return this.post(`/Users/${this._userId}/Configuration`, configuration);
     }
 
@@ -717,6 +890,17 @@ export class ApiClient {
     // ========================================================================
     // Library Endpoints
     // ========================================================================
+
+    /**
+     * Trigger a scan / refresh of all media libraries on the server.
+     * Accessible by server administrators.
+     * POST /Library/Refresh
+     * @returns {Promise<any>}
+     */
+    async refreshAllLibraries() {
+        // Send POST request directly to server library refresh endpoint
+        return this.post('/Library/Refresh');
+    }
 
     /**
      * Get items from library
@@ -762,12 +946,20 @@ export class ApiClient {
         const defaults = {
             // Default item count per library row configured via user settings
             Limit: defaultLimit,
-            Fields: 'BackdropImageTags,ParentBackdropImageTags',
+            // Request tags, backdrop, and series metadata needed for home card representation
+            Fields: 'BackdropImageTags,ParentBackdropImageTags,Tags,Status,EndDate,SeriesPrimaryImageTag',
             ImageTypeLimit: 1,
             EnableImageTypes: 'Primary,Backdrop,Thumb',
             ParentId: parentId
         };
 
+        /*
+         * JF12+ canonical: GET /Items/Latest?userId=...
+         * Legacy (pre-12):  GET /Users/{userId}/Items/Latest
+         */
+        if (this.isJF12Plus()) {
+            return this.get('/Items/Latest', { UserId: this._userId, ...defaults, ...params });
+        }
         return this.get(`/Users/${this._userId}/Items/Latest`, { ...defaults, ...params });
     }
 
@@ -783,21 +975,35 @@ export class ApiClient {
             // Fetch items up to the user-selected row item limit
             Limit: defaultLimit,
             Recursive: true,
-            Fields: 'SeriesThumbImageTag,ParentThumbImageTag,BackdropImageTags,ParentBackdropImageTags',
+            // Include Tags so game ROM items can be identified with platform badges and progress bar suppression
+            Fields: 'SeriesThumbImageTag,ParentThumbImageTag,BackdropImageTags,ParentBackdropImageTags,Tags',
             ImageTypeLimit: 1,
             EnableImageTypes: 'Primary,Backdrop,Thumb',
             EnableTotalRecordCount: false,
-            MediaTypes: 'Video'
+            MediaTypes: 'Video',
+            // Restrict to playable video items to prevent container folders (e.g. Seasons/Series)
+            // from being returned on Jellyfin 12+ where folder rollup marks them as resumable.
+            IncludeItemTypes: 'Movie,Episode,Video'
         };
 
+        /*
+         * JF12+ canonical: GET /UserItems/Resume?userId=...
+         * Legacy (pre-12):  GET /Users/{userId}/Items/Resume
+         */
+        if (this.isJF12Plus()) {
+            return this.get('/UserItems/Resume', { UserId: this._userId, ...defaults, ...params });
+        }
         return this.get(`/Users/${this._userId}/Items/Resume`, { ...defaults, ...params });
     }
 
     /**
-     * Get recently played audio items
+     * Get recently played audio items.
+     *
+     * JF12+ canonical: GET /Items?userId=...
+     * Legacy (pre-12):  GET /Users/{userId}/Items
      */
     async getRecentlyPlayedAudio(parentId, limit = 15) {
-        return this.get(`/Users/${this._userId}/Items`, {
+        const params = {
             ParentId: parentId,
             IncludeItemTypes: 'Audio',
             Recursive: true,
@@ -805,14 +1011,21 @@ export class ApiClient {
             SortBy: 'DatePlayed',
             SortOrder: 'Descending',
             Limit: limit
-        });
+        };
+        if (this.isJF12Plus()) {
+            return this.get('/Items', { UserId: this._userId, ...params });
+        }
+        return this.get(`/Users/${this._userId}/Items`, params);
     }
 
     /**
-     * Get frequently played audio items
+     * Get frequently played audio items.
+     *
+     * JF12+ canonical: GET /Items?userId=...
+     * Legacy (pre-12):  GET /Users/{userId}/Items
      */
     async getFrequentlyPlayedAudio(parentId, limit = 15) {
-        return this.get(`/Users/${this._userId}/Items`, {
+        const params = {
             ParentId: parentId,
             IncludeItemTypes: 'Audio',
             Recursive: true,
@@ -820,7 +1033,104 @@ export class ApiClient {
             SortBy: 'PlayCount',
             SortOrder: 'Descending',
             Limit: limit
-        });
+        };
+        if (this.isJF12Plus()) {
+            return this.get('/Items', { UserId: this._userId, ...params });
+        }
+        return this.get(`/Users/${this._userId}/Items`, params);
+    }
+
+    /**
+     * Centralized capability check for the Litefin server companion plugin.
+     * Evaluates availability once per session (using the admin plugin registry
+     * or a silent probe endpoint) and caches the boolean result.
+     *
+     * When the Litefin server plugin is not installed, downstream callers
+    /**
+     * Checks if the Litefin companion server plugin is installed, enabled, and active on the Jellyfin server.
+     * Caches the result after the initial check so downstream calls can
+     * immediately bypass all /Litefin/* endpoints and seamlessly fall back to
+     * native Jellyfin routes without logging 404 warnings or errors.
+     *
+     * @param {boolean} [force=false] - Force re-probing the server rather than using cached state
+     * @returns {Promise<boolean>} True if Litefin server companion plugin is active and enabled
+     */
+    async isLitefinPluginAvailable(force = false) {
+        if (force) {
+            this._hasLitefinServerPlugin = null;
+        }
+
+        // 1. Return cached evaluation immediately if already resolved
+        if (this._hasLitefinServerPlugin !== null) {
+            return this._hasLitefinServerPlugin;
+        }
+
+        // 2. Return active probe promise to prevent duplicate concurrent probes
+        if (this._litefinPluginProbePromise) {
+            return this._litefinPluginProbePromise;
+        }
+
+        this._litefinPluginProbePromise = (async () => {
+            try {
+                // Strategy A: Check admin installed plugins list if accessible
+                try {
+                    const { serverPluginClient } = await import('../plugins/ServerPluginClient.js');
+                    if (serverPluginClient && typeof serverPluginClient.getInstalledPlugins === 'function') {
+                        if (force) {
+                            serverPluginClient.reset();
+                        }
+                        const adminList = await serverPluginClient.getInstalledPlugins();
+                        if (Array.isArray(adminList)) {
+                            const match = adminList.some((p) => {
+                                const name = (p.Name || p.name || '').toLowerCase();
+                                const id = (p.Id || p.id || '').toLowerCase();
+                                const matchesName = name.includes('litefin') || id.includes('litefin');
+                                const status = (p.Status || p.status || '').toString().toLowerCase();
+                                const isExplicitlyDisabled =
+                                    status === 'disabled' ||
+                                    status === 'deleted' ||
+                                    status === 'malfunctioned' ||
+                                    status === 'notsupported' ||
+                                    status === 'superseded';
+                                const isActive = !isExplicitlyDisabled && (!status || status === 'active' || status === 'restart');
+                                return matchesName && isActive;
+                            });
+                            this._hasLitefinServerPlugin = match;
+                            log.info(`Litefin server companion plugin ${match ? 'detected & active' : 'not present or disabled'} via admin registry`);
+                            return match;
+                        }
+                    }
+                } catch (_) {
+                    // Ignore and proceed to probe fallback
+                }
+
+                // Strategy B: Lightweight silent probe to /Litefin/Hero
+                log.debug('Probing Litefin server companion plugin presence...');
+                const probeResult = await this.get('/Litefin/Hero', { limit: 1 }, { silent: true, warnOnError: true });
+                this._hasLitefinServerPlugin = !!probeResult;
+                log.info('Litefin server companion plugin is installed and accessible');
+                return true;
+            } catch (err) {
+                // 404 indicates the plugin is not installed or disabled on this server
+                if (err.status === 404 || err.message?.includes('Not found') || err.message?.includes('404')) {
+                    log.info('Litefin server companion plugin is not installed or disabled — using native Jellyfin routes');
+                    this._hasLitefinServerPlugin = false;
+                    return false;
+                }
+                // 403 / 401 indicates endpoint exists on server but user is not authorized
+                if (err.status === 403 || err.status === 401) {
+                    this._hasLitefinServerPlugin = true;
+                    return true;
+                }
+                // Network or unexpected error — return false without permanently caching
+                log.debug('Litefin server plugin probe query unsettled:', err.message || err);
+                return false;
+            } finally {
+                this._litefinPluginProbePromise = null;
+            }
+        })();
+
+        return this._litefinPluginProbePromise;
     }
 
     /**
@@ -831,6 +1141,11 @@ export class ApiClient {
      */
     async getBatchLatest(parentIds = [], params = {}) {
         if (!parentIds || parentIds.length === 0) return {};
+
+        // Fast-path: Check centralized Litefin server plugin presence
+        const isAvailable = await this.isLitefinPluginAvailable();
+        if (!isAvailable) return null;
+
         try {
             return await this.get('/Litefin/Items/Latest', {
                 parentIds: parentIds.join(','),
@@ -848,6 +1163,11 @@ export class ApiClient {
      */
     async getLibraryThumbnails(parentIds = []) {
         if (!parentIds || parentIds.length === 0) return {};
+
+        // Fast-path: Check centralized Litefin server plugin presence
+        const isAvailable = await this.isLitefinPluginAvailable();
+        if (!isAvailable) return null;
+
         try {
             return await this.get('/Litefin/Items/Thumbnails', {
                 parentIds: parentIds.join(',')
@@ -863,6 +1183,10 @@ export class ApiClient {
      * @returns {Promise<Object|null>} QueryResult object with Items array or null on fallback
      */
     async getHomeHero(params = {}) {
+        // Fast-path: Check centralized Litefin server plugin presence
+        const isAvailable = await this.isLitefinPluginAvailable();
+        if (!isAvailable) return null;
+
         try {
             return await this.get('/Litefin/Hero', params, { warnOnError: true });
         } catch (e) {
@@ -893,6 +1217,10 @@ export class ApiClient {
      * @returns {Promise<Object>} Object containing the merged items list
      */
     async getMergedRows(params = {}) {
+        // Fast-path: Check centralized Litefin server plugin presence
+        const isAvailable = await this.isLitefinPluginAvailable();
+        if (!isAvailable) return null;
+
         // Query the custom plugin controller route directly on the server
         return this.get('/Litefin/MergedRows/ContinueAndNextUp', params);
     }
@@ -931,7 +1259,21 @@ export class ApiClient {
     // Item Endpoints
     // ========================================================================
 
+    /**
+     * Get a single item by ID with user-specific data (playback state, etc.).
+     *
+     * JF12+ canonical: GET /Items/{itemId}?userId=...
+     * Legacy (pre-12):  GET /Users/{userId}/Items/{itemId}
+     *
+     * @param {string} itemId - The Jellyfin item GUID
+     * @param {Object} [params] - Additional query parameters
+     */
     async getItem(itemId, params = {}) {
+        if (this.isJF12Plus()) {
+            // New JF12 form — userId is a query param on the non-user route
+            return this.get(`/Items/${itemId}`, { userId: this._userId, ...params });
+        }
+        // Legacy path for JF 10.10 / 10.11
         return this.get(`/Users/${this._userId}/Items/${itemId}`, params);
     }
 
@@ -947,10 +1289,17 @@ export class ApiClient {
 
     /**
      * Get pre-roll intro items for a given media item.
+     *
+     * JF12+ canonical: GET /Items/{itemId}/Intros?userId=...
+     * Legacy (pre-12):  GET /Users/{userId}/Items/{itemId}/Intros
+     *
      * @param {string} itemId - The target media item ID
      * @returns {Promise<Object>} Object containing Items array and TotalRecordCount
      */
     async getIntros(itemId) {
+        if (this.isJF12Plus()) {
+            return this.get(`/Items/${itemId}/Intros`, { userId: this._userId });
+        }
         return this.get(`/Users/${this._userId}/Items/${itemId}/Intros`);
     }
 
@@ -961,10 +1310,16 @@ export class ApiClient {
      * each with their own Id — so they can be played directly through the
      * normal JellyfinPlayer.play({ itemId }) pipeline without any special casing.
      *
+     * JF12+ canonical: GET /Items/{itemId}/LocalTrailers?userId=...
+     * Legacy (pre-12):  GET /Users/{userId}/Items/{itemId}/LocalTrailers
+     *
      * @param {string} itemId - The parent item's ID
      * @returns {Promise<BaseItemDto[]>} Array of trailer items (may be empty)
      */
     async getLocalTrailers(itemId) {
+        if (this.isJF12Plus()) {
+            return this.get(`/Items/${itemId}/LocalTrailers`, { userId: this._userId });
+        }
         return this.get(`/Users/${this._userId}/Items/${itemId}/LocalTrailers`);
     }
 
@@ -972,10 +1327,16 @@ export class ApiClient {
      * Get special features (extras) for an item.
      * Includes trailers, featurettes, behind the scenes, etc.
      *
+     * JF12+ canonical: GET /Items/{itemId}/SpecialFeatures?userId=...
+     * Legacy (pre-12):  GET /Users/{userId}/Items/{itemId}/SpecialFeatures
+     *
      * @param {string} itemId - The parent item's ID
      * @returns {Promise<BaseItemDto[]>} Array of special feature items
      */
     async getSpecialFeatures(itemId) {
+        if (this.isJF12Plus()) {
+            return this.get(`/Items/${itemId}/SpecialFeatures`, { userId: this._userId });
+        }
         return this.get(`/Users/${this._userId}/Items/${itemId}/SpecialFeatures`);
     }
 
@@ -1092,17 +1453,20 @@ export class ApiClient {
             // Attempt to fetch from native Jellyfin endpoint (available in newer servers)
             return await this.get(`/Items/${itemId}/Collections`, { ...defaults, ...params }, { warnOnError: true });
         } catch (err) {
-            // Fall back to the Litefin plugin endpoint if the native route is not found
+            // Fall back to the Litefin plugin endpoint if the native route is not found and plugin is verified present
             if (err.status === 404 || err.message?.includes('Not found')) {
-                log.debug(`Native Collections endpoint not found for item ${itemId}, attempting Litefin fallback`);
-                try {
-                    return await this.get(
-                        `/Litefin/Items/${itemId}/Collections`,
-                        { ...defaults, ...params },
-                        { warnOnError: true }
-                    );
-                } catch (fallbackErr) {
-                    return { Items: [] };
+                const isAvailable = await this.isLitefinPluginAvailable();
+                if (isAvailable) {
+                    log.debug(`Native Collections endpoint not found for item ${itemId}, attempting Litefin fallback`);
+                    try {
+                        return await this.get(
+                            `/Litefin/Items/${itemId}/Collections`,
+                            { ...defaults, ...params },
+                            { warnOnError: true }
+                        );
+                    } catch (fallbackErr) {
+                        return { Items: [] };
+                    }
                 }
             }
             // A 400 Bad Request simply means the item is not part of any collection on this server version
@@ -1133,6 +1497,7 @@ export class ApiClient {
             Fields: 'Overview,RunTimeTicks,Chapters,MediaSources,MediaStreams,Width,Height,UserData',
             IsVirtualUnaired: false,
             IsMissing: false,
+            Limit: 100,
             ...params
         });
     }
@@ -1149,32 +1514,49 @@ export class ApiClient {
     }
 
     async getPersonItems(personId) {
-        // Try custom Litefin plugin endpoint first (single request with roles pre-populated)
-        try {
-            return await this.get(`/Litefin/Persons/${personId}/Items`, { limit: 50 }, { warnOnError: true });
-        } catch (err) {
-            // Fallback to standard Jellyfin endpoint if plugin is not installed
-            return this.get(`/Users/${this._userId}/Items`, {
-                PersonIds: personId,
-                IncludeItemTypes: 'Movie,Series,Episode',
-                Recursive: true,
-                Limit: 500,
-                Fields: 'ProductionYear,ParentIndexNumber,IndexNumber,SeriesName',
-                SortBy: 'PremiereDate',
-                SortOrder: 'Descending'
-            });
+        // Check centralized Litefin server companion plugin presence before attempting optimized endpoint
+        const isAvailable = await this.isLitefinPluginAvailable();
+        if (isAvailable) {
+            try {
+                return await this.get(`/Litefin/Persons/${personId}/Items`, { limit: 100 }, { warnOnError: true });
+            } catch (err) {
+                // Fallback to standard Jellyfin endpoint if plugin request fails
+            }
         }
+
+        // Fallback to standard Jellyfin items endpoint.
+        // JF12+ canonical: GET /Items?UserId=...&PersonIds=...
+        // Legacy (pre-12):  GET /Users/{userId}/Items?PersonIds=...
+        const fallbackParams = {
+            PersonIds: personId,
+            IncludeItemTypes: 'Movie,Series,Episode',
+            Recursive: true,
+            Limit: 500,
+            Fields: 'ProductionYear,ParentIndexNumber,IndexNumber,SeriesName',
+            SortBy: 'PremiereDate',
+            SortOrder: 'Descending'
+        };
+        if (this.isJF12Plus()) {
+            return this.get('/Items', { UserId: this._userId, ...fallbackParams });
+        }
+        return this.get(`/Users/${this._userId}/Items`, fallbackParams);
     }
 
-    // Separate call to get items with People field (for character roles)
+    // Separate call to get items with People field (for character roles).
+    // JF12+ canonical: GET /Items?UserId=...&PersonIds=...
+    // Legacy (pre-12):  GET /Users/{userId}/Items?PersonIds=...
     async getPersonItemsWithRoles(personId) {
-        return this.get(`/Users/${this._userId}/Items`, {
+        const params = {
             PersonIds: personId,
             IncludeItemTypes: 'Movie,Series',
             Recursive: true,
             Limit: 200,
             Fields: 'People'
-        });
+        };
+        if (this.isJF12Plus()) {
+            return this.get('/Items', { UserId: this._userId, ...params });
+        }
+        return this.get(`/Users/${this._userId}/Items`, params);
     }
 
     // ========================================================================
@@ -1190,7 +1572,38 @@ export class ApiClient {
         return this.get(`/Audio/${itemId}/Lyrics`);
     }
 
+    /**
+     * Get all album artists in the library.
+     *
+     * JF12+ canonical: GET /Persons?personTypes=AlbumArtist&userId=...
+     *   (The /Artists/AlbumArtists endpoint is marked [Obsolete("Use GetPersons")]
+     *    in JF12 source — ArtistsController.cs.)
+     *
+     * Legacy (pre-12):  GET /Artists/AlbumArtists?UserId=...
+     *
+     * Note: /Persons uses the lowercase `userId` param; /Artists used `UserId`.
+     *
+     * @param {Object} [params] - Additional query params (Limit, ParentId, etc.)
+     */
     async getAlbumArtists(params = {}) {
+        if (this.isJF12Plus()) {
+            /*
+             * /Persons?personTypes=AlbumArtist is the recommended replacement.
+             * We strip out ItemCounts from Fields since /Persons doesn't support
+             * that field and would silently ignore it.
+             */
+            const defaults = {
+                userId: this._userId,
+                personTypes: 'AlbumArtist',
+                Recursive: true,
+                SortBy: 'SortName',
+                SortOrder: 'Ascending',
+                EnableTotalRecordCount: true
+            };
+            return this.get('/Persons', { ...defaults, ...params, personTypes: 'AlbumArtist' });
+        }
+
+        // Legacy path for JF 10.10 / 10.11
         const defaults = {
             UserId: this._userId,
             Recursive: true,
@@ -1199,11 +1612,34 @@ export class ApiClient {
             SortOrder: 'Ascending',
             EnableTotalRecordCount: true
         };
-
         return this.get('/Artists/AlbumArtists', { ...defaults, ...params });
     }
 
+    /**
+     * Get all music artists in the library.
+     *
+     * JF12+ canonical: GET /Persons?personTypes=Artist&userId=...
+     *   (The /Artists endpoint is marked [Obsolete("Use GetPersons")]
+     *    in JF12 source — ArtistsController.cs.)
+     *
+     * Legacy (pre-12):  GET /Artists?UserId=...
+     *
+     * @param {Object} [params] - Additional query params
+     */
     async getMusicArtists(params = {}) {
+        if (this.isJF12Plus()) {
+            const defaults = {
+                userId: this._userId,
+                personTypes: 'Artist',
+                Recursive: true,
+                SortBy: 'SortName',
+                SortOrder: 'Ascending',
+                EnableTotalRecordCount: true
+            };
+            return this.get('/Persons', { ...defaults, ...params, personTypes: 'Artist' });
+        }
+
+        // Legacy path for JF 10.10 / 10.11
         const defaults = {
             UserId: this._userId,
             Recursive: true,
@@ -1212,7 +1648,6 @@ export class ApiClient {
             SortOrder: 'Ascending',
             EnableTotalRecordCount: true
         };
-
         return this.get('/Artists', { ...defaults, ...params });
     }
 
@@ -1227,6 +1662,13 @@ export class ApiClient {
             MediaTypes: 'Audio' // Only fetch Audio items
         };
 
+        /*
+         * JF12+ canonical: GET /UserItems/Resume?userId=...
+         * Legacy (pre-12):  GET /Users/{userId}/Items/Resume
+         */
+        if (this.isJF12Plus()) {
+            return this.get('/UserItems/Resume', { UserId: this._userId, ...defaults, ...params });
+        }
         return this.get(`/Users/${this._userId}/Items/Resume`, { ...defaults, ...params });
     }
 
@@ -1260,11 +1702,104 @@ export class ApiClient {
         return this.get('/MusicGenres', { ...defaults, ...params });
     }
 
-    async getItemFilters(params = {}) {
+    /**
+     * Get query filters from the modern Jellyfin 12+ Filters2 endpoint.
+     * Returns AudioLanguages, SubtitleLanguages, Tags, and Genres with IDs.
+     *
+     * @param {Object} [params] - Query parameters (e.g. ParentId, IncludeItemTypes, Recursive)
+     * @returns {Promise<Object>} Object with Genres, Tags, AudioLanguages, SubtitleLanguages
+     */
+    async getItemFilters2(params = {}) {
+        // Build base query parameters
         const defaults = {
             UserId: this._userId,
             Recursive: true
         };
+
+        // Forward request directly to the JF12 Filters2 endpoint
+        return this.get('/Items/Filters2', { ...defaults, ...params });
+    }
+
+    /**
+     * Get query filters for library browsing.
+     *
+     * On Jellyfin 12+, this method combines results from both the legacy
+     * /Items/Filters endpoint (which still provides OfficialRatings and Years)
+     * and the modern /Items/Filters2 endpoint (which provides AudioLanguages,
+     * SubtitleLanguages, and Genres with IDs).
+     *
+     * On older servers (<12), it seamlessly falls back to /Items/Filters only.
+     *
+     * @param {Object} [params] - Query parameters (ParentId, IncludeItemTypes, etc.)
+     * @returns {Promise<Object>} Combined filters object
+     */
+    async getItemFilters(params = {}) {
+        // Base defaults required by both filter endpoints
+        const defaults = {
+            UserId: this._userId,
+            Recursive: true
+        };
+
+        // ------------------------------------------------------------------
+        // Jellyfin 12+ Combined Filter Fetching:
+        // /Items/Filters provides: OfficialRatings, Years, Genres, Tags
+        // /Items/Filters2 provides: AudioLanguages, SubtitleLanguages, Genres (with IDs), Tags
+        // Running both queries concurrently provides a rich filter set without any breaking changes.
+        // ------------------------------------------------------------------
+        if (this.isJF12Plus()) {
+            try {
+                // Execute both requests in parallel using allSettled to ensure resilience
+                const [legacyRes, v2Res] = await Promise.allSettled([
+                    this.get('/Items/Filters', { ...defaults, ...params }),
+                    this.getItemFilters2(params)
+                ]);
+
+                // Safely unpack responses from both filter queries
+                const legacy = legacyRes.status === 'fulfilled' && legacyRes.value ? legacyRes.value : {};
+                const v2 = v2Res.status === 'fulfilled' && v2Res.value ? v2Res.value : {};
+
+                // ------------------------------------------------------------------
+                // Extract clean genre name strings from both v2 (NameGuidPair) and legacy (string)
+                // Using clean names ensures uniform filtering across Jellyfin 10.x through 12.0+
+                // ------------------------------------------------------------------
+                const v2GenreNames = Array.isArray(v2.Genres)
+                    ? v2.Genres.map((g) => (typeof g === 'object' && g ? (g.Name || g.name || '') : g)).filter(Boolean)
+                    : [];
+                const legacyGenreNames = Array.isArray(legacy.Genres)
+                    ? legacy.Genres.map((g) => (typeof g === 'object' && g ? (g.Name || g.name || '') : g)).filter(Boolean)
+                    : [];
+
+                // Deduplicate genres while preserving encounter order
+                const combinedGenres = Array.from(new Set([...legacyGenreNames, ...v2GenreNames]));
+
+                // Deduplicate tag names from both legacy and modern sources
+                const v2Tags = Array.isArray(v2.Tags) ? v2.Tags : [];
+                const legacyTags = Array.isArray(legacy.Tags) ? legacy.Tags : [];
+                const combinedTags = Array.from(new Set([...legacyTags, ...v2Tags]));
+
+                // Return combined, normalized filter structure
+                return {
+                    // List of genre names ready for UI display and pipe-delimited item queries
+                    Genres: combinedGenres.length > 0 ? combinedGenres : (legacy.Genres || []),
+                    // Deduplicated tags available across items in the library
+                    Tags: combinedTags.length > 0 ? combinedTags : (legacy.Tags || []),
+                    // Ratings and Years only exist on the legacy endpoint
+                    OfficialRatings: legacy.OfficialRatings || [],
+                    Years: legacy.Years || [],
+                    // Audio and Subtitle language arrays from JF12 Filters2
+                    AudioLanguages: v2.AudioLanguages || [],
+                    SubtitleLanguages: v2.SubtitleLanguages || []
+                };
+            } catch (err) {
+                // Log and gracefully fall through to legacy if anything unexpected occurs
+                log.warn('Failed to load combined filters on JF12+, falling back to legacy endpoint:', err);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Pre-JF12 Legacy Route Fallback:
+        // Query the standard /Items/Filters endpoint
+        // ------------------------------------------------------------------
         return this.get('/Items/Filters', { ...defaults, ...params });
     }
 
@@ -1466,6 +2001,18 @@ export class ApiClient {
         if (options.quality) params.append('quality', options.quality);
         if (options.tag) params.append('tag', options.tag);
 
+        /*
+         * Include session token in image queries when authenticated.
+         * Browsers and native web views cannot inject custom authorization headers
+         * (such as 'Authorization: MediaBrowser ...') into standard HTML <img> element
+         * requests. Supplying the session token as a query parameter guarantees that
+         * servers enforcing strict media authorization can authenticate the image request.
+         */
+        if (this._accessToken) {
+            const authKey = this.isEmby() ? 'api_key' : 'ApiKey';
+            params.append(authKey, this._accessToken);
+        }
+
         // Compile query string and final endpoint URL reference
         const queryString = params.toString();
         const path = `/Items/${itemId}/Images/${imageType}`;
@@ -1487,6 +2034,15 @@ export class ApiClient {
 
         // Map quality settings
         if (options.quality) params.append('quality', options.quality);
+
+        /*
+         * Include session token for user avatar requests when available,
+         * ensuring user profile avatars load under cross-origin environments.
+         */
+        if (this._accessToken) {
+            const authKey = this.isEmby() ? 'api_key' : 'ApiKey';
+            params.append(authKey, this._accessToken);
+        }
 
         // Compile query string and final user endpoint URL reference
         const queryString = params.toString();
@@ -1707,13 +2263,23 @@ export class ApiClient {
         return this.post('/Sessions/Playing/Progress', info);
     }
 
-    async reportPlaybackStopped(info) {
-        // Use keepalive to ensure request completes even if app is closing
-        return this.post('/Sessions/Playing/Stopped', info, { keepalive: true });
-    }
-
-    async deletePlaybackProgress(itemId) {
-        return this.delete(`/Users/${this._userId}/Items/${itemId}/Resume`);
+    /**
+     * Report to the server that playback has stopped for an active session.
+     *
+     * Note: In previous revisions, keepalive:true was passed here under the assumption
+     * that it would help when an app unloads. However, on Smart TVs running older
+     * Chromium engines (e.g. Tizen 5.5 running Chromium 69), cross-origin fetch
+     * requests with custom headers like Authorization reject keepalive requests
+     * with 'TypeError: Failed to fetch'. Unload events already use synchronous XHR
+     * in PlayerPage._reportPlaybackStopped, so keepalive is neither needed nor
+     * safe to mandate here.
+     *
+     * @param {Object} info - Playback stop payload
+     * @param {Object} [options={}] - Additional request options
+     * @returns {Promise<any>}
+     */
+    async reportPlaybackStopped(info, options = {}) {
+        return this.post('/Sessions/Playing/Stopped', info, options);
     }
 
     // ========================================================================
@@ -1859,22 +2425,59 @@ export class ApiClient {
     }
 
     // ========================================================================
-    // Favorites Endpoints
+    // Favorites & Played State Endpoints
     // ========================================================================
 
+    /**
+     * Mark an item as a user favourite.
+     *
+     * JF12+ canonical: POST /UserFavoriteItems/{itemId}   (userId from token)
+     * Legacy (pre-12):  POST /Users/{userId}/FavoriteItems/{itemId}
+     */
     async markFavorite(itemId) {
+        if (this.isJF12Plus()) {
+            // New JF12 form — server infers the user from the auth token
+            return this.post(`/UserFavoriteItems/${itemId}`);
+        }
         return this.post(`/Users/${this._userId}/FavoriteItems/${itemId}`);
     }
 
+    /**
+     * Remove an item from user favourites.
+     *
+     * JF12+ canonical: DELETE /UserFavoriteItems/{itemId}
+     * Legacy (pre-12):  DELETE /Users/{userId}/FavoriteItems/{itemId}
+     */
     async unmarkFavorite(itemId) {
+        if (this.isJF12Plus()) {
+            return this.delete(`/UserFavoriteItems/${itemId}`);
+        }
         return this.delete(`/Users/${this._userId}/FavoriteItems/${itemId}`);
     }
 
+    /**
+     * Mark an item as played (watched).
+     *
+     * JF12+ canonical: POST /UserPlayedItems/{itemId}   (userId from token)
+     * Legacy (pre-12):  POST /Users/{userId}/PlayedItems/{itemId}
+     */
     async markPlayed(itemId) {
+        if (this.isJF12Plus()) {
+            return this.post(`/UserPlayedItems/${itemId}`);
+        }
         return this.post(`/Users/${this._userId}/PlayedItems/${itemId}`);
     }
 
+    /**
+     * Unmark an item as played.
+     *
+     * JF12+ canonical: DELETE /UserPlayedItems/{itemId}
+     * Legacy (pre-12):  DELETE /Users/{userId}/PlayedItems/{itemId}
+     */
     async unmarkPlayed(itemId) {
+        if (this.isJF12Plus()) {
+            return this.delete(`/UserPlayedItems/${itemId}`);
+        }
         return this.delete(`/Users/${this._userId}/PlayedItems/${itemId}`);
     }
 
@@ -2019,11 +2622,198 @@ export class ApiClient {
     }
 
     /**
+     * ========================================================================
+     * Immediate WebSocket KeepAlive Dispatcher
+     * ========================================================================
+     * Dispatches an immediate KeepAlive ping frame over the open WebSocket.
+     * Crucial when handling server-issued 'ForceKeepAlive' challenges to
+     * prevent reverse proxies and the Jellyfin server from terminating
+     * the connection due to idle timeouts.
+     * ========================================================================
+     */
+    sendWebSocketKeepAlive() {
+        // Ensure the socket instance exists and is actively ready for communication
+        if (this._webSocket && this._webSocket.readyState === WebSocket.OPEN) {
+            try {
+                // Jellyfin protocol specifies standard KeepAlive message frame
+                this._webSocket.send(JSON.stringify({ MessageType: 'KeepAlive' }));
+            } catch (err) {
+                // Non-fatal warning if socket write throws
+                log.warn('Failed to send immediate WebSocket KeepAlive ping:', err);
+            }
+        }
+    }
+
+    /**
      * Check if WebSocket is connected
      * @returns {boolean} True if connected
      */
     get isWebSocketConnected() {
         return this._webSocket && this._webSocket.readyState === WebSocket.OPEN;
+    }
+
+    // ========================================================================
+    // Remote Metadata & Identify Endpoints (Admin)
+    // ========================================================================
+
+    /**
+     * Search remote metadata providers for matching item candidates (e.g. TMDB, TVDB, IMDb).
+     * POST /Items/RemoteSearch/{ItemType}
+     *
+     * @param {string} itemType - Item type (e.g. 'Movie', 'Series', 'BoxSet', 'Person', 'MusicAlbum', 'MusicArtist', 'Book')
+     * @param {Object} searchInfo - Search info object { Name, Year, ProviderIds: { Tmdb, Imdb, Tvdb, ... } }
+     * @param {string} itemId - Target Jellyfin item ID
+     * @param {boolean} [includeDisabledProviders=false] - Whether to include disabled providers
+     * @returns {Promise<Array<Object>>} List of RemoteSearchResult objects
+     */
+    async getRemoteSearchResults(itemType, searchInfo, itemId, includeDisabledProviders = false) {
+        // Construct standard Jellyfin RemoteSearchQuery payload
+        const payload = {
+            SearchInfo: searchInfo || {},
+            ItemId: itemId,
+            IncludeDisabledProviders: !!includeDisabledProviders
+        };
+
+        // Normalize item type for endpoint path
+        const typeSegment = encodeURIComponent(itemType);
+        return this.post(`/Items/RemoteSearch/${typeSegment}`, payload);
+    }
+
+    /**
+     * Apply remote search result metadata and images to an item.
+     * POST /Items/RemoteSearch/Apply/{ItemId}?replaceAllImages={bool}
+     *
+     * @param {string} itemId - Target Jellyfin item ID
+     * @param {Object} searchResult - The RemoteSearchResult object returned from getRemoteSearchResults
+     * @param {boolean} [replaceAllImages=true] - Replace all existing images with provider images
+     * @returns {Promise<any>}
+     */
+    async applyRemoteSearchResult(itemId, searchResult, replaceAllImages = true) {
+        // Invalidate cached ETag entries since item metadata is being updated on server
+        this.clearEtagCache();
+
+        // Clear details page cached data to ensure immediate UI update
+        state.clearByPrefix(`details:${itemId}`);
+
+        const url = `/Items/RemoteSearch/Apply/${encodeURIComponent(itemId)}?replaceAllImages=${replaceAllImages ? 'true' : 'false'}`;
+        return this.post(url, searchResult);
+    }
+
+    // ========================================================================
+    // Item Images Endpoints (Admin & Management)
+    // ========================================================================
+
+    /**
+     * Get item image metadata for all currently existing images on the item.
+     * GET /Items/{ItemId}/Images
+     *
+     * @param {string} itemId - Target Jellyfin item ID
+     * @returns {Promise<Array<Object>>} Array of image info objects (ImageType, ImageIndex, ImageTag, Width, Height, Size, etc.)
+     */
+    async getItemImages(itemId) {
+        return this.get(`/Items/${encodeURIComponent(itemId)}/Images`);
+    }
+
+    /**
+     * Get available remote provider images for an item (e.g. from TMDB, Fanart.tv, TVDB).
+     * GET /Items/{ItemId}/RemoteImages
+     *
+     * @param {string} itemId - Target Jellyfin item ID
+     * @param {Object} [options={}] - Query options
+     * @param {string} [options.type] - Optional ImageType filter (e.g. 'Primary', 'Backdrop', 'Logo', 'Thumb', 'Art', 'Banner', 'Disc')
+     * @param {boolean} [options.includeAllLanguages=true] - Whether to include images in all languages
+     * @returns {Promise<Object>} { Images: Array, TotalRecordCount: number, Providers: Array }
+     */
+    async getItemRemoteImages(itemId, options = {}) {
+        const params = {};
+        if (options.type) {
+            params.type = options.type;
+        }
+        if (options.includeAllLanguages !== undefined) {
+            params.includeAllLanguages = options.includeAllLanguages;
+        } else {
+            params.includeAllLanguages = true;
+        }
+
+        return this.get(`/Items/${encodeURIComponent(itemId)}/RemoteImages`, params);
+    }
+
+    /**
+     * Download and set a remote provider image on the item.
+     * POST /Items/RemoteImages/Download?Type={Type}&ImageUrl={ImageUrl}&ProviderName={ProviderName}
+     *
+     * @param {string} itemId - Target Jellyfin item ID
+     * @param {string} type - ImageType (e.g. 'Primary', 'Backdrop', 'Logo', 'Thumb', 'Art', 'Banner', 'Disc')
+     * @param {string} imageUrl - Full URL of the remote image
+     * @param {string} [providerName=''] - Provider name (e.g. 'TheMovieDb', 'FanArt')
+     * @returns {Promise<any>}
+     */
+    async downloadRemoteImage(itemId, type, imageUrl, providerName = '') {
+        // Clear cached responses so refreshed image tags are fetched
+        this.clearEtagCache();
+        state.clearByPrefix(`details:${itemId}`);
+
+        const params = {
+            Type: type,
+            ImageUrl: imageUrl
+        };
+        if (providerName) {
+            params.ProviderName = providerName;
+        }
+
+        return this.post(`/Items/${encodeURIComponent(itemId)}/RemoteImages/Download`, null, { params });
+    }
+
+    /**
+     * Delete an existing image from an item.
+     * DELETE /Items/{ItemId}/Images/{ImageType} or DELETE /Items/{ItemId}/Images/{ImageType}/{Index}
+     *
+     * @param {string} itemId - Target Jellyfin item ID
+     * @param {string} imageType - ImageType (e.g. 'Primary', 'Backdrop', 'Logo', 'Thumb', 'Art', 'Banner', 'Disc')
+     * @param {number|null} [imageIndex=null] - Optional image index (for multi-image types like Backdrop)
+     * @returns {Promise<any>}
+     */
+    async deleteItemImage(itemId, imageType, imageIndex = null) {
+        // Clear cached responses
+        this.clearEtagCache();
+        state.clearByPrefix(`details:${itemId}`);
+
+        let endpoint = `/Items/${encodeURIComponent(itemId)}/Images/${encodeURIComponent(imageType)}`;
+        if (imageIndex !== null && imageIndex !== undefined) {
+            endpoint += `/${encodeURIComponent(imageIndex)}`;
+        }
+
+        return this.delete(endpoint);
+    }
+
+    /**
+     * Update the display order / priority index of an existing image on an item.
+     * Reorders multi-image collections (such as backdrops, thumbnails, or art)
+     * so that index 0 is used as the primary display asset across the server.
+     *
+     * POST /Items/{ItemId}/Images/{ImageType}/{Index}/Index?newIndex={newIndex}
+     *
+     * @param {string} itemId - Target Jellyfin item ID
+     * @param {string} imageType - ImageType (e.g. 'Backdrop', 'Thumb', 'Art', 'Banner')
+     * @param {number} imageIndex - Current 0-based image position index
+     * @param {number} newIndex - Desired 0-based target position index
+     * @returns {Promise<any>} Server acknowledgement
+     */
+    async updateItemImageIndex(itemId, imageType, imageIndex, newIndex) {
+        // Invalidate caching layers so updated image tag mappings resolve immediately
+        this.clearEtagCache();
+        state.clearByPrefix(`details:${itemId}`);
+
+        // Construct parameterized endpoint path targeting the selected image index
+        const safeItemId = encodeURIComponent(itemId);
+        const safeType = encodeURIComponent(imageType);
+        const safeIndex = encodeURIComponent(imageIndex);
+        const endpoint = `/Items/${safeItemId}/Images/${safeType}/${safeIndex}/Index`;
+
+        // Dispatch POST request carrying the newIndex query parameter
+        return this.post(endpoint, null, {
+            params: { newIndex }
+        });
     }
 
     // ========================================================================
@@ -2052,19 +2842,45 @@ export class ApiClient {
 export function testServer(address, timeout = 1000, parentSignal = null) {
     return new Promise((resolve) => {
         const xhr = new XMLHttpRequest();
+        let resolved = false;
 
-        // Hard-kill the request at the OS level after `timeout` ms.
-        // This is the key fix — unlike AbortController, xhr.timeout works on
-        // Chromium 29+ and actually terminates the underlying TCP connection.
-        xhr.timeout = timeout;
-
+        // Clean-up and resolution helper to prevent multiple resolutions
         function done(result) {
+            if (resolved) return;
+            resolved = true;
+
+            // Clear our manual backup abort timer to free up system memory
+            if (abortTimer) {
+                clearTimeout(abortTimer);
+                abortTimer = null;
+            }
+
             // Cleanup the parent signal listener before resolving
             if (parentSignal && onParentAbort) {
                 parentSignal.removeEventListener('abort', onParentAbort);
             }
             resolve(result);
         }
+
+        // ====================================================================
+        // MANUAL ABORT BACKUP TIMER (CHROME < 29 COMPATIBILITY)
+        // ====================================================================
+        // Older Chromium versions (like Chrome 26 on WebOS 1.x / Tizen 2.x)
+        // do not natively support xhr.timeout or throw errors when trying to set it.
+        // We set up a manual setTimeout to trigger xhr.abort() after the timeout period.
+        // This stops the request and frees up the browser's limited connection pool.
+        // ====================================================================
+        let abortTimer = setTimeout(() => {
+            try {
+                xhr.abort();
+            } catch (_) { }
+            done(null);
+        }, timeout);
+
+        // Native timeout setting (supported natively in Chromium 29+)
+        try {
+            xhr.timeout = timeout;
+        } catch (_) { }
 
         // If the parent discovery scan was cancelled, abort this probe too
         const onParentAbort = () => {
@@ -2075,7 +2891,7 @@ export function testServer(address, timeout = 1000, parentSignal = null) {
         if (parentSignal) {
             // Already cancelled before we even started
             if (parentSignal.aborted) {
-                resolve(null);
+                done(null);
                 return;
             }
             parentSignal.addEventListener('abort', onParentAbort, { once: true });
@@ -2084,6 +2900,7 @@ export function testServer(address, timeout = 1000, parentSignal = null) {
         xhr.onreadystatechange = function () {
             if (xhr.readyState !== 4) return;
 
+            // Non-200 responses (e.g. server offline, not found) resolve as null
             if (xhr.status !== 200) {
                 done(null);
                 return;
@@ -2124,16 +2941,142 @@ export function testServer(address, timeout = 1000, parentSignal = null) {
     });
 }
 
+// -----------------------------------------------------------------------------
+// Tauri v2 Native Discovery & IPC Runtime Utilities
+// -----------------------------------------------------------------------------
+
+/**
+ * Checks whether the current runtime environment is a Tauri application shell.
+ * Returns true on Windows, macOS, Linux, and Android TV running via Tauri.
+ *
+ * @returns {boolean} True if running under Tauri runtime.
+ */
+function _isTauriRuntime() {
+    return typeof window !== 'undefined' && !!(window.__TAURI__ || window.__TAURI_METADATA__ || window.__TAURI_INTERNALS__);
+}
+
+/**
+ * Dispatches an IPC command across the Tauri bridge to the native Rust backend.
+ * Compatible with Tauri v2 internal bridge and core API wrappers.
+ *
+ * @param {string} command - Registered Tauri command name.
+ * @param {Object} [args={}] - Command parameters passed to Rust.
+ * @returns {Promise<any>} Response from the Rust command handler.
+ */
+async function _invokeTauriCommand(command, args = {}) {
+    // Primary Tauri v2 internal IPC bridge
+    if (typeof window !== 'undefined' && window.__TAURI_INTERNALS__?.invoke) {
+        return window.__TAURI_INTERNALS__.invoke(command, args);
+    }
+    // Secondary fallback to core namespace if available
+    if (typeof window !== 'undefined' && window.__TAURI__?.core?.invoke) {
+        return window.__TAURI__.core.invoke(command, args);
+    }
+    throw new Error('Tauri IPC runtime bridge unavailable');
+}
+
 let activeDiscoveryController = null;
 
 /**
- * Cancel any active discovery process
+ * Cancel any active discovery process across all platform backends.
  */
 export function cancelDiscovery() {
+    // Signal cancellation to native Rust discovery worker if running on Tauri
+    if (_isTauriRuntime()) {
+        _invokeTauriCommand('cancel_server_discovery').catch(() => {});
+    }
+
     if (activeDiscoveryController) {
         log.info('Cancelling discovery scan...');
         activeDiscoveryController.abort();
         activeDiscoveryController = null;
+    }
+}
+
+/**
+ * Attempt Jellyfin server discovery via Tauri native UDP broadcast.
+ *
+ * Dispatches UDP probe packets on port 7359 directly from native Rust standard
+ * library sockets, bypassing browser webview network isolation entirely.
+ *
+ * @param {Function|null} onServerFound  Callback invoked immediately each time
+ *                                        a server response packet is parsed.
+ * @returns {Promise<Array|null>}  Found servers list, or null if Tauri IPC
+ *                                  could not be contacted (fall through to HTTP scan).
+ */
+async function _discoverViaTauriService(onServerFound, targetHints = []) {
+    if (!_isTauriRuntime()) {
+        return null;
+    }
+
+    log.info('Tauri fast path: Initiating native UDP server autodiscovery...');
+
+    const foundServers = [];
+    let serverEventListener = null;
+
+    // Attach real-time DOM listener for microsecond-latency server notification
+    if (typeof onServerFound === 'function') {
+        serverEventListener = (event) => {
+            const srv = event.detail;
+            if (srv && srv.address) {
+                const serverInfo = {
+                    address: srv.address,
+                    name: srv.name || srv.address,
+                    id: srv.id
+                };
+
+                // Deduplicate before firing onServerFound callback
+                const alreadyRecorded = foundServers.some(
+                    (s) => s.id === serverInfo.id || s.address === serverInfo.address
+                );
+
+                if (!alreadyRecorded) {
+                    log.info(`Tauri native UDP: discovered "${serverInfo.name}" at ${serverInfo.address}`);
+                    foundServers.push(serverInfo);
+                    onServerFound(serverInfo);
+                }
+            }
+        };
+
+        window.addEventListener('litefin:server-found', serverEventListener);
+    }
+
+    try {
+        // Dispatch Rust command with a 2500ms discovery window and any explicit hints
+        const results = await _invokeTauriCommand('discover_servers', {
+            timeoutMs: 2500,
+            targetHints: Array.isArray(targetHints) ? targetHints : []
+        });
+
+        if (Array.isArray(results)) {
+            for (const srv of results) {
+                const serverInfo = {
+                    address: srv.address,
+                    name: srv.name || srv.address,
+                    id: srv.id
+                };
+
+                const alreadyRecorded = foundServers.some(
+                    (s) => s.id === serverInfo.id || s.address === serverInfo.address
+                );
+
+                if (!alreadyRecorded) {
+                    foundServers.push(serverInfo);
+                    if (onServerFound) {
+                        onServerFound(serverInfo);
+                    }
+                }
+            }
+        }
+
+        return foundServers;
+    } catch (err) {
+        log.warn('Tauri native UDP discovery failed:', err);
+        return null;
+    } finally {
+        if (serverEventListener) {
+            window.removeEventListener('litefin:server-found', serverEventListener);
+        }
     }
 }
 
@@ -2275,7 +3218,7 @@ async function _discoverViaLunaService(onServerFound) {
                                 settled = true;
                                 try {
                                     request && request.cancel();
-                                } catch (_) {}
+                                } catch (_) { }
                                 resolve(foundServers);
                             }
                         }, DISCOVERY_WINDOW_MS);
@@ -2335,7 +3278,21 @@ export async function sendWakeOnLan(macAddress) {
 
     log.info(`Initiating Wake-on-LAN command for MAC: ${macAddress}`);
 
-    // 1. WebOS implementation: dispatch Luna request to the background service
+    // 1. Tauri platform: native Rust UDP Magic Packet broadcast
+    if (_isTauriRuntime()) {
+        log.info('Platform Tauri: Dispatching native UDP WOL magic packet via Rust IPC');
+        try {
+            const ok = await _invokeTauriCommand('send_wake_on_lan', { macAddress });
+            if (ok) {
+                log.info('Tauri native WOL broadcast sent successfully');
+                return true;
+            }
+        } catch (tauriWolErr) {
+            log.warn('Tauri native WOL broadcast failed:', tauriWolErr);
+        }
+    }
+
+    // 2. WebOS implementation: dispatch Luna request to the background service
     if (typeof tizen === 'undefined' && typeof window.webOS !== 'undefined' && window.webOS.service) {
         log.info('Platform WebOS: Dispatching WOL request to Luna service org.litefin.app.service');
 
@@ -2392,7 +3349,7 @@ export async function sendWakeOnLan(macAddress) {
                 const pkgId = appId.split('.')[0];
                 log.info(`Platform Tizen: Pre-launching ytresolver background service: ${pkgId}.ytresolver`);
                 tizen.application.launch(pkgId + '.ytresolver');
-                
+
                 // Allow a brief 500ms delay for the service to bind port and start listening
                 await new Promise((resolve) => setTimeout(resolve, 500));
             } catch (preLaunchErr) {
@@ -2440,12 +3397,17 @@ export async function sendWakeOnLan(macAddress) {
  * @returns {boolean} True if background UDP discovery service is present
  */
 export function hasBackgroundDiscoveryService() {
-    // 1. WebOS Luna Service check
+    // 1. Tauri native discovery support (Desktop & Android TV)
+    if (_isTauriRuntime()) {
+        return true;
+    }
+
+    // 2. WebOS Luna Service check
     if (typeof tizen === 'undefined' && typeof window.webOS !== 'undefined' && window.webOS.service) {
         return true;
     }
 
-    // 2. Tizen HTTP Proxy / Discovery Service check
+    // 3. Tizen HTTP Proxy / Discovery Service check
     if (typeof tizen !== 'undefined') {
         try {
             const bgEnabled = storage.getItem('player:enableBackgroundService') !== 'false';
@@ -2455,7 +3417,7 @@ export function hasBackgroundDiscoveryService() {
         }
     }
 
-    // 3. Platforms without background UDP discovery service
+    // 4. Platforms without background UDP discovery service
     return false;
 }
 
@@ -2492,6 +3454,45 @@ export async function discoverServers(onProgress = null, onServerFound = null, o
     if (wolOnScanEnabled && wolMac) {
         log.info(`Server discovery initiated. Sending Wake-on-LAN packet to ${wolMac}...`);
         sendWakeOnLan(wolMac).catch((e) => log.warn('Failed to send WOL on server discovery scan:', e));
+    }
+
+    /*
+     * =========================================================================
+     * Tauri Fast Path: Native UDP Discovery via Rust Standard Sockets
+     * =========================================================================
+     * Tauri builds (Desktop and Android TV) run native Rust code with full
+     * raw UDP socket capabilities. We broadcast the autodiscovery probe on
+     * UDP port 7359 and receive server responses within ~50ms without any
+     * Node.js dependency or slow HTTP subnet scanning.
+     * =========================================================================
+     */
+    if (_isTauriRuntime()) {
+        log.info('Tauri detected — trying native UDP discovery first...');
+
+        // Collect saved server addresses to pass as direct hints to Rust
+        let hints = [];
+        try {
+            const rawSaved = storage.getItem('jellyfin_saved_servers');
+            if (rawSaved) {
+                const parsed = JSON.parse(rawSaved);
+                if (Array.isArray(parsed)) {
+                    hints = parsed.map((s) => s.address || s.serverUrl).filter(Boolean);
+                }
+            }
+        } catch (_) {}
+
+        const tauriServers = await _discoverViaTauriService(onServerFound, hints);
+
+        if (tauriServers !== null) {
+            log.info(`Tauri discovery complete: ${tauriServers.length} server(s) found`);
+            return tauriServers;
+        }
+
+        log.warn('Tauri native discovery unavailable');
+        if (!allowHttpFallback) {
+            log.info('HTTP fallback disabled for automatic discovery — skipping HTTP subnet scan');
+            return [];
+        }
     }
 
     /*

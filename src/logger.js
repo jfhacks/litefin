@@ -1,9 +1,9 @@
 /**
  * ============================================================================
- * Backup Logger — Zero-Dependency Early Boot Diagnostic
+ * Logger — Zero-Dependency Early Boot Console Diagnostic & Safe Interceptor
  * ============================================================================
  * Loaded as the FIRST script in index.html. Runs before any ES module,
- * polyfill, or framework code. Compatible with Chromium 32 (Tizen 2.x).
+ * polyfill, or framework code. Compatible with Chromium 26/32/38 (Tizen 2.x/WebOS 1-3.x).
  *
  * What it does:
  *   1. Monkeypatches console.log/info/warn/error immediately with safe wrappers
@@ -12,16 +12,17 @@
  *      — so logs survive crashes, reboots, or the app being killed by the TV
  *
  * WHY THIS FIXES THE BOOT HANG:
- *   On Chromium 32 (Tizen 2.x), somewhere in the app startup a raw console.*
- *   call is made with a complex object or in a context where the native console
+ *   On older engines (Chromium 32 / Tizen 2.x / WebOS), somewhere in app startup
+ *   a raw console.* call is made with a complex object or in a context where native console
  *   throws. This wrapper catches those errors silently, allowing initialization
- *   to continue. The DebugOverlay (once loaded) calls window.__hideBackupLogger()
+ *   to continue. The DebugOverlay (once loaded) calls window.__hideLogger()
  *   to get this panel out of the way.
  * ============================================================================
  */
 (function () {
     /* ---------------------------------------------------------------------- */
-    /* CONFIG                                                                   */
+    /* CONFIGURATION VARIABLES                                                  */
+    /* Using var instead of const/let for Chrome 26 / webOS 1.x compatibility  */
     /* ---------------------------------------------------------------------- */
     // eslint-disable-next-line no-var -- ES5-only: file runs raw (never Babel-transpiled)
     var BL_MAX_LINES = 300;
@@ -30,6 +31,7 @@
 
     /* ---------------------------------------------------------------------- */
     /* CREATE THE RAW DOM PANEL                                                 */
+    /* Using var to avoid ES6 block scope errors on older WebKit engines       */
     /* ---------------------------------------------------------------------- */
     // eslint-disable-next-line no-var -- ES5-only: file runs raw (never Babel-transpiled)
     var panel = document.createElement('div');
@@ -76,6 +78,8 @@
 
     /* ---------------------------------------------------------------------- */
     /* _write(level, args)                                                      */
+    /* Formats and prints log messages safely to the DOM overlay and local      */
+    /* storage. Uses var variables to avoid ES6 issues on ancient engines.      */
     /* ---------------------------------------------------------------------- */
     function _write(level, args) {
         // eslint-disable-next-line no-var -- ES5-only: file runs raw (never Babel-transpiled)
@@ -103,7 +107,10 @@
             }
         }
 
-        /* Persist to localStorage — survives crashes/reboots */
+        /* 
+         * Persist to localStorage — survives crashes/reboots.
+         * Checked with standard try-catch in case localStorage is disabled or full.
+         */
         try {
             // eslint-disable-next-line no-var -- ES5-only: file runs raw (never Babel-transpiled)
             var stored = localStorage.getItem('bl_log') || '';
@@ -120,6 +127,7 @@
         row.style.borderBottom = '1px solid #1a1a1a';
         row.style.padding = '1px 0';
 
+        /* Color code log level outputs for readability */
         if (level === 'ERR') row.style.color = '#f55';
         else if (level === 'WARN') row.style.color = '#fe0';
         else if (level === 'INF') row.style.color = '#aaf';
@@ -127,6 +135,7 @@
         row.textContent = '[' + level + '] ' + msg;
         panel.appendChild(row);
 
+        /* Increment line count and prune oldest if exceeding limit */
         lineCount++;
         if (lineCount > BL_MAX_LINES && panel.firstChild) {
             panel.removeChild(panel.firstChild);
@@ -137,6 +146,7 @@
 
     /* ---------------------------------------------------------------------- */
     /* MONKEYPATCH console.* — safe wrappers that never throw                  */
+    /* Save references to original console methods using var                  */
     /* ---------------------------------------------------------------------- */
     // eslint-disable-next-line no-var -- ES5-only: file runs raw (never Babel-transpiled)
     var _origLog = console.log;
@@ -147,24 +157,31 @@
     // eslint-disable-next-line no-var -- ES5-only: file runs raw (never Babel-transpiled)
     var _origError = console.error;
 
+    /* Patch console.log */
     console.log = function () {
         _write('LOG', arguments);
         try {
             if (_origLog) _origLog.apply(console, arguments);
         } catch (e) {}
     };
+    
+    /* Patch console.info */
     console.info = function () {
         _write('INF', arguments);
         try {
             if (_origInfo) _origInfo.apply(console, arguments);
         } catch (e) {}
     };
+    
+    /* Patch console.warn */
     console.warn = function () {
         _write('WARN', arguments);
         try {
             if (_origWarn) _origWarn.apply(console, arguments);
         } catch (e) {}
     };
+    
+    /* Patch console.error */
     console.error = function () {
         _write('ERR', arguments);
         try {
@@ -172,15 +189,17 @@
         } catch (e) {}
     };
 
-    _write('INF', ['[BackupLogger] Active. UA=' + navigator.userAgent]);
+    /* Write initialization info */
+    _write('INF', ['[Logger] Active. UA=' + navigator.userAgent]);
 
     /* ---------------------------------------------------------------------- */
     /* GLOBAL API                                                               */
+    /* Expose helper functions on window object                                 */
     /* ---------------------------------------------------------------------- */
-    window.__hideBackupLogger = function () {
+    window.__hideLogger = window.__hideBackupLogger = function () {
         panel.style.display = 'none';
     };
-    window.__showBackupLogger = function () {
+    window.__showLogger = window.__showBackupLogger = function () {
         panel.style.display = 'block';
     };
 })();

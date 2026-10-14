@@ -1,32 +1,41 @@
 # UI & UX
 
-Litefin is designed with a focus on fluid interactions and high-end visual aesthetics tailored for the 10-foot TV experience.
+Litefin is crafted to deliver a unified, premium visual aesthetic and responsive fluidity across diverse form factors — seamlessly transitioning between the 10-foot TV experience, desktop environments, and mobile touchscreens.
 
 ## Design System
 
-The application uses a custom-built design system that avoids generic browser defaults.
+The application uses a custom-built design system that avoids generic browser defaults in favor of sleek, modern aesthetics:
 
-- **Theming System**: A CSS variable-based system (`src/themes/`) with 5 theme modes (Classic Dark, Classic Light, Black, Tinted, Ambient). Accent color customization with automatic variant computation. Sidebar colors, OSD button/focus/shape/color styles, badge styles, button styles, and focus border styles all configurable.
-- **Blur & Glassmorphism**: Strategically used for overlays and menus to create depth without impacting performance on older hardware.
-- **Rounded Aesthetics**: Consistent corner rounding across buttons and media cards, adjustable to user preference (global toggle).
-- **Layout Manager** (`src/ui/LayoutManager.js`): Centralized theming engine that injects CSS variables into the DOM, manages theme mode, accent color, font overrides, text scaling, card label styles (titleOnly, titleOnly2Lines, hidden), low VRAM mode, blurhash toggle, and media rows layout.
+- **Theming System**: CSS variable-based styling (`src/themes/`) with 5 theme modes:
+  - **Classic Dark**: Balanced contrast for home theater viewing.
+  - **Classic Light**: Clean light presentation.
+  - **True Black**: Pure OLED `#000000` blacks for zero backlight bleed.
+  - **Tinted Light & Tinted Dark**: Rich monochromatic depth tailored to your accent.
+  - **Ambient Glow**: Dynamic ambient accents reflecting backdrop artwork.
+- **Dynamic Accent Colors**: User-selected accent colors with automatic gradient and variant computation.
+- **Glassmorphism & Depth**: Multi-layer frosted overlays for dialogs, sidebars, and OSD controls.
+- **Rounded Aesthetics**: Configurable corner rounding across cards, buttons, and badges.
+- **Layout Manager** (`src/ui/LayoutManager.js`): Centralized engine managing responsive breakpoints, font overrides, text scaling, card label presentations (titleOnly, two lines, hidden), low VRAM mode, and BlurHash decoding.
 
-## Component Architecture
+## Adaptive Interaction Paradigms
 
-- **Media Cards**: Reusable, customizable cards via `CardRenderer` (`src/utils/CardRenderer.js`) handling 13+ view modes (poster, landscape, square, episode, person, season, resume, banner, library, artist, thumb, and more). Supports quality badges (resolution/HDR/DV detection), BlurHash placeholders, deterministic gradient fallbacks, lazy loading, and modern expansion.
-- **Modals & Menus**: A unified modal system that respects TV navigation rules (focus locking via `FocusManager.pushTrap`/`popTrap`, escape key handling).
-- **Virtualization**: `VirtualCardRow` implements horizontal DOM recycling (sliding window) to handle thousands of card items with minimal memory footprint.
-- **Grids**: `MediaGrid` component for generic grid layouts with "See More" expansion, and `EpgGrid` for Live TV electronic program guide.
+### 1. 10-Foot TV Experience (Remote & D-Pad)
+- **FocusManager & SpatialNavigator**: Geometric 2D spatial navigation for media grids and carousels with a 40ms input debounce.
+- **Remote Button Mapping**: Dedicated handling for Red, Green, Yellow, and Blue shortcut keys via `RemoteButtonManager.js`.
+- **Magic Remote Compatibility**: LG air-mouse pointer click binding, wheel-based list scrolling, and slider adjustments.
 
-## Animations & Fluidity
+### 2. Desktop Environment (Keyboard & Mouse)
+- **Cursor & Hover Interactions**: Smooth card zoom, active states, and focus-on-hover behavior.
+- **Keyboard Navigation**: Standard arrow key navigation, media controls (Space for play/pause, M for mute, F for fullscreen, Esc for back).
+- **Window Management**: Custom frameless titlebar controls, draggable header areas, and native window resize listeners via Tauri v2.
 
-- **GPU Acceleration**: Animations are primarily CSS-driven (transform, opacity) and optimized for GPU execution to prevent frame drops on TV processors.
-- **Fluid Transitions**: Global transitions between pages and within UI components (like sidebars and grids) to create a sense of continuity.
-- **Scroll Handling**: Optimized scrolling rules that minimize layout thrashing via `ScrollController`. Maintains smooth focal points during D-pad movement with rapid navigation detection (instant scroll mode).
+### 3. Mobile & Tablet (Touch)
+- **Touch-First Controls**: Direct touch scrolling through horizontal card rows (`VirtualCardRow`) and vertical grids with momentum scrolling.
+- **Responsive Layout Adaptation**: Auto-collapsing sidebars, touch-friendly hit targets, and orientation handling.
 
-## Interactive Standards
+## Virtualization & Fluidity
 
-- **Focus Restoration**: The app rigorously tracks focus states through `NavigationState`. Returning to a page restores focus to the exact element (by CSS selector `[data-item-id]`, `[data-episode-id]`, or section index). Async pages use `restoreScrollFocusWhenReady()` to delay restoration until content loads.
-- **Debounced Inputs**: 40ms debounce in `FocusManager` for TV remote key events. RemoteButtonManager handles Red/Green/Yellow/Blue button actions on the remote.
-- **Magic Remote Support**: Wheel events mapped to scrolling, slider (range input) special handling for left/right navigation, `onmousedown` + `onclick` event binding for Magic Remote pointer compatibility.
-- **Focus Memory**: Section-based focus memory with virtual index support. Carousels pause auto-scroll when focus leaves and resume on focus return. Sidebar auto-expands/collapses based on focus using `MutationObserver`.
+- **VirtualCardRow & VirtualGrid**: Horizontal DOM recycling with sliding windows to render thousands of media items without memory bloat or frame drops.
+- **GPU-Accelerated Transitions**: All layout animations are CSS transform/opacity-driven to prevent layout thrashing on low-end TV and mobile chipsets.
+- **Navigation State & Focus Restoration**: `NavigationState.js` captures and restores scroll offsets, active card indexes, and focus targets (`[data-item-id]`) across backward/forward navigation.
+

@@ -46,6 +46,27 @@ export const SEERR_STATUS = Object.freeze({
 });
 
 /**
+ * TMDB keyword ID Seerr uses to classify a series as anime (mirrors
+ * ANIME_KEYWORD_ID in the Seerr source). It is a keyword, not a genre:
+ * TMDB has no anime TV genre, so the keyword is the only reliable marker.
+ */
+export const SEERR_ANIME_KEYWORD_ID = 210024;
+
+/**
+ * Tells whether a normalized Seerr item is an anime. Anime routing only
+ * applies to TV series — movies are never flagged. A missing keywords list
+ * degrades to false (treated as a classic series), matching Seerr's own
+ * fallback when it cannot detect.
+ * @param {Object|null} item - Item produced by normalizeSeerrItem
+ * @returns {boolean}
+ */
+export function isSeerrAnimeItem(item) {
+    if (!item || item._mediaType !== 'tv') return false;
+    if (!Array.isArray(item.Tags)) return false;
+    return item.Tags.some((tag) => tag && Number(tag.Id) === SEERR_ANIME_KEYWORD_ID);
+}
+
+/**
  * Normalizes a user-typed instance address: trims, drops trailing slashes and
  * infers a scheme when none was typed. Typing 'http://' on a remote is painful,
  * and fetch() rejects a schemeless URL outright rather than assuming one.
@@ -71,8 +92,11 @@ export function normalizeSeerrBaseUrl(url) {
 export function seerrStatusKey(status) {
     switch (status) {
         case SEERR_STATUS.PENDING:
-        case SEERR_STATUS.PROCESSING:
+            // Awaiting admin approval — not yet picked up by the downloader
             return 'SeerrStatusPending';
+        case SEERR_STATUS.PROCESSING:
+            // Approved by admin, downloader is actively working on it
+            return 'SeerrStatusProcessing';
         case SEERR_STATUS.PARTIALLY_AVAILABLE:
             return 'SeerrStatusPartial';
         case SEERR_STATUS.AVAILABLE:
@@ -160,6 +184,7 @@ export function normalizeSeerrItem(result, fallbackMediaType = null) {
             ? `${TMDB_POSTER_DETAIL_BASE}${result.posterPath}`
             : (result.profilePath ? `${TMDB_POSTER_DETAIL_BASE}${result.profilePath}` : ''),
         _backdropUrl: result.backdropPath ? `${TMDB_BACKDROP_BASE}${result.backdropPath}` : '',
+        WatchProviders: Array.isArray(result.watchProviders) ? result.watchProviders : [],
         _seerrStatus: (result.mediaInfo && result.mediaInfo.status) || SEERR_STATUS.NOT_REQUESTED,
         _jellyfinMediaId: (() => {
             const info = result.mediaInfo || {};
@@ -252,10 +277,18 @@ export function normalizeSeerrItem(result, fallbackMediaType = null) {
             ? result.productionCompanies.map((c) => (typeof c === 'object' && c ? { Id: c.id || c.Id || '', Name: c.name || c.Name || '' } : { Id: '', Name: String(c) })).filter((c) => c && Boolean(c.Name))
             : [],
         ProductionTeam: (() => {
-            const rawCrew = (result.credits && result.credits.crew) || result.crew || [];
-            if (!Array.isArray(rawCrew)) return [];
+            // Combine creators (for TV series) and crew members into a unified candidate pool
+            const rawCreators = (result.createdBy || result.created_by || []).map((c) => ({
+                id: c.id || c.Id,
+                name: c.name || c.Name,
+                job: 'Creator'
+            }));
+            const rawCrew = [...rawCreators, ...((result.credits && result.credits.crew) || result.crew || [])];
+            if (!Array.isArray(rawCrew) || rawCrew.length === 0) return [];
             
+            // Limit the maximum number of people per key production role
             const jobLimits = {
+                'creator': 2,
                 'director': 2,
                 'writer': 2,
                 'screenplay': 2,
@@ -264,12 +297,12 @@ export function normalizeSeerrItem(result, fallbackMediaType = null) {
                 'co-producer': 1
             };
             const counts = {};
-            const names = [];
+            const team = [];
             const seen = new Set();
 
             for (const member of rawCrew) {
                 const job = (member.job || '').trim().toLowerCase();
-                const name = typeof member === 'string' ? member : (member && member.name);
+                const name = typeof member === 'string' ? member : (member && (member.name || member.Name));
                 if (!name) continue;
                 
                 const limit = jobLimits[job];
@@ -279,13 +312,18 @@ export function normalizeSeerrItem(result, fallbackMediaType = null) {
                         const key = name.trim().toLowerCase();
                         if (!seen.has(key)) {
                             seen.add(key);
-                            names.push(name.trim());
+                            // Preserve TMDB person ID alongside name and job title
+                            team.push({
+                                Id: member.id || member.Id || '',
+                                Name: name.trim(),
+                                Job: member.job || ''
+                            });
                         }
                         counts[job]++;
                     }
                 }
             }
-            return names;
+            return team;
         })(),
         Cast: (() => {
             const rawCast = (result.credits && result.credits.cast) || result.cast || [];

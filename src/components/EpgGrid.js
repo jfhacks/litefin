@@ -16,13 +16,13 @@ import { eventBus } from '../core/EventBus.js';
 import { imageService } from '../utils/ImageService.js';
 import { escapeHtml } from '../utils/Utils.js';
 import CardRenderer from '../utils/CardRenderer.js';
+import { platformInfo } from '../utils/PlatformInfo.js';
 
 const log = logger.create('EpgGrid');
 
 class EpgGrid {
     /**
      * Constructs the EPG grid component.
-     * Aligns with Apple Human Interface Guidelines for TV interfaces with smooth layout and spatial clarity.
      * @param {HTMLElement} container - The container element to mount the EPG grid in
      * @param {Object} options - Configuration options for navigation and callbacks
      */
@@ -44,11 +44,13 @@ class EpgGrid {
         // Programs schedule data mapped by channel ID
         this.programsMap = new Map();
 
-        // Timeframe initialization
-        // Set initial EPG timeframe to 8 hours (2 hours back to 6 hours forward)
-        // Drastically reduces network payload and JSON parsing overhead on low-spec hardware
+        // Timeframe initialization: 2 hours of lookback, then the guide span.
+        // TV keeps the original 8-hour span (payload parsimony on low-spec
+        // hardware); Android matches the reference apps' 12-hour forward
+        // guide (14h total including lookback).
         this.startTime = this._getRoundStartTime();
-        this.endTime = new Date(this.startTime.getTime() + 8 * 60 * 60 * 1000);
+        this.GUIDE_HOURS = platformInfo.isAndroid ? 14 : 8;
+        this.endTime = new Date(this.startTime.getTime() + this.GUIDE_HOURS * 60 * 60 * 1000);
 
         // Virtual scroll state
         this.scrollX = 0;
@@ -57,6 +59,15 @@ class EpgGrid {
         this.visibleWidth = 0;
         // Default height fallback before layout measurement completes
         this.visibleHeight = 600;
+
+        // Android touch panning + fling state (see _setupEventListeners)
+        this._touchPanningEnabled = false;
+        this._touchLast = null;
+        this._touchSamples = [];
+        this._flingRaf = null;
+        this._flingVx = 0;
+        this._flingVy = 0;
+        this._flingLast = 0;
 
         // On-demand rendering state tracking
         this._needsRender = true;
@@ -69,6 +80,9 @@ class EpgGrid {
 
         // Track internal focus element pointer for spatial D-pad routing
         this._focusedEl = null;
+
+        // Visibility flag for current time indicator: only reveal when navigated into EPG programs
+        this._showIndicator = false;
 
         // Component lifecycle flags
         this._isMounted = false;
@@ -155,6 +169,11 @@ class EpgGrid {
     destroy() {
         this._isDestroyed = true;
         this._isMounted = false;
+        this._stopFling();
+        if (this._gridResizeObserver) {
+            this._gridResizeObserver.disconnect();
+            this._gridResizeObserver = null;
+        }
     }
 
     // =========================================================================
@@ -193,7 +212,7 @@ class EpgGrid {
                         <div class="epg-channels-track" id="epg-channels-track" style="height: ${this.channels.length * this.ROW_HEIGHT}px;"></div>
                     </div>
                     <div class="epg-programs" id="epg-programs">
-                        <div class="epg-programs-track" id="epg-programs-track" style="height: ${this.channels.length * this.ROW_HEIGHT}px; width: ${8 * this.PIXELS_PER_HOUR}px;"></div>
+                        <div class="epg-programs-track" id="epg-programs-track" style="height: ${this.channels.length * this.ROW_HEIGHT}px; width: ${this.GUIDE_HOURS * this.PIXELS_PER_HOUR}px;"></div>
                         <div class="epg-indicator" id="epg-now-indicator"></div>
                     </div>
                 </div>
@@ -289,7 +308,54 @@ class EpgGrid {
             }
         }
 
+        // 3b. Pan re-render: a row renders its program cells for the
+        // horizontal window ONLY at creation time — D-pad navigation hides
+        // that (_findProgramEl mounts focus targets on demand), but
+        // wheel/touch panning left everything past the original window
+        // black forever. Re-render a row's cells when the pan shifts more
+        // than the 400px overscan from its anchor; _renderProgramsInRow
+        // clears the row first, so this is idempotent.
+        //
+        // ORIENTATION CHANGE: rotation grows visibleWidth (portrait ~356 →
+        // landscape ~1350 design px) WITHOUT touching scrollX, so the pan
+        // anchor check never fires and the newly revealed right side of
+        // every row stays black until the user scrolls. Anchor each row to
+        // the visible geometry as well as scrollX — any dimension change
+        // forces a cell re-render for every mounted row.
+        for (const [channelId, data] of this.domNodes.entries()) {
+            const rowIndex = this.channelIndexMap.get(channelId);
+            if (rowIndex === undefined) continue;
+            const geometryChanged =
+                data._anchorVW !== undefined &&
+                (data._anchorVW !== this.visibleWidth || data._anchorVH !== this.visibleHeight);
+            if (geometryChanged || data._anchorX === undefined || Math.abs(this.scrollX - data._anchorX) > 400) {
+                data._anchorX = this.scrollX;
+                data._anchorVW = this.visibleWidth;
+                data._anchorVH = this.visibleHeight;
+                this._renderProgramsInRow(channelId, data.rowEl, rowIndex);
+            }
+        }
+
         // 4. Update GPU-accelerated CSS transforms
+        /*
+         * Android landscape only: the grid keeps a 2-hour lookback window for
+         * TV backwards browsing, but on the down-scaled phone that zone is
+         * empty black space (guide data rarely exists there) and touch panning
+         * or restored session state can park the view inside it. Enforce NOW
+         * (rounded to the half-hour slot, matching _scrollToNow) as the
+         * horizontal floor at the single point where scroll state becomes
+         * transforms — every entry path (init, restore, touch pan) funnels
+         * through this render. TVs keep the lookback untouched; portrait
+
+         * (locked orientation) renders without the floor, exactly stock.
+         */
+        if (platformInfo.isAndroid && this._isLandscape()) {
+            const floorX = this._getTimeOffset(this._roundNowToSlot());
+            if (this.scrollX < floorX) {
+                this.scrollX = floorX;
+            }
+        }
+
         const scrollX = -this.scrollX;
         const scrollY = -this.scrollY;
 
@@ -357,7 +423,7 @@ class EpgGrid {
         channelEl.tabIndex = 0;
         channelEl.dataset.channelId = channel.Id;
         channelEl.dataset.rowIndex = String(index);
-        
+
         channelEl.onclick = () => this._handleChannelClick(channel);
         channelEl.onfocus = () => this._handleChannelFocus(channelEl);
 
@@ -417,7 +483,13 @@ class EpgGrid {
         const data = {
             rowEl,
             channelEl,
-            programNodes: new Map()
+            programNodes: new Map(),
+            /* Horizontal anchor: scrollX + visible geometry the row's program
+             * cells were last rendered for (see _renderVirtualGrid pan
+             * re-render and the orientation-change re-render). */
+            _anchorX: this.scrollX,
+            _anchorVW: this.visibleWidth,
+            _anchorVH: this.visibleHeight
         };
         this.domNodes.set(channel.Id, data);
 
@@ -459,7 +531,7 @@ class EpgGrid {
             progEl.dataset.programId = program.Id;
             progEl.dataset.channelId = channelId;
             progEl.dataset.rowIndex = rowIndex;
-            
+
             progEl.__programData = program;
             progEl._epgLeft = left;
             progEl._epgWidth = width;
@@ -538,6 +610,113 @@ class EpgGrid {
         });
 
         const gridContainer = this.container.querySelector('.epg-grid-container');
+
+        /*
+         * Rotation-safe re-measure: on Android, the window 'resize' event can
+         * fire BEFORE the zoom/canvas relayout settles (the display-scale
+         * handler re-zooms the document asynchronously), so the virtualizer
+         * re-renders once with stale visibleWidth/visibleHeight bounds and
+         * leaves unrendered black gaps until the next scroll forces a
+         * re-render. A ResizeObserver on the grid container fires after the
+         * element's actual box changes, so measurement always reflects real
+         * layout. Coalesced to one rAF to avoid double renders when width
+         * and height report in separate observations.
+         */
+        if (typeof ResizeObserver === 'function' && gridContainer) {
+            this._resizeRafPending = false;
+            this._gridResizeObserver = new ResizeObserver(() => {
+                if (this._resizeRafPending || this._isDestroyed) return;
+                this._resizeRafPending = true;
+                requestAnimationFrame(() => {
+                    this._resizeRafPending = false;
+                    if (this._isDestroyed) return;
+                    this._updateVisibleDimensions();
+                    this.requestRender();
+                });
+            });
+            this._gridResizeObserver.observe(gridContainer);
+        }
+
+        /*
+         * Android touch panning: the virtualized grid owns all scrolling via
+         * internal scrollX/scrollY state and has no native overflow, so
+         * browser swipes do nothing (and with `touch-action: none` inside the
+         * grid container they are swallowed entirely). Translate swipe
+         * gestures into the SAME state the wheel handler drives — clamping,
+         * virtualization and rendering are reused untouched. Active on Android
+         * in BOTH orientations (the guide is a fixed-canvas virtualized grid
+         * in portrait too after the display-scale port, so stock browser
+         * scrolling can never move it); the gesture handler checks nothing
+         * at mount time — registration is unconditional on Android and every
+         * event re-derives geometry live, so rotating mid-gesture is safe.
+         */
+        this._touchPanningEnabled = platformInfo.isAndroid;
+
+        if (this._touchPanningEnabled && gridContainer) {
+            this._touchHandler = (e) => {
+                const touch = e.touches ? e.touches[0] : null;
+                if (!touch) return;
+                if (e.type === 'touchstart') {
+                    this._stopFling();
+                    this._touchLast = { x: touch.clientX, y: touch.clientY };
+                    this._touchSamples = [];
+                } else if (this._touchLast) {
+                    /* Deltas arrive in PHYSICAL px; the grid constants
+                     * (ROW_HEIGHT, PIXELS_PER_MINUTE) are design-space. Divide
+                     * by the display-scale zoom so one row of finger travel
+                     * pans exactly one row (100 design px = 57 physical px on
+                     * a 0.572-scaled landscape phone). Unscaled viewports get
+                     * zoom = 1 → plain 1:1. */
+                    const zoom = parseFloat(getComputedStyle(document.documentElement).zoom) || 1;
+                    const dx = (this._touchLast.x - touch.clientX) / zoom;
+                    const dy = (this._touchLast.y - touch.clientY) / zoom;
+                    this._touchLast.x = touch.clientX;
+                    this._touchLast.y = touch.clientY;
+
+                    // Same clamping and maxima as the wheel handler above.
+                    if (dy !== 0) {
+                        const maxScrollY = Math.max(0, this.channels.length * this.ROW_HEIGHT - this.visibleHeight);
+                        this.scrollY = Math.max(0, Math.min(this.scrollY + dy, maxScrollY));
+                    }
+                    // Horizontal finger travel is short; boost 2x so the
+                    // timeline actually pans under the thumb.
+                    if (dx !== 0) {
+                        const maxScrollX = Math.max(0, this.GUIDE_HOURS * this.PIXELS_PER_HOUR - this.visibleWidth);
+                        this.scrollX = Math.max(0, Math.min(this.scrollX + dx * 2, maxScrollX));
+                    }
+                    /* Velocity sampling for the post-release fling: store the
+                     * deltas AS APPLIED (x carries the same 2x boost) so the
+                     * glide continues at the speed the content was moving. */
+                    this._touchSamples.push({
+                        t: e.timeStamp || performance.now(),
+                        vx: dx * 2,
+                        vy: dy
+                    });
+                    if (this._touchSamples.length > 8) this._touchSamples.shift();
+                    this.requestRender();
+                }
+            };
+            for (const type of ['touchstart', 'touchmove']) {
+                gridContainer.addEventListener(type, this._touchHandler, { passive: true });
+            }
+            gridContainer.addEventListener(
+                'touchend',
+                () => {
+                    this._touchLast = null;
+                    this._startFling();
+                },
+                { passive: true }
+            );
+            gridContainer.addEventListener(
+                'touchcancel',
+                () => {
+                    this._touchLast = null;
+                    this._touchSamples = [];
+                },
+                { passive: true }
+            );
+        }
+
         if (gridContainer) {
             gridContainer.addEventListener(
                 'wheel',
@@ -560,17 +739,118 @@ class EpgGrid {
                         const maxScrollY = Math.max(0, this.channels.length * this.ROW_HEIGHT - this.visibleHeight);
                         this.scrollY = Math.max(0, Math.min(this.scrollY + deltaY, maxScrollY));
                     }
-
                     if (deltaX !== 0) {
-                        const maxScrollX = Math.max(0, 8 * this.PIXELS_PER_HOUR - this.visibleWidth);
+                        const maxScrollX = Math.max(0, this.GUIDE_HOURS * this.PIXELS_PER_HOUR - this.visibleWidth);
                         this.scrollX = Math.max(0, Math.min(this.scrollX + deltaX, maxScrollX));
                     }
-
                     this.requestRender();
                 },
                 { passive: false }
             );
         }
+    }
+
+    /**
+     * Starts an inertial glide (fling) after the finger lifts, using the
+     * velocity captured from the last ~120ms of the gesture. The glide
+     * reuses the exact clamps of the pan path — track bounds, channel
+     * bounds and the Android landscape now-floor — and decays
+     * exponentially (~0.96/frame) until the velocity dies out or the view
+     * hits a boundary, so panning feels like every other scroll surface in
+     * the app instead of stopping dead. Landscape only, matching touch
+     * panning.
+     * @private
+     */
+    _startFling() {
+        const samples = this._touchSamples || [];
+        this._touchSamples = [];
+        if (samples.length < 2) return;
+
+        const last = samples[samples.length - 1];
+        let first = samples[0];
+        for (let i = samples.length - 1; i >= 0; i--) {
+            first = samples[i];
+            if (last.t - samples[i].t > 120) break;
+        }
+        const dt = last.t - first.t;
+        if (dt <= 0 || dt > 300) return;
+
+        let vx = 0;
+        let vy = 0;
+        for (const s of samples) {
+            if (s.t >= first.t) {
+                vx += s.vx;
+                vy += s.vy;
+            }
+        }
+        vx /= dt;
+        vy /= dt;
+
+        // A gentle lift stops dead; a real flick glides.
+        if (Math.hypot(vx, vy) < 0.15) return;
+        const cap = 2.5;
+        this._flingVx = Math.max(-cap, Math.min(cap, vx));
+        this._flingVy = Math.max(-cap, Math.min(cap, vy));
+        this._flingLast = performance.now();
+        if (this._flingRaf) cancelAnimationFrame(this._flingRaf);
+
+        const step = (now) => {
+            if (this._isDestroyed) return;
+            const stepDt = Math.min(now - this._flingLast, 50);
+            this._flingLast = now;
+            const decay = Math.pow(0.96, stepDt / 16.7);
+            let vx2 = this._flingVx * decay;
+            let vy2 = this._flingVy * decay;
+            if (Math.abs(vx2) < 0.02) vx2 = 0;
+            if (Math.abs(vy2) < 0.02) vy2 = 0;
+
+            if (vx2 !== 0) {
+                const maxScrollX = Math.max(0, this.GUIDE_HOURS * this.PIXELS_PER_HOUR - this.visibleWidth);
+                let minX = 0;
+                if (platformInfo.isAndroid && this._isLandscape()) {
+                    minX = this._getTimeOffset(this._roundNowToSlot());
+                }
+                const nx = Math.max(minX, Math.min(this.scrollX + vx2 * stepDt, maxScrollX));
+                if (nx === this.scrollX) {
+                    vx2 = 0; // boundary reached on this axis
+                } else {
+                    this.scrollX = nx;
+                }
+            }
+            if (vy2 !== 0) {
+                const maxScrollY = Math.max(0, this.channels.length * this.ROW_HEIGHT - this.visibleHeight);
+                const ny = Math.max(0, Math.min(this.scrollY + vy2 * stepDt, maxScrollY));
+                if (ny === this.scrollY) {
+                    vy2 = 0;
+                } else {
+                    this.scrollY = ny;
+                }
+            }
+
+            this._flingVx = vx2;
+            this._flingVy = vy2;
+            this.requestRender();
+
+            if (vx2 !== 0 || vy2 !== 0) {
+                this._flingRaf = requestAnimationFrame(step);
+            } else {
+                this._flingRaf = null;
+            }
+        };
+        this._flingRaf = requestAnimationFrame(step);
+    }
+
+    /**
+     * Cancels any in-flight fling glide (new touch or teardown).
+     * @private
+     */
+    _stopFling() {
+        if (this._flingRaf) {
+            cancelAnimationFrame(this._flingRaf);
+            this._flingRaf = null;
+        }
+        this._flingVx = 0;
+        this._flingVy = 0;
     }
 
     /**
@@ -655,10 +935,20 @@ class EpgGrid {
             const programs = this.programsMap.get(channelId) || [];
             const idx = programs.findIndex((p) => p.Id === program.Id);
             if (idx > 0) {
+                // Navigate to the preceding program block
                 nextEl = this._findProgramEl(channelId, programs[idx - 1].Id);
             } else {
+                // Return focus to the channel header cell
                 const data = this.domNodes.get(channelId);
                 if (data && data.channelEl) {
+                    // Reset time indicator visibility when moving back to channel side column
+                    this._showIndicator = false;
+                    this._updateIndicator();
+
+                    // Reset timeline horizontal scroll position flush with current time
+                    this._scrollToNow();
+                    this.requestRender();
+
                     this._scrollChannelIntoView(rowIndex);
                     return data.channelEl;
                 }
@@ -667,14 +957,24 @@ class EpgGrid {
             const programs = this.programsMap.get(channelId) || [];
             const idx = programs.findIndex((p) => p.Id === program.Id);
             if (idx >= 0 && idx + 1 < programs.length) {
+                // Navigate to the next program block
                 nextEl = this._findProgramEl(channelId, programs[idx + 1].Id);
             }
         } else {
             const nextRowIndex = direction === 'down' ? rowIndex + 1 : rowIndex - 1;
-            if (nextRowIndex >= 0 && nextRowIndex < this.channels.length) {
+
+            if (nextRowIndex < 0) {
+                // Leaving top row upwards -> focus tabs if configured
+                if (this.options.leaveUp) {
+                    focusManager.setActiveSection(this.options.leaveUp);
+                }
+                return null;
+            }
+
+            if (nextRowIndex < this.channels.length) {
                 const nextChannel = this.channels[nextRowIndex];
 
-                this._scrollChannelIntoView(nextRowIndex);
+                // Ensure row DOM element exists
                 if (!this.domNodes.has(nextChannel.Id)) {
                     this._renderRow(nextRowIndex, nextChannel);
                 }
@@ -684,17 +984,39 @@ class EpgGrid {
                     new Date(program.StartDate).getTime() +
                     (new Date(program.EndDate).getTime() - new Date(program.StartDate).getTime()) / 2;
 
-                const overlapping = nextRowPrograms.find((p) => {
+                // 1. Find program overlapping the midpoint of the current program
+                let targetProgram = nextRowPrograms.find((p) => {
                     const start = new Date(p.StartDate).getTime();
                     const end = new Date(p.EndDate).getTime();
                     return midTime >= start && midTime < end;
                 });
 
-                if (overlapping) {
-                    nextEl = this._findProgramEl(nextChannel.Id, overlapping.Id);
-                } else if (nextRowPrograms.length === 0) {
+                // 2. If no exact midpoint overlap, find any program overlapping the time range
+                if (!targetProgram) {
+                    const curStart = new Date(program.StartDate).getTime();
+                    const curEnd = new Date(program.EndDate).getTime();
+                    targetProgram = nextRowPrograms.find((p) => {
+                        const start = new Date(p.StartDate).getTime();
+                        const end = new Date(p.EndDate).getTime();
+                        return (start >= curStart && start < curEnd) || (end > curStart && end <= curEnd);
+                    });
+                }
+
+                // 3. If still not found, pick the closest program in time
+                if (!targetProgram && nextRowPrograms.length > 0) {
+                    targetProgram = nextRowPrograms.reduce((prev, curr) => {
+                        const prevDiff = Math.abs(new Date(prev.StartDate).getTime() - midTime);
+                        const currDiff = Math.abs(new Date(curr.StartDate).getTime() - midTime);
+                        return currDiff < prevDiff ? curr : prev;
+                    });
+                }
+
+                if (targetProgram) {
+                    nextEl = this._findProgramEl(nextChannel.Id, targetProgram.Id);
+                } else {
                     const data = this.domNodes.get(nextChannel.Id);
                     if (data && data.channelEl) {
+                        this._scrollChannelIntoView(nextRowIndex);
                         return data.channelEl;
                     }
                 }
@@ -710,33 +1032,91 @@ class EpgGrid {
     }
 
     /**
-     * Finds the DOM element for a given channel and program ID.
+     * Finds or dynamically creates the DOM element for a given channel and program ID.
+     * Prevents navigation lockups when navigating to off-screen virtualized programs.
      * @private
      */
     _findProgramEl(channelId, programId) {
         const data = this.domNodes.get(channelId);
-        if (data) {
-            return data.rowEl.querySelector(`[data-program-id="${programId}"]`);
-        }
-        return null;
+        if (!data) return null;
+
+        // Check if element is already present in DOM
+        let el = data.rowEl.querySelector(`[data-program-id="${programId}"]`);
+        if (el) return el;
+
+        // If off-screen, dynamically mount the program DOM element into the row
+        const programs = this.programsMap.get(channelId) || [];
+        const program = programs.find((p) => p.Id === programId);
+        if (!program) return null;
+
+        const rowIndex = parseInt(data.channelEl.dataset.rowIndex, 10);
+        const left = this._getTimeOffset(new Date(program.StartDate));
+        const width = this._getTimeDuration(new Date(program.StartDate), new Date(program.EndDate));
+
+        const progEl = document.createElement('div');
+        progEl.className = 'epg-program';
+        progEl.tabIndex = 0;
+        progEl.style.left = `${left}px`;
+        progEl.style.width = `${width}px`;
+        progEl.dataset.programId = program.Id;
+        progEl.dataset.channelId = channelId;
+        progEl.dataset.rowIndex = rowIndex;
+
+        progEl.__programData = program;
+        progEl._epgLeft = left;
+        progEl._epgWidth = width;
+
+        progEl.innerHTML = `
+            <div class="epg-program-content">
+                <div class="epg-program-title">
+                    <span class="epg-program-prefix hidden">‹</span>
+                    <span class="title-text">${escapeHtml(program.Name)}</span>
+                </div>
+                <div class="epg-program-time">${this._formatProgramTime(program)}</div>
+            </div>
+        `;
+
+        progEl._contentNode = progEl.querySelector('.epg-program-content');
+        progEl._prefixNode = progEl.querySelector('.epg-program-prefix');
+
+        progEl.onclick = () => this._handleProgramClick(program);
+        progEl.onfocus = () => this._handleProgramFocus(progEl);
+
+        data.rowEl.appendChild(progEl);
+        return progEl;
     }
 
     /**
      * Handles program focus event.
+     * Reveals the current time indicator once the user enters EPG program items.
      * @private
      */
     _handleProgramFocus(el) {
         this._focusedEl = el;
+        // User has moved into the EPG program items — activate time indicator visibility
+        this._showIndicator = true;
+        this._updateIndicator();
+
         const program = el.__programData;
         eventBus.emit('epg:programFocused', program);
     }
 
     /**
      * Handles channel cell focus event.
+     * Resets timeline horizontal scroll position to current time slot and hides time indicator.
      * @private
      */
     _handleChannelFocus(el) {
         this._focusedEl = el;
+
+        // Reset time indicator visibility when leaving the program grid
+        this._showIndicator = false;
+        this._updateIndicator();
+
+        // Reset timeline horizontal scroll position flush with current time
+        this._scrollToNow();
+        this.requestRender();
+
         const channelIndex = parseInt(el.dataset.rowIndex, 10);
         const channel = this.channels[channelIndex];
         if (channel) {
@@ -801,31 +1181,15 @@ class EpgGrid {
     }
 
     /**
-     * Sets initial focus onto the currently airing program or channel cell.
+     * Sets initial focus onto the left channel cell or current program aligned left.
      * @private
      */
     _focusNow() {
-        const now = new Date();
         const startRow = Math.floor(this.scrollY / this.ROW_HEIGHT);
         const channel = this.channels[startRow] || this.channels[0];
         if (!channel) return;
 
-        const programs = this.programsMap.get(channel.Id) || [];
-        const current = programs.find((p) => {
-            const start = new Date(p.StartDate).getTime();
-            const end = new Date(p.EndDate).getTime();
-            return now.getTime() >= start && now.getTime() < end;
-        });
-
-        if (current) {
-            const el = this._findProgramEl(channel.Id, current.Id);
-            if (el) {
-                this._focusedEl = el;
-                focusManager.focusElement(el, { skipScroll: true });
-                return;
-            }
-        }
-
+        // Focus the channel row cell on the left
         const data = this.domNodes.get(channel.Id);
         if (data && data.channelEl) {
             this._focusedEl = data.channelEl;
@@ -887,7 +1251,8 @@ class EpgGrid {
     // =========================================================================
 
     /**
-     * Computes rounded start time for timeline headers.
+     * Computes rounded start time for timeline headers (with a 2-hour lookback window).
+     * Includes past programs so the user can scroll left to see earlier programs on the same day.
      * @private
      */
     _getRoundStartTime() {
@@ -895,25 +1260,63 @@ class EpgGrid {
         now.setMinutes(now.getMinutes() >= 30 ? 30 : 0);
         now.setSeconds(0);
         now.setMilliseconds(0);
-        return new Date(now.getTime() - 2 * 60 * 60 * 1000); // 2 hours back
+        // Include 2 hours of past programs for full backwards timeline scrolling
+        return new Date(now.getTime() - 2 * 60 * 60 * 1000);
     }
 
     /**
-     * Centers horizontal view offset around current time.
+     * Rounds the current time down to the nearest half-hour timeline slot.
+     * Shared by _scrollToNow and the Android landscape now-floor in
+     * _renderVirtualGrid so both align the view identically.
+     * @private
+     * @returns {Date} Copy of now with minutes floored to :00/:30, seconds/ms zeroed
+     */
+    _roundNowToSlot() {
+        const rounded = new Date();
+        rounded.setMinutes(rounded.getMinutes() >= 30 ? 30 : 0);
+        rounded.setSeconds(0);
+        rounded.setMilliseconds(0);
+        return rounded;
+    }
+
+    /**
+     * Landscape check used by Android-only behaviors (touch panning and the
+     * now-scroll floor). Portrait is locked to stock behavior.
+     * @private
+     * @returns {boolean} True when the viewport is landscape
+     */
+    _isLandscape() {
+        return typeof window.matchMedia === 'function'
+            ? window.matchMedia('(orientation: landscape)').matches
+            : window.innerWidth > window.innerHeight;
+    }
+
+    /**
+     * Aligns horizontal view offset to the current time slot flush left on initial load.
      * @private
      */
     _scrollToNow() {
-        const now = new Date();
-        const offset = this._getTimeOffset(now);
-        this.scrollX = Math.max(0, offset - 300);
+        // Align the current half-hour slot cleanly to the left edge (scrollX offset)
+        this.scrollX = Math.max(0, this._getTimeOffset(this._roundNowToSlot()));
     }
 
     /**
-     * Updates indicator position for current time line.
+     * Updates indicator position for current time line and manages its visibility.
      * @private
      */
     _updateIndicator() {
         if (!this.nowIndicator) return;
+
+        /* TV reveals the current-time line when the user navigates INTO the
+         * program items (D-pad flow). Touch phones never focus anything, so
+         * the line would never appear — always show it on Android landscape. */
+        const show = this._showIndicator || (platformInfo.isAndroid && this._isLandscape());
+        if (show) {
+            this.nowIndicator.classList.add('visible');
+        } else {
+            this.nowIndicator.classList.remove('visible');
+        }
+
         const now = new Date();
         const offset = this._getTimeOffset(now);
         this.nowIndicator.style.left = `${offset}px`;

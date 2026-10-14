@@ -119,6 +119,12 @@ export class WebOSPlayer {
         // ---- Bound event handlers (stored so we can removeEventListener cleanly) ----
         this._boundHandlers = {};
 
+        // ---- Aspect ratio mode ('auto' | 'zoom' | 'stretch') ----
+        this._aspectMode = 'auto';
+
+        /** @type {ResizeObserver|null} Refits the video box when the container resizes */
+        this._containerObserver = null;
+
         // ---- Timeupdate throttle —— only emit at ~250 ms intervals ----
         this._lastTimeUpdateTicks = 0;
 
@@ -135,6 +141,19 @@ export class WebOSPlayer {
         this._robustSeekTarget   = null;
         this._robustSeekPending  = false;
         this._cancelRobustResume = false;
+
+        // ====================================================================
+        // Audio Suppression State (Resume Playback):
+        // Prevents brief audio bursts from timestamp 0:00 when resuming playback.
+        // ====================================================================
+        this._resumeAudioSuppressed = false;
+
+        // ====================================================================
+        // Video Suppression State (Resume Playback):
+        // Prevents stale or pre-resume video frames (such as timestamp 0:00)
+        // from flashing on screen before the resume seek to target completes.
+        // ====================================================================
+        this._resumeVideoSuppressed = false;
 
         // ---- Audio normalization (Web Audio API) ----
         this._audioContext = null;
@@ -189,10 +208,30 @@ export class WebOSPlayer {
             document.body.appendChild(this.container);
         }
 
+        /*
+         * ====================================================================
+         * Container Letterbox Background Normalization
+         * ====================================================================
+         * WebOSPlayer fits the hardware-associated <video> element layout box
+         * to match the stream's exact aspect ratio in _fitVideoBox().
+         * Because document-level player-active transparency rules make the body
+         * and app wrappers transparent, the container itself must have an opaque
+         * solid black background to ensure pillarbox and letterbox borders render
+         * in deep black rather than showing through to the underlying canvas.
+         * ====================================================================
+         */
+        this.container.style.backgroundColor = '#000000';
+
         this.container.appendChild(video);
         this._videoElement = video;
 
         this._bindEvents(video);
+
+        // The container narrows when lyrics are shown, so the box has to follow it
+        if (typeof ResizeObserver !== 'undefined' && !this._containerObserver) {
+            this._containerObserver = new ResizeObserver(() => this._fitVideoBox());
+            this._containerObserver.observe(this.container);
+        }
 
         return video;
     }
@@ -217,6 +256,8 @@ export class WebOSPlayer {
             seeked:        this._onSeeked.bind(this),
             volumechange:  this._onVolumeChange.bind(this),
             loadedmetadata: this._onLoadedMetadata.bind(this),
+            // Fires when the intrinsic size changes, e.g. an HLS variant switch
+            resize:        this._fitVideoBox.bind(this),
             // 'progress' = buffered range updates — useful for stall detection
             progress:      this._onProgress.bind(this)
         };
@@ -277,6 +318,7 @@ export class WebOSPlayer {
         this._timeUpdated = false;
         this._subtitleOffset = 0;
         this._previousOffset = 0;
+        this._hlsFallbackAttempted = false;
 
         // Initialize robust seek state immediately to avoid race conditions with early 'playing' events.
         // Do not attempt robust resume for live TV/streams.
@@ -287,10 +329,33 @@ export class WebOSPlayer {
 
         const video = this._ensureVideoElement();
 
+        // ====================================================================
+        // Audio & Video Suppression for Seamless Resume:
+        // When resuming playback from a non-zero position, native TV decoders
+        // and Chromium pipelines decode the initial keyframe at timestamp 0:00
+        // for a few frames before the seek to resumeSeconds takes effect.
+        // Mute audio and suppress visual presentation until the target GOP keyframe
+        // is reached, preventing the random 0:00 frame and audio burst from leaking.
+        // ====================================================================
+        if (this._robustSeekTarget > 0) {
+            // Mute audio if not already muted by the user
+            if (!video.muted) {
+                video.muted = true;
+                this._resumeAudioSuppressed = true;
+            }
+            // Suppress video element visibility until the seek completes
+            this._suppressVideoForResume(video);
+        }
+
         // Tear down any active Hls.js session before starting fresh
         this._destroyHlsPlayer();
 
+        // Detect whether the incoming stream is HLS (transcode, remux, or raw m3u8)
         const isHlsStream = options.isHls || (options.url && options.url.includes('.m3u8'));
+        // Persist HLS stream flag on the player instance for seeking and recovery logic
+        this._isHls = isHlsStream;
+        // Reset fallback guard so new stream playback can attempt clean Hls.js recovery if needed
+        this._hlsFallbackAttempted = false;
 
         if (isHlsStream && this._shouldUseNativeHls()) {
             /* ----------------------------------------------------------------
@@ -398,6 +463,25 @@ export class WebOSPlayer {
      * @returns {boolean}
      */
     _shouldUseNativeHls() {
+        // Query TV hardware capabilities and webOS major version
+        const caps = getDeviceCapabilities();
+        const webosVersion = caps?.webosVersion || 1;
+
+        // ---------------------------------------------------------------------
+        // WEBOS VERSION COMPATIBILITY GATE:
+        // On older webOS (< 5, including webOS 3 and 4.x), media fragments (#t=)
+        // are strictly disabled because older demuxers crash with MEDIA_ERR_DECODE.
+        // Furthermore, the native webOS 3/4 HLS pipeline silently discards or snaps back
+        // programmatic seeks into unbuffered HLS chunks at startup.
+        // If Hls.js is supported (MSE is available), prefer Hls.js MSE on webOS < 5
+        // so resume seeks land reliably at the target position instead of restarting from 0:00.
+        // ---------------------------------------------------------------------
+        if (webosVersion < 5 && Hls.isSupported()) {
+            log.info(`WebOSPlayer: webOS ${webosVersion} (< 5) detected — preferring Hls.js MSE pipeline for reliable resume seek`);
+            return false;
+        }
+
+        // Test native browser HLS MIME support for webOS 5+ hardware decoding
         const video = document.createElement('video');
         const nativeHls = !!(
             video.canPlayType('application/x-mpegURL').replace(/no/, '') ||
@@ -417,17 +501,25 @@ export class WebOSPlayer {
         // Clear any stale source first
         video.removeAttribute('src');
 
+        // Ensure HLS manifest exists before assigning source
+        await MediaHelper.pollHlsManifest(options.url);
         // ====================================================================
         // MEDIA FRAGMENT RESUME:
         // Append `#t=seconds` to the url for HLS streaming to hint the native HLS demuxer
         // to download chunks starting from the resume position immediately.
+        // NOTE: Older WebOS 3/4 demuxers crash with MEDIA_ERR_DECODE when `#t=` is present,
+        // so we strictly gate media fragments to WebOS 5+.
         // ====================================================================
         let url = options.url;
         const seconds = (options.playerStartPositionTicks || 0) / 10000000;
-        if (seconds > 0) {
+        const webosVersion = getDeviceCapabilities()?.webosVersion || 1;
+        if (seconds > 0 && webosVersion >= 5) {
             log.info(`WebOSPlayer: Appending media fragment #t=${seconds} to native HLS URL`);
             url += `#t=${seconds}`;
         }
+
+        // Ensure HLS manifest exists before assigning source
+        await MediaHelper.pollHlsManifest(options.url);
 
         // Use a <source> element with the MIME type hint so WebOS picks the
         // right codec path — without it, some versions skip the native HLS path.
@@ -454,9 +546,19 @@ export class WebOSPlayer {
 
             const onLoadError = () => {
                 video.removeEventListener('canplay', onCanPlay);
-                const err = video.error;
-                log.error('WebOSPlayer: Native HLS source load error', err);
-                reject(err || new Error('Native HLS load failed'));
+                video.removeEventListener('error', onLoadError);
+                const formatted = MediaHelper.formatMediaError(video.error);
+                log.error('WebOSPlayer: Native HLS source load error', formatted.message);
+
+                // If native HLS failed on this platform (common on webOS 4), fall back to Hls.js seamlessly
+                if (Hls.isSupported() && !this._hlsFallbackAttempted) {
+                    log.info('WebOSPlayer: Native HLS load failed — attempting seamless fallback to Hls.js MSE pipeline');
+                    this._hlsFallbackAttempted = true;
+                    this._playWithHlsJs(video, options).then(resolve).catch(reject);
+                    return;
+                }
+
+                reject(video.error || new Error(formatted.message));
             };
 
             video.addEventListener('canplay', onCanPlay);
@@ -504,10 +606,12 @@ export class WebOSPlayer {
         // We append the media fragment `#t=seconds` to the direct play URL.
         // This instructs the WebOS media pipeline to start demuxing/decoding
         // from the resume position right from the first packet load.
+        // NOTE: Strictly gated to WebOS 5+ to prevent decode errors on WebOS 3/4.
         // ====================================================================
         let url = options.url;
         const seconds = (options.playerStartPositionTicks || 0) / 10000000;
-        if (seconds > 0) {
+        const webosVersion = getDeviceCapabilities()?.webosVersion || 1;
+        if (seconds > 0 && webosVersion >= 5) {
             log.info(`WebOSPlayer: Appending media fragment #t=${seconds} to native DirectPlay URL`);
             url += `#t=${seconds}`;
         }
@@ -582,28 +686,135 @@ export class WebOSPlayer {
         return new Promise((resolve, reject) => {
             log.info('WebOSPlayer: Hls.js loading', options.url);
 
+            // -------------------------------------------------------------------------
+            // HLS.js Buffer Configuration & Stall Prevention
+            // -------------------------------------------------------------------------
+            // Browsers/emulators impose strict MSE memory quotas. Retaining 60-120s of
+            // forward buffer at high bitrates triggers quota exceeded exceptions and stalls.
+            // Align with jellyfin-web MSE defaults (30s buffer / 60s max).
+            // -------------------------------------------------------------------------
+            const configuredMaxBuffer = PlayerSettings.get('html5MaxBufferLength');
+            const maxBufferLength = configuredMaxBuffer !== undefined && configuredMaxBuffer !== null
+                ? Number(configuredMaxBuffer)
+                : 30;
+            const configuredMaxMaxBuffer = PlayerSettings.get('html5MaxMaxBufferLength');
+            const maxMaxBufferLength = configuredMaxMaxBuffer !== undefined && configuredMaxMaxBuffer !== null
+                ? Number(configuredMaxMaxBuffer)
+                : 60;
+
             const hls = new Hls({
                 startPosition:         (options.playerStartPositionTicks || 0) / 10000000,
-                maxBufferLength:       60,
-                maxMaxBufferLength:    120,
+                maxBufferLength:       maxBufferLength,
+                maxMaxBufferLength:    maxMaxBufferLength,
                 manifestLoadingTimeOut: 20000,
                 levelLoadingTimeOut:    20000,
                 fragLoadingTimeOut:     20000,
-                maxBufferSize:          60 * 1000 * 1000, // 60 MB
-                enableWorker:           true
+                maxBufferSize:          60 * 1000 * 1000,
+                enableWorker:           true,
+                // Rely on standard Hls.js hole handling (matching official jellyfin-web baseline).
+                // Do not force high maxBufferHole or aggressive watchdog nudging: setting maxBufferHole
+                // triggers premature _trySkipBufferHole seeks whenever the forward buffer drops below the
+                // threshold, making the player skip back and forth and causing subtitle desync.
             });
+
+            let bufferReady = false;
+            let initialBufferTimer = null;
+            let resolved = false;
+            let appendedSegmentsCount = 0;
+
+            const resolveOnce = (value) => {
+                if (resolved) return;
+                resolved = true;
+                clearTimeout(initialBufferTimer);
+                hls.off(Hls.Events.BUFFER_APPENDED, onBufferAppended);
+                resolve(value);
+            };
+
+            const rejectOnce = (reason) => {
+                if (resolved) return;
+                resolved = true;
+                clearTimeout(initialBufferTimer);
+                hls.off(Hls.Events.BUFFER_APPENDED, onBufferAppended);
+                reject(reason);
+            };
+
+            const startPlayback = () => {
+                // Restore visual presentation once Hls.js is ready to render playback
+                this._restoreVideoAfterResume(video);
+                const playPromise = video.play();
+                if (playPromise !== undefined && typeof playPromise.then === 'function') {
+                    playPromise
+                        .then(() => resolveOnce())
+                        .catch(err => this._handleAutoplayError(err, video, options, resolveOnce, rejectOnce));
+                } else {
+                    resolveOnce();
+                }
+            };
+
+            // Calculate target resume position in seconds
+            const resumeSeconds = (options.playerStartPositionTicks || 0) / 10000000;
+
+            // -----------------------------------------------------------------
+            // Buffer-Readiness Gate with Resume Stabilization:
+            // Defer play() until initial media data is buffered.
+            // On resume (resumeSeconds > 0), the playhead may land near the end
+            // of a segment (e.g. 200ms before segment boundary). If play() starts
+            // immediately with < 1.0s of buffer, the decoder starves before the
+            // next segment loads, causing an instant bufferSeekOverHole jump.
+            // We inspect the native video.buffered TimeRanges directly to ensure
+            // at least 1.0s of forward cushion exists (or wait for segment #2).
+            // -----------------------------------------------------------------
+            const onBufferAppended = () => {
+                if (bufferReady) return;
+                appendedSegmentsCount++;
+
+                // If resuming, calculate forward buffer cushion from the native video element
+                if (resumeSeconds > 0 && video) {
+                    let forwardBuffer = 0;
+                    const checkPos = (video.currentTime > 0) ? video.currentTime : resumeSeconds;
+                    const ranges = video.buffered;
+
+                    // Locate the buffered range covering our current resume target position
+                    if (ranges && ranges.length > 0) {
+                        for (let i = 0; i < ranges.length; i++) {
+                            // Allow a small 0.5s tolerance for GOP boundary rounding
+                            if (checkPos >= ranges.start(i) - 0.5 && checkPos <= ranges.end(i)) {
+                                forwardBuffer = ranges.end(i) - checkPos;
+                                break;
+                            }
+                        }
+                    }
+
+                    // If forward cushion is thin (< 1.0s) and we haven't buffered segment #2 yet, wait
+                    if (forwardBuffer < 1.0 && appendedSegmentsCount < 2) {
+                        log.info(`WebOSPlayer: HLS.js segment #${appendedSegmentsCount} appended, forward buffer ${forwardBuffer.toFixed(2)}s < 1.0s — waiting for next segment to stabilize resume`);
+                        return;
+                    }
+                }
+
+                // Buffer is now healthy and stabilized for smooth playback engagement
+                bufferReady = true;
+                clearTimeout(initialBufferTimer);
+                log.info(`WebOSPlayer: HLS.js initial buffer ready (${appendedSegmentsCount} segment(s)), starting playback`);
+                startPlayback();
+            };
+
+            initialBufferTimer = setTimeout(() => {
+                if (!bufferReady) {
+                    log.warn('WebOSPlayer: Hls.js initial buffer timeout (3s) — forcing play');
+                    bufferReady = true;
+                    startPlayback();
+                }
+            }, 3000);
 
             hls.on(Hls.Events.MANIFEST_PARSED, () => {
                 log.info('WebOSPlayer: Hls.js manifest parsed');
                 this._applyInitialTracks(options, hls);
-                const playPromise = video.play();
-                if (playPromise !== undefined && typeof playPromise.then === 'function') {
-                    playPromise
-                        .then(resolve)
-                        .catch(err => this._handleAutoplayError(err, video, options, resolve, reject));
-                } else {
-                    resolve();
+
+                if (options.autoPlay === false) {
+                    resolveOnce();
                 }
+                // Otherwise BUFFER_APPENDED or timeout will call startPlayback()
             });
 
             if (options.playerStartPositionTicks) {
@@ -613,7 +824,6 @@ export class WebOSPlayer {
             }
 
             hls.on(Hls.Events.ERROR, (event, data) => {
-                // Swallow non-fatal buffer stalls — they typically self-recover
                 if (data.details === 'bufferStalledError' && !data.fatal) {
                     log.warn('WebOSPlayer: Hls.js non-fatal buffer stall');
                     return;
@@ -632,11 +842,14 @@ export class WebOSPlayer {
                             break;
                         default:
                             hls.destroy();
-                            reject(new Error('Hls.js fatal error'));
+                            rejectOnce(new Error('Hls.js fatal error'));
                             break;
                     }
                 }
             });
+
+            // Listen for the first segment buffered — triggers play()
+            hls.on(Hls.Events.BUFFER_APPENDED, onBufferAppended);
 
             hls.loadSource(options.url);
             hls.attachMedia(video);
@@ -708,51 +921,52 @@ export class WebOSPlayer {
                 // setAudioStreamIndex() via JellyfinPlayer and will correctly
                 // fire audiotrackswitchfailed → restart if tracks are empty.
                 // ─────────────────────────────────────────────────────────────
+                // ─────────────────────────────────────────────────────────────
+                // Progressive DirectPlay track selection
+                // ─────────────────────────────────────────────────────────────
+                // Retrieve the actual default audio track index from the container streams.
+                // This is necessary because options.mediaSource.DefaultAudioStreamIndex holds
+                // the server-resolved preference track, but for progressive DirectPlay,
+                // the TV natively plays whatever track is designated default in the file.
+                const defaultIndex = this._getContainerDefaultAudioIndex(options.mediaSource);
+
+                // Track stream index requested by the player UI
+                const requestedIndex = options.audioStreamIndex;
+
+                // Compare requested index against actual container default index.
+                // NOTE: Do not compare against options.mediaSource.DefaultAudioStreamIndex because
+                // Jellyfin dynamically echoes the requested AudioStreamIndex there, which would
+                // falsely cause every requested track to be treated as container default!
+                const isDefaultTrack = (defaultIndex !== undefined && Number(requestedIndex) === Number(defaultIndex)) ||
+                                       (defaultIndex === undefined && resolvedIndex === 0);
+
+                // If the requested track is already the container's default track,
+                // the WebOS native media engine is ALREADY demuxing and playing it natively
+                // (including TrueHD Atmos or DTS-HD MA passed through via eARC).
+                // Attempting to invoke setAudioStreamIndex() here would cause
+                // _resolveNativeAudioIndex() to return -1 (since Chromium's HTML5 audioTracks
+                // collection hides TrueHD/DTS passthrough tracks), which would trigger a
+                // spurious audiotrackswitchfailed event, abort in-flight play() promises,
+                // and force an unnecessary, broken remux restart.
+                if (isDefaultTrack) {
+                    log.info('WebOSPlayer: _applyInitialTracks — requested track', requestedIndex,
+                        'is container default. Already playing natively in hardware, skipping track switch.');
+                    return;
+                }
+
+                // If audioTracks collection is absent or empty, we cannot switch tracks in the browser
                 if (!nativeTracks || nativeTracks.length === 0) {
-                    // ── Direct-play MKV/MP4: AudioStreamIndex is ignored by the server ──
-                    //
-                    // When Jellyfin serves a file with Static=true (DirectPlay), it just
-                    // pipes raw container bytes. The AudioStreamIndex query parameter is
-                    // silently ignored — the server never demuxes or selects a track.
-                    // WebOS then picks whatever track the container flags as default.
-                    //
-                    // Strategy:
-                    //   • Requested track = container default → nothing to do, correct
-                    //     track is already playing. Skip silently.
-                    //
-                    //   • Requested track ≠ container default → the wrong track is playing.
-                    //     We fire audiotrackswitchfailed to schedule a deferred remux
-                    //     restart AFTER play() finishes resolving (so we don't cause
-                    //     "play() interrupted by new load request").
-                    //     The restart uses 'remux' mode so the server runs ffmpeg and
-                    //     actually selects the correct audio track.
-                    // ─────────────────────────────────────────────────────────────────
-                    // Retrieve the actual default audio track index from the container streams.
-                    // This is necessary because options.mediaSource.DefaultAudioStreamIndex holds
-                    // the server-resolved preference track, but for progressive DirectPlay,
-                    // the TV natively plays whatever track is designated default in the file.
-                    const defaultIndex = this._getContainerDefaultAudioIndex(options.mediaSource);
-
-                    // Track stream index requested by the player UI
-                    const requestedIndex = options.audioStreamIndex;
-
-                    // Compare requested index against container default index
-                    const isDefaultTrack = (defaultIndex !== undefined && Number(requestedIndex) === Number(defaultIndex));
-
-                    if (isDefaultTrack) {
-                        log.debug('WebOSPlayer: _applyInitialTracks — audioTracks empty (direct-play), requested track is the container default. No action needed.');
-                    } else {
-                        log.warn('WebOSPlayer: _applyInitialTracks — audioTracks empty, requested index', requestedIndex,
-                            '≠ container default', defaultIndex, '. Scheduling deferred remux restart.');
-                        // Use setTimeout (macrotask) rather than Promise.resolve() (microtask)
-                        // to guarantee the restart fires AFTER play() has fully resolved.
-                        // A microtask still races with video.play()'s own promise within the
-                        // same event loop tick and can trigger "AbortError: play() was interrupted".
-                        setTimeout(() => {
-                            this.onEvent({ type: 'audiotrackswitchfailed', data: { listIndex: resolvedIndex } });
-                        }, 0);
-                    }
+                    log.warn('WebOSPlayer: _applyInitialTracks — audioTracks empty, requested index', requestedIndex,
+                        '≠ container default', defaultIndex, '. Scheduling deferred remux restart.');
+                    // Use setTimeout (macrotask) rather than Promise.resolve() (microtask)
+                    // to guarantee the restart fires AFTER play() has fully resolved.
+                    // A microtask still races with video.play()'s own promise within the
+                    // same event loop tick and can trigger "AbortError: play() was interrupted".
+                    setTimeout(() => {
+                        this.onEvent({ type: 'audiotrackswitchfailed', data: { listIndex: resolvedIndex } });
+                    }, 0);
                 } else {
+                    // Non-default track requested and nativeTracks is populated: switch via HTML5 audioTracks
                     const outputIndex = nativeTracks.length <= 1 ? 0 : resolvedIndex;
                     this.setAudioStreamIndex(outputIndex);
                 }
@@ -918,7 +1132,23 @@ export class WebOSPlayer {
                     this._robustSeekPending = false;
                     this._robustSeekTarget = null;
 
-                    // Emit event so JellyfinPlayer can restart with Remux mode
+                    // ---------------------------------------------------------
+                    // SEAMLESS HLS.JS FALLBACK ON NATIVE HLS SEEK FAILURE:
+                    // If native HLS seeking failed to land (common on older hardware or
+                    // exotic streams), seamlessly hand off to Hls.js MSE pipeline.
+                    // Hls.js manages segments via MediaSource without relying on native #t=.
+                    // ---------------------------------------------------------
+                    if (this._isHls && Hls.isSupported() && !this._hlsFallbackAttempted) {
+                        log.info('WebOSPlayer: Native HLS seek failed — attempting seamless fallback to Hls.js MSE pipeline');
+                        this._hlsFallbackAttempted = true;
+                        this._destroyHlsPlayer();
+                        this._playWithHlsJs(video, this._currentPlayOptions).catch(err => {
+                            log.error('WebOSPlayer: Hls.js fallback failed', err);
+                        });
+                        return;
+                    }
+
+                    // Emit event so JellyfinPlayer can handle the failure cleanly
                     this.onEvent({
                         type: 'resumeseekfailed',
                         data: { targetPositionTicks: Math.round(time * 10000000) }
@@ -962,8 +1192,11 @@ export class WebOSPlayer {
              try {
                  const currentPos = video.currentTime || 0;
                  const drift = Math.abs(currentPos - resumeSeconds);
-                 if (drift < 15 || currentPos >= (resumeSeconds - 15)) {
+                 // Ensure currentPos is genuinely advanced (> 0.5s) to avoid false positive when at 0:00
+                 if (currentPos > 0.5 && (drift < 15 || currentPos >= (resumeSeconds - 15))) {
                      log.info('WebOSPlayer: Media fragment already positioned the playhead — skipping explicit seek.');
+                     // Media fragment landed natively at resume point; reveal video surface
+                     this._restoreVideoAfterResume(video);
                      this._doPlayWithResume(video, options, resolve, reject);
                      return;
                  }
@@ -987,6 +1220,9 @@ export class WebOSPlayer {
                  if (seekTimeout) clearTimeout(seekTimeout);
                  seekCompleted = true;
                  log.debug('WebOSPlayer: Explicit seek completed');
+                 // The native seek completed and the actual target resume frame is decoded;
+                 // safely restore video element visibility before kicking playback.
+                 this._restoreVideoAfterResume(video);
                  this._doPlayWithResume(video, options, resolve, reject);
              };
 
@@ -1005,10 +1241,14 @@ export class WebOSPlayer {
                  video.removeEventListener('seeked', onSeeked);
                  if (!seekCompleted) {
                      log.warn('WebOSPlayer: Explicit seek timed out (3s) — starting playback from current position');
+                     // Ensure video visibility is restored even if seek timed out
+                     this._restoreVideoAfterResume(video);
                      this._doPlayWithResume(video, options, resolve, reject);
                  }
-             }, 3000);
+             }, 3500);
          } else {
+             // No resume seek required; ensure video surface is visible
+             this._restoreVideoAfterResume(video);
              this._doPlayWithResume(video, options, resolve, reject);
          }
      }
@@ -1054,10 +1294,55 @@ export class WebOSPlayer {
     }
 
     /**
+     * Suppress video element presentation during resume seek operations.
+     * Prevents stale pre-seek or timestamp 0:00 video frames from rendering
+     * onto the screen before the decoder finishes seeking to the resume target.
+     *
+     * @private
+     * @param {HTMLVideoElement} video - The HTML5 video element
+     */
+    _suppressVideoForResume(video) {
+        if (!video) return;
+        this._resumeVideoSuppressed = true;
+        // Apply both zero opacity and hidden visibility for robust compositor handling
+        video.style.opacity = '0';
+        video.style.visibility = 'hidden';
+        log.debug('WebOSPlayer: Suppressed video visibility for resume');
+    }
+
+    /**
+     * Restore video element presentation once the resume position is landed.
+     * Re-reveals the video element displaying the confirmed target resume frame.
+     *
+     * @private
+     * @param {HTMLVideoElement} [video] - The HTML5 video element (optional, defaults to _videoElement)
+     */
+    _restoreVideoAfterResume(video) {
+        if (!this._resumeVideoSuppressed) return;
+        this._resumeVideoSuppressed = false;
+        const targetVideo = video || this._videoElement;
+        if (targetVideo) {
+            targetVideo.style.opacity = '';
+            targetVideo.style.visibility = '';
+            log.debug('WebOSPlayer: Restored video visibility after resume landing');
+        }
+    }
+
+    /**
      * Pause playback.
      */
     pause() {
+        // Disarm any queued post-seek unpause operations so an explicit pause halts playback
+        this._pendingPlayAfterSeek = false;
         this._videoElement?.pause();
+    }
+
+    /**
+     * Check if player is actively seeking
+     * @returns {boolean} True if WebOS HTML5 video is seeking
+     */
+    get isSeeking() {
+        return Boolean(this._videoElement?.seeking);
     }
 
     /**
@@ -1065,6 +1350,26 @@ export class WebOSPlayer {
      */
     unpause() {
         if (!this._videoElement) return;
+
+        /*
+         * ====================================================================
+         * ACTIVE SEEK PLAYBACK GUARD
+         * ====================================================================
+         * If the HTML5 media element is currently seeking (video.seeking === true),
+         * calling video.play() immediately unpauses playback of the stale pre-seek
+         * buffer while the demuxer is still fetching the target keyframe.
+         * Queue the play command to execute in _onSeeked once repositioning completes.
+         * ====================================================================
+         */
+        if (this._videoElement.seeking) {
+            log.debug('WebOSPlayer: seek in progress — queueing play on seeked');
+            this._pendingPlayAfterSeek = true;
+            return;
+        }
+
+        // Seek is not in flight — clear queued play flag
+        this._pendingPlayAfterSeek = false;
+
         this._videoElement.play().catch(err => {
             if (err.name === 'NotAllowedError') {
                 log.warn('WebOSPlayer: unpause blocked — retrying muted');
@@ -1083,6 +1388,7 @@ export class WebOSPlayer {
      * @returns {Promise<void>}
      */
     async stop() {
+        this._pendingPlayAfterSeek = false;
         this._cancelRobustResume = true;
         this._robustSeekTarget   = null;
         this._robustSeekPending  = false;
@@ -1094,6 +1400,19 @@ export class WebOSPlayer {
         this._destroyHlsPlayer();
 
         const video = this._videoElement;
+
+        if (this._resumeAudioSuppressed && video) {
+            video.muted = false;
+        }
+
+        this._resumeAudioSuppressed = false;
+
+        // Restore video element presentation if stopped while resume was in flight
+        if (this._resumeVideoSuppressed && video) {
+            this._restoreVideoAfterResume(video);
+        }
+        this._resumeVideoSuppressed = false;
+
         if (video) {
             // Remove events BEFORE clearing src to stop spurious error events
             this._unbindEvents(video);
@@ -1187,8 +1506,17 @@ export class WebOSPlayer {
             video.currentTime = Math.max(0, seconds);
         }
 
-        // Emit a synthetic timeupdate immediately so paused-state UI refreshes
-        this.onEvent({ type: 'timeupdate', data: { time: Math.max(0, seconds) } });
+        // ---------------------------------------------------------------------
+        // Defer timeupdate to native demuxer arrival:
+        // Do NOT fire a synthetic timeupdate here with seconds. In HLS
+        // (especially with transcoded audio and direct-streamed video), the
+        // webOS hardware demuxer lands on the nearest GOP keyframe, which
+        // may differ by 1–5 seconds from requested seconds. Emitting a synthetic
+        // timeupdate prematurely causes SubtitleManager and the UI clock to desync
+        // before the presentation time is settled.
+        // The authoritative timeupdate will fire from _onSeeked once the hardware
+        // demuxer completes repositioning.
+        // ---------------------------------------------------------------------
 
         // ---------------------------------------------------------------------
         // DirectPlay Seek Verification Guard:
@@ -1319,16 +1647,13 @@ export class WebOSPlayer {
         // the wrong track — we log clearly and signal to the caller instead.
         if (!audioTracks || audioTracks.length === 0) {
             // ── Direct-play MKV/MP4: audioTracks is not populated by WebOS ───────
-            //
-            // WebOS does not expose the HTML5 audioTracks API for progressive
-            // container downloads (MKV, MP4). The collection stays empty for
-            // the entire playback session, so any .enabled toggle is a no-op.
-            //
-            // Signal a restart to JellyfinPlayer so it can re-open the stream
-            // with AudioStreamIndex in the server URL, which causes the server
-            // (or the container parser) to serve the correct audio track from
-            // the start. This is the same path used for Transcode audio switches.
-            // ─────────────────────────────────────────────────────────────────
+            // If listIndex is 0 (first/default track), the container default track is
+            // already active and playing natively. There is no reason to restart.
+            if (listIndex === 0) {
+                log.info('WebOSPlayer: video.audioTracks is empty for direct-play, but listIndex is 0 (default track already playing). Skipping restart.');
+                return;
+            }
+
             log.warn('WebOSPlayer: video.audioTracks is empty for direct-play — firing audiotrackswitchfailed to trigger restart');
             this.onEvent({ type: 'audiotrackswitchfailed', data: { listIndex } });
             return;
@@ -1356,6 +1681,42 @@ export class WebOSPlayer {
 
         // Guard against out-of-bounds index resolution
         if (nativeIndex < 0 || nativeIndex >= audioTracks.length) {
+            // Check if this stream is the container default track (e.g. TrueHD or DTS).
+            // Passthrough formats are omitted from Chromium's audioTracks collection,
+            // returning nativeIndex -1. But since it is the default track, the TV hardware
+            // is already bitstreaming it over eARC natively — do NOT abort DirectPlay.
+            // ================================================================
+            // Verify Container Default Stream or Primary Passthrough Stream
+            // ================================================================
+            // Passthrough codecs (such as DTS-HD MA and TrueHD) are not mapped
+            // inside Chromium's audioTracks collection, yielding nativeIndex -1.
+            // When listIndex is 0 (the primary audio track) or when the track matches
+            // the container/server default, the WebOS hardware media engine is
+            // already bitstreaming this track over HDMI eARC natively.
+            // Suppress the restart to maintain seamless DirectPlay.
+            // ================================================================
+            const mediaStreams = this._currentPlayOptions?.mediaSource?.MediaStreams || [];
+            // Filter audio streams matching user player configuration
+            const audioStreams = mediaStreams.filter(s => {
+                if (s.Type !== 'Audio') return false;
+                const codec = (s.Codec || '').toLowerCase();
+                if (codec === 'truehd' && !isTrueHdSupported()) return false;
+                if ((codec.includes('dts') || codec === 'dca') && !isDtsSupported()) return false;
+                if ((codec === 'flac' || codec === 'alac') && !PlayerSettings.get('enableFlacInVideo')) return false;
+                return true;
+            });
+            // Resolve target stream from filtered audio list, falling back to all audio streams
+            const targetStream = audioStreams[listIndex] || mediaStreams.filter(s => s.Type === 'Audio')[listIndex];
+
+            const isDefault = targetStream
+                ? (targetStream.IsDefault || listIndex === 0)
+                : (listIndex === 0);
+
+            if (isDefault) {
+                log.info('WebOSPlayer: _resolveNativeAudioIndex returned out-of-range index for default/primary track (passthrough codec like TrueHD/DTS playing natively). Skipping restart.');
+                return;
+            }
+
             log.warn('WebOSPlayer: _resolveNativeAudioIndex returned out-of-range index', nativeIndex, 'for listIndex', listIndex, '— firing audiotrackswitchfailed');
             this.onEvent({ type: 'audiotrackswitchfailed', data: { listIndex } });
             return;
@@ -1427,9 +1788,14 @@ export class WebOSPlayer {
             return true;
         });
 
-        // Find the stream explicitly marked as default in the container metadata,
-        // or default to the first available audio track if none are marked.
-        const defaultStream = audioStreams.find(s => s.IsDefault) || audioStreams[0];
+        // 1. Check if an audio stream is explicitly marked IsDefault in container metadata
+        const containerDefault = audioStreams.find(s => s.IsDefault);
+        if (containerDefault) return containerDefault.Index;
+
+        // 2. Default to the first available audio track if none are explicitly marked.
+        // NOTE: We do not check mediaSource.DefaultAudioStreamIndex because Jellyfin
+        // dynamically overrides it with the client-requested track.
+        const defaultStream = audioStreams[0];
         return defaultStream ? defaultStream.Index : undefined;
     }
 
@@ -1754,21 +2120,156 @@ export class WebOSPlayer {
     // ========================================================================
 
     /**
-     * Set the video's CSS object-fit to simulate aspect ratio modes.
+     * Set the video's aspect ratio mode.
+     *
+     * WebOS Hardware Display Architecture:
+     * - Video decoding is handled by a dedicated hardware overlay plane beneath the web runtime.
+     * - The TV hardware video scaler maps its output window directly to the layout bounding box
+     *   (left, top, width, height) of the <video> DOM element.
+     * - The webOS hardware pipeline does not evaluate CSS object-fit properties on <video>.
+     * - Therefore, aspect ratio modes (auto, zoom, stretch) are achieved by explicitly computing
+     *   and applying layout geometry coordinates to the element style.
+     *
      * @param {'auto'|'zoom'|'stretch'} mode
      */
     setAspectRatio(mode) {
+        const targetMode = mode || 'auto';
+
+        // --------------------------------------------------------------------
+        // Reset Aspect Ratio Before Applying Zoom
+        // --------------------------------------------------------------------
+        // If previous mode was 'stretch' (or any non-default mode), reset the
+        // layout box to 'auto' first so residual stretch styling is cleared before
+        // computing and applying the oversized zoom bounding box.
+        if (targetMode === 'zoom') {
+            log.info('WebOSPlayer: Resetting aspect ratio to auto prior to applying zoom');
+            this._aspectMode = 'auto';
+            if (this._videoElement) {
+                this._videoElement.style.objectFit = 'fill';
+                this._fitVideoBox();
+            }
+        }
+
+        // Normalize aspect mode, falling back to 'auto'
+        this._aspectMode = targetMode;
         if (!this._videoElement) return;
 
-        const fitMap = {
-            zoom:    'cover',
-            stretch: 'fill',
-            auto:    'contain'
-        };
+        log.info('WebOSPlayer: Setting aspect ratio mode:', this._aspectMode);
 
-        const objectFit = fitMap[mode] || 'contain';
-        log.info('WebOSPlayer: Aspect ratio', mode, '→', objectFit);
-        this._videoElement.style.objectFit = objectFit;
+        // Keep object-fit set to fill so the element box and video rasterizer stay in sync
+        this._videoElement.style.objectFit = 'fill';
+
+        // Recalculate and apply explicit layout coordinates for the hardware punch-through window
+        this._fitVideoBox();
+    }
+
+    /**
+     * Get active aspect ratio mode.
+     * @returns {'auto'|'zoom'|'stretch'}
+     */
+    getAspectRatio() {
+        return this._aspectMode || 'auto';
+    }
+
+    /**
+     * Calculate and apply layout geometry for the <video> element.
+     *
+     * On webOS TV, the hardware video plane is aligned and scaled directly to the element's layout rect.
+     * We support three distinct modes:
+     *   1. 'auto' (Letterbox / Contain): Scale down using Math.min so the entire video fits inside the screen,
+     *      centering it with pillarbox or letterbox black borders.
+     *   2. 'zoom' (Crop / Cover): Scale up using Math.max so the video completely fills the screen without bars,
+     *      cropping symmetrically on the overflowing axis via negative offsets.
+     *   3. 'stretch' (Fill): Force the video box to match 100% of the screen width and height (0,0 to cw,ch),
+     *      stretching non-16:9 streams across the entire display panel.
+     *
+     * @private
+     */
+    _fitVideoBox() {
+        const video = this._videoElement;
+        if (!video) return;
+
+        // Container dimensions with fallback to viewport dimensions
+        const cw = (this.container && this.container.clientWidth) || window.innerWidth || 1920;
+        const ch = (this.container && this.container.clientHeight) || window.innerHeight || 1080;
+        const style = video.style;
+
+        // Container has no valid layout dimensions yet
+        if (!cw || !ch) return;
+
+        // Ensure positioning context is absolute within container and clear residual stretch constraints
+        style.position = 'absolute';
+        style.margin = '0';
+        style.right = '';
+        style.bottom = '';
+
+        // ====================================================================
+        // Mode 1: Fullscreen Stretch
+        // ====================================================================
+        // Forces the hardware video plane to stretch edge-to-edge across the screen
+        if (this._aspectMode === 'stretch') {
+            style.left = '0px';
+            style.top = '0px';
+            style.right = '0px';
+            style.bottom = '0px';
+            style.width = `${cw}px`;
+            style.height = `${ch}px`;
+            return;
+        }
+
+        // Intrinsic video stream dimensions
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+
+        // If metadata has not loaded yet, default to full viewport until loadedmetadata fires
+        if (!vw || !vh) {
+            style.left = '0px';
+            style.top = '0px';
+            style.right = '0px';
+            style.bottom = '0px';
+            style.width = `${cw}px`;
+            style.height = `${ch}px`;
+            return;
+        }
+
+        // ====================================================================
+        // Mode 2: Zoom (Cover / Crop)
+        // ====================================================================
+        // Scale by maximum factor to cover the full viewport, cropping overflowing edges
+        if (this._aspectMode === 'zoom') {
+            const scale = Math.max(cw / vw, ch / vh);
+            const w = Math.round(vw * scale);
+            const h = Math.round(vh * scale);
+            // Center the cropped frame symmetrically using negative offsets
+            const left = Math.round((cw - w) / 2);
+            const top = Math.round((ch - h) / 2);
+
+            style.left = `${left}px`;
+            style.top = `${top}px`;
+            style.right = '';
+            style.bottom = '';
+            style.width = `${w}px`;
+            style.height = `${h}px`;
+            return;
+        }
+
+        // ====================================================================
+        // Mode 3: Auto (Contain / Letterbox)
+        // ====================================================================
+        // Scale by minimum factor to preserve intrinsic aspect ratio within the viewport
+        const scale = Math.min(cw / vw, ch / vh);
+        const w = Math.round(vw * scale);
+        const h = Math.round(vh * scale);
+        // Center the letterboxed/pillarboxed video inside the screen
+        const left = Math.round((cw - w) / 2);
+        const top = Math.round((ch - h) / 2);
+
+        style.left = `${left}px`;
+        style.top = `${top}px`;
+        style.right = '';
+        style.bottom = '';
+        style.width = `${w}px`;
+        style.height = `${h}px`;
     }
 
     // ========================================================================
@@ -1894,23 +2395,50 @@ export class WebOSPlayer {
         const video = e.target;
 
         // Ignore stale error events fired during stop/cleanup (no src set)
-        if (!video.src && !this._hlsPlayer) {
+        if (!video.src && !this._hlsPlayer && (!video.firstChild || !video.firstChild.src)) {
             log.debug('WebOSPlayer: Ignoring error on empty source during cleanup');
             return;
         }
 
-        const errorCode    = video.error?.code    || 0;
-        const errorMessage = video.error?.message || 'Unknown error';
-        log.error('WebOSPlayer: Error', errorCode, errorMessage);
+        const formatted = MediaHelper.formatMediaError(video.error);
+        log.error(`WebOSPlayer: Error ${formatted.code} (${formatted.name}): ${formatted.message}`);
 
         // Attempt Hls.js media error recovery before giving up
-        if (errorCode === 3 && this._hlsPlayer) {
+        if (formatted.code === 3 && this._hlsPlayer) {
             log.info('WebOSPlayer: Attempting Hls.js media error recovery');
             this._hlsPlayer.recoverMediaError();
             return;
         }
 
-        this.onEvent({ type: 'error', data: { code: errorCode, message: errorMessage } });
+        const isNetworkError = formatted.code === 2 || /network|connection|pipeline_error_network/i.test(formatted.message);
+
+        // If native HLS playback triggered a decode error (code 3) or not supported (code 4)
+        // and Hls.js is available in this environment, attempt seamless fallback to Hls.js
+        const isHlsStream = this._currentPlayOptions?.isHls || (this._currentSrc && this._currentSrc.includes('.m3u8'));
+        if ((formatted.code === 3 || formatted.code === 4) && !this._hlsPlayer && isHlsStream && Hls.isSupported() && !this._hlsFallbackAttempted) {
+            log.warn('WebOSPlayer: Native HLS pipeline threw decode error. Attempting seamless Hls.js fallback...');
+            this._hlsFallbackAttempted = true;
+            this._playWithHlsJs(video, this._currentPlayOptions)
+                .catch(err => {
+                    log.error('WebOSPlayer: Fallback to Hls.js also failed:', err);
+                    this.onEvent({
+                        type: 'error',
+                        data: {
+                            ...formatted,
+                            isNetworkError
+                        }
+                    });
+                });
+            return;
+        }
+
+        this.onEvent({
+            type: 'error',
+            data: {
+                ...formatted,
+                isNetworkError
+            }
+        });
     }
 
     /** @private */
@@ -1952,6 +2480,17 @@ export class WebOSPlayer {
 
         if (this._robustSeekPending) {
             return; // suppress playing event until retry loop finishes
+        }
+
+        // Resume is now confirmed safe. Unmute audio.
+        if (this._resumeAudioSuppressed) {
+            this._resumeAudioSuppressed = false;
+            this.setMuted(false);
+        }
+
+        // Resume is confirmed safe. Ensure video element presentation is fully restored.
+        if (this._resumeVideoSuppressed) {
+            this._restoreVideoAfterResume(this._videoElement);
         }
 
         if (!this._started) {
@@ -2006,6 +2545,40 @@ export class WebOSPlayer {
     /** @private */
     _onSeeked() {
         const video = this._videoElement;
+
+        // ---------------------------------------------------------------------
+        // Demuxer Landed Confirmation:
+        // Dispatch the official 'seeked' event so orchestrator clears seeking lock.
+        // ---------------------------------------------------------------------
+        this.onEvent({ type: 'seeked' });
+
+        /*
+         * ====================================================================
+         * DEFERRED POST-SEEK PLAY DISPATCH
+         * ====================================================================
+         * If unpause() was requested while the native seek was actively in flight,
+         * execute the deferred playback resumption now that the hardware demuxer
+         * has firmly established its position on the target GOP keyframe.
+         * ====================================================================
+         */
+        if (this._pendingPlayAfterSeek) {
+            this._pendingPlayAfterSeek = false;
+            this.unpause();
+        }
+
+        // ---------------------------------------------------------------------
+        // Accurate Post-Seek Presentation Timestamp:
+        // Emit a timeupdate using the media element's true landed currentTime.
+        // In HLS (particularly with transcoded audio and direct-streamed video),
+        // the hardware demuxer snaps to the nearest GOP keyframe. Reporting
+        // the actual position ensures subtitles and the OSD timeline stay
+        // strictly synchronized with the hardware video presentation clock.
+        // ---------------------------------------------------------------------
+        this.onEvent({
+            type: 'timeupdate',
+            data: { time: this.getCurrentTime() }
+        });
+
         if (video && !video.paused) {
             this._onPlaying();
         }
@@ -2023,6 +2596,7 @@ export class WebOSPlayer {
     /** @private */
     _onLoadedMetadata() {
         log.debug('WebOSPlayer: Metadata loaded, duration:', this.getDuration());
+        this._fitVideoBox();
         this.onEvent({ type: 'loadedmetadata', data: { duration: this.getDuration() } });
     }
 
@@ -2087,6 +2661,20 @@ export class WebOSPlayer {
      */
     _startStallCheck() {
         this._clearStallCheck();
+
+        // Immediate check if navigator is already explicitly offline
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+            log.warn('WebOSPlayer: Playback stalled while navigator is offline — emitting network error early');
+            this.onEvent({
+                type: 'error',
+                data: {
+                    code: 2,
+                    message: 'MEDIA_ERR_NETWORK: Playback stalled while offline',
+                    isNetworkError: true
+                }
+            });
+            return;
+        }
 
         // ----------------------------------------------------------------
         // Sample the buffer AND currentTime RIGHT NOW, at the moment the
@@ -2203,6 +2791,19 @@ export class WebOSPlayer {
             this._stallTimer = setTimeout(() => {
                 if (!this._videoElement || this._videoElement.paused || !this._started) return;
 
+                // If navigator turned offline during stall, fire network error immediately
+                if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+                    this.onEvent({
+                        type: 'error',
+                        data: {
+                            code: 2,
+                            message: 'MEDIA_ERR_NETWORK: Playback stalled while offline',
+                            isNetworkError: true
+                        }
+                    });
+                    return;
+                }
+
                 // Self-recovery check (same as fast path)
                 const timeNow = this._videoElement.currentTime;
                 if (timeNow > timeAtStall + 0.1) {
@@ -2282,12 +2883,24 @@ export class WebOSPlayer {
         this.stop();
         this._destroyHlsPlayer();
 
+        if (this._containerObserver) {
+            this._containerObserver.disconnect();
+            this._containerObserver = null;
+        }
+
         if (this._videoElement) {
             this._unbindEvents(this._videoElement);
             if (this._videoElement.parentNode) {
                 this._videoElement.parentNode.removeChild(this._videoElement);
             }
             this._videoElement = null;
+        }
+
+        // ---------------------------------------------------------------------
+        // Reset container background presentation override
+        // ---------------------------------------------------------------------
+        if (this.container) {
+            this.container.style.backgroundColor = '';
         }
     }
 }

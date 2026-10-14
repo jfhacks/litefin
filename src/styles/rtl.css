@@ -32,9 +32,11 @@
     right: 0;
 }
 
-/* Hover reveal logic for RTL - matching the specificity and logic of the main sheet */
+/* Hover / Focus reveal logic for RTL - matching the specificity and logic of the main sheet */
 [dir="rtl"] body.sidebar-mode-hidden .sidebar-hover-trigger:hover + .sidebar:not(.expanded),
-[dir="rtl"] body.sidebar-mode-hidden .sidebar:hover:not(.expanded) {
+[dir="rtl"] body.sidebar-mode-hidden .sidebar:hover:not(.expanded),
+[dir="rtl"] body.sidebar-mode-hidden .sidebar.has-focus,
+[dir="rtl"] body.sidebar-mode-hidden .sidebar:focus-within {
     -webkit-transform: translate3d(0, 0, 0);
     transform: translate3d(0, 0, 0);
 }
@@ -54,6 +56,16 @@
 [dir="rtl"] .settings-menu-btn .menu-icon {
     margin-right: 0;
     margin-left: 16px;
+}
+
+[dir="rtl"] .theme-color-swatch-badge {
+    margin-right: 0;
+    margin-left: 12px;
+}
+
+[dir="rtl"] .theme-color-modal-header-preview .preview-dot {
+    margin-right: 0;
+    margin-left: 10px;
 }
 
 [dir="rtl"] .sidebar.hidden {
@@ -148,7 +160,9 @@
     right: 0;
 }
 
-[dir="rtl"] body.sidebar-mode-hidden .sidebar:not(.expanded) {
+/* RTL off-screen translation when hidden - omit :focus-within for Chromium <63 compatibility */
+[dir="rtl"] body.sidebar-mode-hidden .sidebar:not(.expanded):not(.has-focus) {
+    -webkit-transform: translate3d(100%, 0, 0);
     transform: translate3d(100%, 0, 0);
 }
 
@@ -556,6 +570,11 @@
     margin: 0;
 }
 
+[dir="rtl"] .modal-star-btn {
+    margin-left: 0;
+    margin-right: 12px;
+}
+
 [dir="rtl"] .identity-card {
     text-align: right !important;
 }
@@ -631,3 +650,72 @@
     margin-right: 0;
     margin-left: 12px;
 }
+
+[dir="rtl"] .hero-carousel-container.indicator-lines .hero-dot {
+    margin-right: 0;
+    margin-left: 8px;
+}
+
+[dir="rtl"] .hero-carousel-container.indicator-lines .hero-dot:last-child {
+    margin-left: 0;
+}
+
+[dir="rtl"] .hero-carousel-container.indicator-dots .hero-dot {
+    margin-right: 0;
+    margin-left: 10px;
+}
+
+[dir="rtl"] .hero-carousel-container.indicator-dots .hero-dot:last-child {
+    margin-left: 0;
+}
+
+[dir="rtl"] .hero-carousel-container.banner.indicator-lines .hero-indicators {
+    left: 40px;
+    right: 40px;
+}
+
+[dir="rtl"] .hero-carousel-container.banner.compact.indicator-lines .hero-indicators {
+    left: 30px;
+    right: 30px;
+}
+
+/* Seerr Media Type Badges */
+[dir="rtl"] .seerr-type-badge {
+    left: auto;
+    right: 10px;
+}
+
+/* ========================================================================= */
+/* Details Page Technical Badges RTL Flipping                                */
+/* ========================================================================= */
+[dir="rtl"] .tech-pill {
+    margin-right: 0;
+    margin-left: 10px;
+}
+
+[dir="rtl"] .tech-pill:last-child {
+    margin-left: 0;
+}
+
+[dir="rtl"] .tech-pill-icon {
+    margin-right: 0;
+    margin-left: 6px;
+}
+
+/* ========================================================================= */
+/* Image Editor Modal RTL Flipping                                           */
+/* ========================================================================= */
+[dir="rtl"] .image-tab-btn {
+    margin-right: 0;
+    margin-left: 8px;
+}
+
+[dir="rtl"] .image-tab-btn:last-child {
+    margin-left: 0;
+}
+
+[dir="rtl"] .image-card {
+    margin-right: 0;
+    margin-left: 14px;
+}
+

@@ -24,6 +24,9 @@ import LyricsModal from './LyricsModal.js';
 import DescriptionModal from './DescriptionModal.js';
 import SyncPlayNotification from './SyncPlayNotification.js';
 import ConfirmExitModal from './ConfirmExitModal.js';
+import ResumeProfilesMenu from './ResumeProfilesMenu.js';
+import PlayerMediaInfoModal from './PlayerMediaInfoModal.js';
+import SubtitleDownloadModal from './SubtitleDownloadModal.js';
 
 import '../../styles/description-modal.css';
 
@@ -72,6 +75,7 @@ export default class OSDController extends Component {
 
         // Seek Session
         this._seekTargetTicks = null;
+        this._seekInitialPos = null;
         this._seekStartTime = null;
         this._seekDebounceTimer = null;
         this._seekRequiresConfirmation = false;
@@ -81,6 +85,7 @@ export default class OSDController extends Component {
         this._seekHeldDirection = null;
         this._seekHoldElapsed = 0;
         this._seekResumePlayback = false;
+        this._seekDirection = null;
 
         // Focus & Track State
         // Row -1: Overlays (persistent widgets)
@@ -99,6 +104,27 @@ export default class OSDController extends Component {
         this._cachedHeaderRow = [];
         this._cachedControlsRow = [];
         this._cachedSeekbar = null;
+
+        /*
+         * ====================================================================
+         * STEALTH / ANTI-SPOILER OSD STATE
+         * ====================================================================
+         * Manages state for the minimalist spoiler-free playback mode:
+         * - _isHoldingDown: whether the Down button is currently held down.
+         * - _downHoldTimer: 4-second timeout to reveal Layer 1 controls.
+         * - _downHoldWatchdog: autorepeat idle watchdog for TV hardware.
+         * - _stealthHudTimeout: auto-dismiss timer for the transient HUD.
+         * ====================================================================
+         */
+        this._isHoldingDown = false;
+        this._downHoldTimer = null;
+        this._downHoldWatchdog = null;
+        this._stealthHudTimeout = null;
+        this._osdStealthHudEl = null;
+        this._osdStealthIconEl = null;
+        this._osdStealthTextEl = null;
+        this._osdHoldIndicatorEl = null;
+        this._osdHoldRingProgressEl = null;
 
         /*
          * Up Next dialog state.
@@ -121,6 +147,11 @@ export default class OSDController extends Component {
             // Listen to plugin state changes for the button
             eventBus.on('syncplay:enabled', this._boundSyncPlayButtonState);
             eventBus.on('syncplay:disabled', this._boundSyncPlayButtonState);
+
+            // Listen to skip length setting updates to dynamically update button icons
+            this._boundUpdateSkipButtonIcons = () => this._updateSkipButtonIcons();
+            eventBus.on('pref:skipBackLength', this._boundUpdateSkipButtonIcons);
+            eventBus.on('pref:skipForwardLength', this._boundUpdateSkipButtonIcons);
         });
 
         this._initMenus();
@@ -282,9 +313,16 @@ export default class OSDController extends Component {
 
         // SyncPlay notification overlay
         this.syncPlayNotification = new SyncPlayNotification(this);
+        this.resumeProfilesMenu = new ResumeProfilesMenu(this);
 
         // Confirm exit modal — prompts before exiting playback
         this.confirmExitModal = new ConfirmExitModal(this);
+
+        // Technical media information modal
+        this.playerMediaInfoModal = new PlayerMediaInfoModal(this);
+
+        // In-player remote subtitle download modal
+        this.subtitleDownloadModal = new SubtitleDownloadModal(this);
 
         this.menus = [
             this.audioMenu,
@@ -304,8 +342,32 @@ export default class OSDController extends Component {
             this.lyricsModal,
             this.descriptionModal,
             this.syncPlayNotification,
-            this.confirmExitModal
+            this.confirmExitModal,
+            this.resumeProfilesMenu,
+            this.playerMediaInfoModal,
+            this.subtitleDownloadModal
         ];
+    }
+
+    /**
+     * Open the in-player Subtitle Download Modal.
+     * Smoothly transitions from TrackMenu to SubtitleDownloadModal without disrupting playback.
+     */
+    openSubtitleDownloadModal() {
+        if (!this.subtitleDownloadModal) {
+            this.subtitleDownloadModal = new SubtitleDownloadModal(this);
+        }
+        if (this.subtitleMenu) {
+            this.subtitleMenu.hide();
+        }
+        this.activeMenu = this.subtitleDownloadModal;
+        this.subtitleDownloadModal.open(this._currentItem);
+    }
+
+    showResumeProfiles(onSelect) {
+        this.activeMenu = this.resumeProfilesMenu;
+        this.resumeProfilesMenu.open(onSelect);
+        this._cacheFocusableElements();
     }
 
     // Public API for components
@@ -335,10 +397,19 @@ export default class OSDController extends Component {
         // Mouse move to show OSD (attached to container)
         if (this._player) {
             this._player.on('mediastreamschange', (e) => this._onMediaStreamsChange(e));
+
+            // Keep play/pause button state synchronized on all playback transitions
             this._player.on('play', () => this.updatePlayPauseButton());
+            this._player.on('playing', () => {
+                this.updatePlayPauseButton();
+                // Ensure track synchronization and transition lockout release fire on playing
+                this.syncTracks();
+            });
             this._player.on('pause', () => this.updatePlayPauseButton());
+
             this._player.on('chaptersloaded', () => this._updateChapterButtons());
             this._player.on('seek', (e) => this._onPlayerSeek(e));
+            this._player.on('seeked', (e) => this._onPlayerSeeked(e));
             // Also update markers when duration becomes available
             this._player.on('durationchange', () => this._renderChapterMarkers());
             this._player.on('loadedmetadata', () => this._renderChapterMarkers());
@@ -374,6 +445,31 @@ export default class OSDController extends Component {
     onBeforeDestroy() {
         this._clearSeekState(false);
         document.removeEventListener('keyup', this._onSeekKeyUp, true);
+
+        /*
+         * Clean up active OSD state from page and container on destruction.
+         * Ensures subtitles never get trapped in an elevated state if the player
+         * page unloads while OSD controls are visible.
+         */
+        const pageEl = this._playerPage?.el || document.querySelector('.player-page');
+        if (pageEl) {
+            pageEl.classList.remove('osd-active');
+        }
+        const playerContainer = document.getElementById('player-container');
+        if (playerContainer) {
+            playerContainer.classList.remove('osd-active');
+        }
+
+        // Cancel any pending 2-second stealth hold or active transient HUD
+        this._cancelDownHold();
+        if (this._stealthHudTimeout) {
+            clearTimeout(this._stealthHudTimeout);
+            this._stealthHudTimeout = null;
+        }
+        if (this._onStealthKeyUp) {
+            document.removeEventListener('keyup', this._onStealthKeyUp, true);
+        }
+
         this._stopUpdates();
         if (this._updateTimer) clearInterval(this._updateTimer);
         if (this._autoHideTimer) clearTimeout(this._autoHideTimer);
@@ -388,16 +484,36 @@ export default class OSDController extends Component {
                 eventBus.off('syncplay:command', this._boundHandleSyncPlayNotification);
                 eventBus.off('syncplay:groupupdate', this._boundHandleSyncPlayNotification);
             }
+            if (this._boundUpdateSkipButtonIcons) {
+                eventBus.off('pref:skipBackLength', this._boundUpdateSkipButtonIcons);
+                eventBus.off('pref:skipForwardLength', this._boundUpdateSkipButtonIcons);
+            }
         });
 
         this.menus.forEach(menu => menu.hide?.());
 
+        // Cancel any pending focus restore lockout timers and release lock
+        if (this._focusRestoreLockoutTimer) {
+            clearTimeout(this._focusRestoreLockoutTimer);
+            this._focusRestoreLockoutTimer = null;
+        }
+        this._focusRestoreLockout = false;
+        this._trackTransitionLockoutActive = false;
+
+        if (this._seekResumeTimeout) {
+            clearTimeout(this._seekResumeTimeout);
+            this._seekResumeTimeout = null;
+        }
+        this._seekPendingResume = false;
+
         if (this._player) {
             this._player.removeAllListeners('mediastreamschange');
             this._player.removeAllListeners('play');
+            this._player.removeAllListeners('playing');
             this._player.removeAllListeners('pause');
             this._player.removeAllListeners('chaptersloaded');
             this._player.removeAllListeners('seek');
+            this._player.removeAllListeners('seeked');
             this._player.removeAllListeners('durationchange');
             this._player.removeAllListeners('loadedmetadata');
         }
@@ -442,9 +558,9 @@ export default class OSDController extends Component {
                         <div class="osd-controls-left">
                             <button class="osd-btn" data-action="previousTrack" tabindex="0" id="osdPrevBtn">${osdIcons.skipPrevious}</button>
                             <button class="osd-btn osd-btn-disabled" data-action="previousChapter" tabindex="-1" id="osdPrevChapterBtn">${osdIcons.chapterPrevious}</button>
-                            <button class="osd-btn" data-action="rewind" tabindex="0">${osdIcons.fastRewind}</button>
+                            <button class="osd-btn" data-action="rewind" tabindex="0">${this._getRewindIcon()}</button>
                             <button class="osd-btn osd-btn-play" id="osdPlayPauseBtn" data-action="togglePlay" tabindex="0">${osdIcons.pause}</button>
-                            <button class="osd-btn" data-action="fastForward" tabindex="0">${osdIcons.fastForward}</button>
+                            <button class="osd-btn" data-action="fastForward" tabindex="0">${this._getForwardIcon()}</button>
                             <button class="osd-btn osd-btn-disabled" data-action="nextChapter" tabindex="-1" id="osdNextChapterBtn">${osdIcons.chapterNext}</button>
                             <button class="osd-btn" data-action="nextTrack" tabindex="0" id="osdNextBtn">${osdIcons.skipNext}</button>
                             
@@ -501,6 +617,23 @@ export default class OSDController extends Component {
                 </div>
             </div>
             <div class="osd-overlays"></div>
+
+            <!-- Transient Action HUD (Spoiler-Free, No Shadow, Frosted Glass) -->
+            <div class="osd-stealth-hud hidden" id="osdStealthHud">
+                <div class="osd-stealth-hud-pill">
+                    <div class="osd-stealth-icon-wrap" id="osdStealthIcon"></div>
+                    <span class="osd-stealth-text hidden" id="osdStealthText"></span>
+                </div>
+            </div>
+
+            <!-- 2-Second Hold Down Gesture Indicator -->
+            <div class="osd-hold-indicator hidden" id="osdHoldIndicator">
+                <svg class="osd-hold-ring" viewBox="0 0 36 36">
+                    <circle class="osd-hold-ring-bg" cx="18" cy="18" r="15.5"></circle>
+                    <circle class="osd-hold-ring-progress" id="osdHoldRingProgress" cx="18" cy="18" r="15.5"></circle>
+                </svg>
+                <span class="osd-hold-label" id="osdHoldLabel">${i18n.t('OsdHoldToReveal') || 'Hold Down to reveal controls'}</span>
+            </div>
         `;
 
         // Cache main elements to avoid redundant querySelector calls in the update loop
@@ -509,8 +642,18 @@ export default class OSDController extends Component {
         this._osdTotalTimeEl = this._osdEl.querySelector('#osdTotalTime');
         this._osdPositionFillEl = this._osdEl.querySelector('#osdPositionFill');
         this._osdPositionSliderEl = this._osdEl.querySelector('#osdPositionSlider');
+        this._osdBottomEl = this._osdEl.querySelector('.osd-bottom');
+        this._osdSliderRowEl = this._osdEl.querySelector('.osd-slider-row');
+        this._osdEndsAtEl = this._osdEl.querySelector('#osdEndsAt');
         this._osdClockEl = this._osdEl.querySelector('#osdClock');
         this._osdPlayPauseBtnEl = this._osdEl.querySelector('#osdPlayPauseBtn');
+
+        /* Cache stealth HUD and hold gesture elements */
+        this._osdStealthHudEl = this._osdEl.querySelector('#osdStealthHud');
+        this._osdStealthIconEl = this._osdEl.querySelector('#osdStealthIcon');
+        this._osdStealthTextEl = this._osdEl.querySelector('#osdStealthText');
+        this._osdHoldIndicatorEl = this._osdEl.querySelector('#osdHoldIndicator');
+        this._osdHoldRingProgressEl = this._osdEl.querySelector('#osdHoldRingProgress');
 
         /* Cache trickplay tooltip sub-elements to avoid repeated queries during seek */
         this._cachedThumbEl = this._osdEl.querySelector('#osdTrickplayThumb');
@@ -581,9 +724,6 @@ export default class OSDController extends Component {
              * should activate it.
              */
 
-            // Every click inside the OSD resets the auto-hide timer.
-            this.resetAutoHide();
-
             /*
              * WEBOS / TIZEN POINTER-EVENTS BUG WORKAROUND
              *
@@ -611,6 +751,56 @@ export default class OSDController extends Component {
                     }
                 }
             }
+
+            /*
+             * ========================================================================
+             * HIDDEN OSD / STEALTH MODE CLICK INTERCEPTION
+             * ========================================================================
+             * When Layer 1 controls are hidden, any click landing on the screen or
+             * transparent OSD container must NEVER execute hidden buttons or scrub
+             * the invisible timeline.
+             * 
+             * EXCEPTION: Active Layer 2 modal dialogs (isModalOpen) or floating overlay
+             * widgets (e.g., Skip Intro / Skip Outro buttons) must remain clickable.
+             * 
+             * For all genuine video/background clicks while the OSD is hidden:
+             * - In stealth mode (hidden layout): toggle play/pause with transient HUD
+             *   feedback without waking or revealing the full OSD.
+             * - In standard layout: toggle play/pause and reveal the OSD.
+             * ========================================================================
+             */
+            if (!this._isOsdVisible && !this.isModalOpen && !resolvedTarget.closest?.('.osd-overlays > *')) {
+                e.stopPropagation();
+                /*
+                 * ANDROID TOUCH: Tap toggles OSD visibility, never toggles playback.
+                 * On mobile touch screens, the desktop/TV convention of tapping the video
+                 * surface to pause causes accidental pauses when users merely want to
+                 * reveal playback controls. On touch-primary devices, tapping reveals
+                 * the OSD controls with standard auto-hide. Pointers (TV cursor/desktop mouse)
+                 * preserve standard play/pause toggling.
+                 */
+                if (this._isAndroidTouch()) {
+                    this.show();
+                    return;
+                }
+                // Route through PlayerPage remote play/pause handler to update heartbeat and UI
+                if (this._playerPage && typeof this._playerPage._onRemotePlayPause === 'function') {
+                    this._playerPage._onRemotePlayPause();
+                } else if (this._player?.togglePlay) {
+                    const wasPaused = this._player.isPaused?.();
+                    this._player.togglePlay();
+                    // Display appropriate visual feedback based on layout mode
+                    if (PlayerSettings.get('osdLayout') === 'hidden') {
+                        this.showStealthHud(wasPaused ? 'play' : 'pause');
+                    } else {
+                        this.showAndFocusPlayPause();
+                    }
+                }
+                return;
+            }
+
+            // Every click inside the active OSD resets the auto-hide timer.
+            this.resetAutoHide();
 
             // Resolve the [data-action] button from the (possibly remapped) target
             const btn = resolvedTarget.closest('[data-action]');
@@ -642,9 +832,18 @@ export default class OSDController extends Component {
              * Magic Cursor: Clicking anywhere in the 36px tall slider container seeks to
              * that position. Without this, the user would have to hit the 8px tall range
              * input precisely, which is nearly impossible with a TV magic cursor.
+             *
+             * SCOPED TO MAIN SEEKBAR:
+             * We verify that the clicked slider container specifically contains the main
+             * playback seekbar (#osdPositionSlider). Secondary seekbars (such as Subtitle Offset
+             * or appearance settings) must handle their own clicks and never hijack main video seek.
              */
             const sliderContainer = resolvedTarget.closest?.('.osd-slider-container');
-            if (sliderContainer && !resolvedTarget.closest?.('.osd-overlays')) {
+            const isMainSeekbarContainer = sliderContainer &&
+                this._osdPositionSliderEl &&
+                sliderContainer.contains(this._osdPositionSliderEl);
+
+            if (isMainSeekbarContainer && !resolvedTarget.closest?.('.osd-overlays')) {
                 e.stopPropagation();
 
                 // Sync focus state to seekbar row so D-pad resumes from here
@@ -657,7 +856,7 @@ export default class OSDController extends Component {
                  * at the very top of the click handler, so it never reaches this block.
                  */
 
-                const slider = sliderContainer.querySelector('input[type="range"]');
+                const slider = this._osdPositionSliderEl;
                 if (slider) {
                     const rect = sliderContainer.getBoundingClientRect();
                     const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
@@ -670,11 +869,14 @@ export default class OSDController extends Component {
 
             /*
              * OSD background click: any click inside the OSD that doesn't land on a
-             * specific button or the seekbar is treated as a play/pause toggle. This
-             * mirrors the standard media player convention (clicking "somewhere" = pause).
-             * Modals/overlays are excluded since their content may handle clicks internally.
+             * specific button or the seekbar is treated as a play/pause toggle on TV/desktop.
+             * On Android touch devices, background tap dismisses the OSD back to clean video view.
              */
             if (!this.isModalOpen && !resolvedTarget.closest?.('.osd-overlays > *')) {
+                if (this._isAndroidTouch()) {
+                    this.hide();
+                    return;
+                }
                 this._executeAction('togglePlay');
             }
         });
@@ -729,6 +931,13 @@ export default class OSDController extends Component {
                 if (queueBtn) rightControls.insertBefore(queueBtn, rightControls.firstChild);
                 if (chaptersBtn) rightControls.insertBefore(chaptersBtn, rightControls.firstChild);
             }
+        } else if (PlayerSettings.get('osdLayout') === 'hidden') {
+            /*
+             * Stealth / Anti-Spoiler layout:
+             * Attaches the layout class to suppress Layer 1 presentation
+             * while keeping Layer 2 overlays (Skip buttons, Dialogs) visible.
+             */
+            this._osdEl.classList.add('osd-layout-hidden');
         }
 
         if (PlayerSettings.get('osdHideFavorite') === true) {
@@ -773,12 +982,68 @@ export default class OSDController extends Component {
             if (nextBtn) nextBtn.remove();
         }
 
+        /*
+         * Anti-spoiler / minimalist seekbar display mode:
+         * Mask progress fill bar, current/total duration timestamps, and 'Ends at' indicator
+         * whenever the seekbar is not focused. When focused, values reappear normally.
+         */
+        if (PlayerSettings.get('osdHideUnfocusedProgress') === true) {
+            if (this._osdBottomEl) {
+                this._osdBottomEl.classList.add('hide-unfocused-progress');
+            }
+            if (this._osdSliderRowEl) {
+                this._osdSliderRowEl.classList.add('hide-unfocused-progress');
+            }
+        }
+
+        // Desktop mouse hover synchronization for seekbar row
+        if (this._osdSliderRowEl) {
+            this._osdSliderRowEl.addEventListener('mouseenter', () => {
+                this._osdBottomEl?.classList.add('hovered');
+            });
+            this._osdSliderRowEl.addEventListener('mouseleave', () => {
+                this._osdBottomEl?.classList.remove('hovered');
+            });
+        }
+
         this.updatePlayPauseButton();
+        this._updateSkipButtonIcons();
 
         return this._osdEl;
     }
 
+    /**
+     * Identifies if currently operating within Android touch-primary shell.
+     * Distinguishes phones/tablets from TV pointers (magic cursor, D-pad).
+     * @private
+     * @returns {boolean}
+     */
+    _isAndroidTouch() {
+        return (
+            document.documentElement.hasAttribute('data-litefin-touch') &&
+            !window.matchMedia('(pointer: fine)').matches
+        );
+    }
+
     _onMouseMove(e) {
+        /*
+         * ANDROID TOUCH: Android WebView synthesizes mousemove events for every tap.
+         * Allowing synthetic mousemove to reveal the OSD races the tap click event,
+         * causing erratic flicker. On touch-primary devices, tap click is the authoritative
+         * event source for OSD visibility toggling; synthetic mousemoves are ignored.
+         */
+        if (this._isAndroidTouch()) {
+            return;
+        }
+
+        /*
+         * In stealth mode, cursor movement does NOT resurrect Layer 1.
+         * Only explicit manual 4-second hold down is permitted to reveal controls.
+         */
+        if (PlayerSettings.get('osdLayout') === 'hidden' && !this._isOsdVisible) {
+            return;
+        }
+
         this.show();
         this.resetAutoHide();
 
@@ -809,8 +1074,25 @@ export default class OSDController extends Component {
             targetBtn.classList.add('magic-hover');
             this._lastHoveredEl = targetBtn;
 
-            /* Handle OSD slider interaction (scrubbing) */
-            if (targetBtn.classList.contains('osd-slider-container')) {
+            /* 
+             * Handle OSD slider interaction (scrubbing) EXCLUSIVELY for the main seekbar.
+             * Secondary seekbars (e.g. Subtitle Offset or Subtitle Quick Settings) maintain
+             * their own dedicated pointer/mouse listeners and must never trigger video timeline
+             * seeking or show the main seekbar preview thumbnail tooltip.
+             */
+            const isMainSeekbarHovered = targetBtn.classList.contains('osd-slider-container') &&
+                this._osdPositionSliderEl &&
+                targetBtn.contains(this._osdPositionSliderEl);
+
+            if (isMainSeekbarHovered) {
+                // Reveal seekbar progress, times, and ends-at while magic cursor hovers over seekbar
+                if (this._osdSliderRowEl) {
+                    this._osdSliderRowEl.classList.add('magic-hover');
+                }
+                if (this._osdBottomEl) {
+                    this._osdBottomEl.classList.add('magic-hover');
+                }
+
                 /* 
                  * If the user is HOLDING the button (e.buttons === 1), we treat 
                  * this as an active drag. This bypasses the WebOS pointer-events 
@@ -823,10 +1105,26 @@ export default class OSDController extends Component {
                     this._handlePositionSliderMouseMove(e);
                 }
             } else {
+                if (this._osdSliderRowEl) {
+                    this._osdSliderRowEl.classList.remove('magic-hover');
+                }
+                if (this._osdBottomEl) {
+                    this._osdBottomEl.classList.remove('magic-hover');
+                }
+                /* 
+                 * When hovering over any non-main element or secondary seekbars,
+                 * ensure the main video position slider's preview tooltip is hidden.
+                 */
                 this._handlePositionSliderMouseLeave(e);
             }
         } else {
             this._lastHoveredEl = null;
+            if (this._osdSliderRowEl) {
+                this._osdSliderRowEl.classList.remove('magic-hover');
+            }
+            if (this._osdBottomEl) {
+                this._osdBottomEl.classList.remove('magic-hover');
+            }
             this._handlePositionSliderMouseLeave(e);
         }
     }
@@ -839,7 +1137,180 @@ export default class OSDController extends Component {
         if (this._osdEl) {
             this._osdEl.querySelectorAll('.magic-hover').forEach(el => el.classList.remove('magic-hover'));
         }
+        if (this._osdSliderRowEl) {
+            this._osdSliderRowEl.classList.remove('magic-hover');
+        }
+        if (this._osdBottomEl) {
+            this._osdBottomEl.classList.remove('magic-hover');
+        }
         this._lastHoveredEl = null;
+    }
+
+    get isOsdVisible() {
+        return this._isOsdVisible;
+    }
+
+    /**
+     * ========================================================================
+     * STEALTH TRANSIENT ACTION HUD
+     * ========================================================================
+     * Displays a brief, high-aesthetic floating pill in the center of the screen
+     * indicating Play, Pause, Rewind 10s, or Forward 10s.
+     *
+     * Design principles:
+     * - ZERO Drop Shadows (box-shadow: none, filter: none)
+     * - Pure frosted glass (backdrop-filter: blur)
+     * - Smooth spring micro-animations (scale 0.82 -> 1.0)
+     * - 100% Anti-Spoiler: omits all timestamps, scrubbing lines, and metadata
+     * ========================================================================
+     * @param {'pause'|'play'|'unpause'|'seekBack'|'rewind'|'seekForward'|'fastForward'} action 
+     * @param {number|string} [param=''] Optional second count (e.g. 10)
+     */
+    showStealthHud(action, param = '') {
+        if (!this._osdStealthHudEl || !this._osdStealthIconEl) return;
+
+        // Clear any pending dismissal timer
+        if (this._stealthHudTimeout) {
+            clearTimeout(this._stealthHudTimeout);
+            this._stealthHudTimeout = null;
+        }
+
+        let iconHtml = '';
+        let text = '';
+
+        switch (action) {
+            case 'pause':
+                iconHtml = osdIcons.pause;
+                text = '';
+                break;
+            case 'play':
+            case 'unpause':
+                iconHtml = osdIcons.play;
+                text = '';
+                break;
+            case 'seekBack':
+            case 'rewind': {
+                // Determine skip backward seconds from parameter or user settings
+                const backSec = param ? Number(param) : Math.round((PlayerSettings.get('skipBackLength') || this._config?.seekStepBack || 10000) / 1000);
+                iconHtml = this._getRewindIcon(backSec);
+                text = param ? `-${param}s` : `-${backSec}s`;
+                break;
+            }
+            case 'seekForward':
+            case 'fastForward': {
+                // Determine skip forward seconds from parameter or user settings
+                const fwdSec = param ? Number(param) : Math.round((PlayerSettings.get('skipForwardLength') || this._config?.seekStepForward || 10000) / 1000);
+                iconHtml = this._getForwardIcon(fwdSec);
+                text = param ? `+${param}s` : `+${fwdSec}s`;
+                break;
+            }
+            default:
+                return;
+        }
+
+        this._osdStealthIconEl.innerHTML = iconHtml;
+        if (text && this._osdStealthTextEl) {
+            this._osdStealthTextEl.textContent = text;
+            this._osdStealthTextEl.classList.remove('hidden');
+        } else if (this._osdStealthTextEl) {
+            this._osdStealthTextEl.textContent = '';
+            this._osdStealthTextEl.classList.add('hidden');
+        }
+
+        // Present with smooth spring easing
+        this._osdStealthHudEl.classList.remove('hidden');
+
+        // Auto-dismiss after 1100ms
+        this._stealthHudTimeout = setTimeout(() => {
+            if (this._osdStealthHudEl) {
+                this._osdStealthHudEl.classList.add('hidden');
+            }
+            this._stealthHudTimeout = null;
+        }, 1100);
+    }
+
+    /**
+     * ========================================================================
+     * STEALTH 2-SECOND HOLD GESTURE HANDLER
+     * ========================================================================
+     * Handles continuous holding of the Down navigation button when Layer 1
+     * is hidden. After 2 continuous seconds of hold, Layer 1 (controls & seekbar)
+     * is unlocked and revealed to the user.
+     * ========================================================================
+     */
+    _handleDownHold() {
+        if (!this._isHoldingDown) {
+            this._isHoldingDown = true;
+
+            // Mount and animate hold indicator
+            if (this._osdHoldIndicatorEl) {
+                this._osdHoldIndicatorEl.classList.remove('hidden');
+                // Force layout reflow before adding .active to ensure SVG stroke transition triggers
+                void this._osdHoldIndicatorEl.offsetWidth;
+                this._osdHoldIndicatorEl.classList.add('active');
+            }
+
+            // Set 2-second hold completion timer
+            this._downHoldTimer = setTimeout(() => {
+                this._onHoldDownComplete();
+            }, 2000);
+
+            // Start idle watchdog timer to detect key release on TVs lacking keyup
+            this._resetDownHoldWatchdog();
+        } else {
+            // Consecutive keydown autorepeat tick from TV remote
+            this._resetDownHoldWatchdog();
+        }
+    }
+
+    /**
+     * Resets the watchdog timer that catches key release on remote
+     * hardware that fails to send reliable keyup events.
+     * Hardware typematic repeat delays range between 250ms and 600ms,
+     * so 1000ms guarantees we never falsely cancel and restart mid-hold.
+     * Key release is already caught instantly (0ms) by keyup listeners.
+     */
+    _resetDownHoldWatchdog() {
+        if (this._downHoldWatchdog) {
+            clearTimeout(this._downHoldWatchdog);
+        }
+        // 1000ms window safely covers typematic repeat delays on all TV remotes and keyboards
+        this._downHoldWatchdog = setTimeout(() => {
+            this._cancelDownHold();
+        }, 1000);
+    }
+
+    /**
+     * Cancels any pending hold down session and smoothly hides the indicator.
+     */
+    _cancelDownHold() {
+        if (!this._isHoldingDown) return;
+        this._isHoldingDown = false;
+
+        if (this._downHoldTimer) {
+            clearTimeout(this._downHoldTimer);
+            this._downHoldTimer = null;
+        }
+        if (this._downHoldWatchdog) {
+            clearTimeout(this._downHoldWatchdog);
+            this._downHoldWatchdog = null;
+        }
+
+        if (this._osdHoldIndicatorEl) {
+            this._osdHoldIndicatorEl.classList.remove('active');
+            this._osdHoldIndicatorEl.classList.add('hidden');
+        }
+    }
+
+    /**
+     * Called when the 2-second hold successfully finishes.
+     * Unlocks Layer 1 (OSD header, controls, seekbar) and parks focus on Play/Pause.
+     */
+    _onHoldDownComplete() {
+        log.info('OSDController: 2-second hold completed, revealing Layer 1');
+        this._cancelDownHold();
+        this.show();
+        this.showAndFocusPlayPause();
     }
 
     // ===================================
@@ -876,6 +1347,25 @@ export default class OSDController extends Component {
         if (this._osdMainEl) this._osdMainEl.classList.remove('osd-hidden');
         if (this._osdEl) this._osdEl.classList.remove('osd-is-hidden');
         this._isOsdVisible = true;
+
+        /*
+         * ====================================================================
+         * DYNAMIC SUBTITLE DODGING (SMART SHIFT)
+         * ====================================================================
+         * When OSD controls become visible, elevate the player page and
+         * container state by adding the 'osd-active' class. This triggers smooth,
+         * hardware-accelerated spring animations that shift bottom text subtitles
+         * upward above the controls bar and seekbar, avoiding any visual overlap.
+         * ====================================================================
+         */
+        const pageEl = this._playerPage?.el || document.querySelector('.player-page');
+        if (pageEl) {
+            pageEl.classList.add('osd-active');
+        }
+        const playerContainer = document.getElementById('player-container');
+        if (playerContainer) {
+            playerContainer.classList.add('osd-active');
+        }
 
         // Start background polling when OSD becomes visible
         this._startUpdates();
@@ -970,7 +1460,7 @@ export default class OSDController extends Component {
         if (this._currentFocusRow === -1) {
             this._currentFocusRow = 1;
             const playIdx = this._findActionIndex('togglePlay');
-            this._currentFocusIndex = playIdx !== -1 ? playIdx : 0;
+            if (playIdx !== -1) this._currentFocusIndex = playIdx;
 
             /*
              * ========================================================================
@@ -1032,6 +1522,9 @@ export default class OSDController extends Component {
 
     _updateNavigationButtons() {
         if (!this._osdEl) return;
+
+        // Synchronize skip button icons with user duration preferences
+        this._updateSkipButtonIcons();
 
         const hasPrev = playQueue.hasPrevious();
         const hasNext = playQueue.hasNext();
@@ -1210,6 +1703,7 @@ export default class OSDController extends Component {
 
     hide() {
         this._clearSeekState();
+        this._cancelDownHold();
         // Don't hide if a modal menu is open
         if (this.isModalOpen) return;
 
@@ -1217,8 +1711,29 @@ export default class OSDController extends Component {
         if (this._osdEl) this._osdEl.classList.add('osd-is-hidden');
         this._isOsdVisible = false;
 
+        /*
+         * ====================================================================
+         * SUBTITLE RESTORE ON OSD HIDE
+         * ====================================================================
+         * Remove the 'osd-active' class so subtitles smoothly glide back down
+         * to their baseline positions using fluid spring easing curves.
+         * ====================================================================
+         */
+        const pageEl = this._playerPage?.el || document.querySelector('.player-page');
+        if (pageEl) {
+            pageEl.classList.remove('osd-active');
+        }
+        const playerContainer = document.getElementById('player-container');
+        if (playerContainer) {
+            playerContainer.classList.remove('osd-active');
+        }
+
         // Clear Magic Cursor hover when hiding
         this._clearMagicHover();
+
+        // Clear seekbar active state when hiding
+        this._osdSliderRowEl?.classList.remove('seekbar-active');
+        this._osdBottomEl?.classList.remove('seekbar-active');
 
         // Potential timer stop: only stop if no menus or overlays are currently
         // active and requiring background updates (like PlaybackInfo).
@@ -1370,7 +1885,7 @@ export default class OSDController extends Component {
             // Restore focus to Controls (Row 1) -> Play/Pause
             this._currentFocusRow = 1;
             const playIdx = this._findActionIndex('togglePlay');
-            this._currentFocusIndex = playIdx !== -1 ? playIdx : 0;
+            if (playIdx !== -1) this._currentFocusIndex = playIdx;
 
             this._focusRestoreLockout = true;
             if (this._focusRestoreLockoutTimer) {
@@ -1395,9 +1910,10 @@ export default class OSDController extends Component {
 
             // Force focus to overlay (Slider usually index 1, Close index 0)
             this._currentFocusRow = -1;
-            // Default to slider for better UX? Or close? User said "can't reach seekbar".
-            // Let's default to slider (index 1 if close is 0).
-            const sliderIdx = this._cachedOverlayRow.findIndex(el => el.classList.contains('osd-slider'));
+            // Default directly to the slider for instant D-pad left/right adjustments
+            const sliderIdx = this._cachedOverlayRow.findIndex(
+                el => el.id === 'osdOffsetSlider' || el.classList.contains('osd-offset-slider') || el.classList.contains('osd-slider')
+            );
             this._currentFocusIndex = sliderIdx !== -1 ? sliderIdx : 0;
             this._updateFocus();
         } else {
@@ -1415,7 +1931,7 @@ export default class OSDController extends Component {
             // Focus should go back to OSD -> Play/Pause
             this._currentFocusRow = 1; // Controls
             const playIdx = this._findActionIndex('togglePlay');
-            this._currentFocusIndex = playIdx !== -1 ? playIdx : 0;
+            if (playIdx !== -1) this._currentFocusIndex = playIdx;
 
             this._focusRestoreLockout = true;
             if (this._focusRestoreLockoutTimer) {
@@ -1568,6 +2084,38 @@ export default class OSDController extends Component {
             }
         };
         document.addEventListener('keyup', this._onSeekKeyUp, true);
+
+        // Cancel 2-second hold down on key release
+        this._onStealthKeyUp = (e) => {
+            if (e.key === 'ArrowDown' || e.keyCode === 40) {
+                this._cancelDownHold();
+            }
+        };
+        document.addEventListener('keyup', this._onStealthKeyUp, true);
+
+        // COLOR BUTTONS (Red, Green, Yellow, Blue)
+        // Instantly reveal player controls in stealth mode without holding Down.
+        const handleColorButtonReveal = (color, e) => {
+            if (PlayerSettings.get('osdColorButtonsReveal') !== false &&
+                PlayerSettings.get('osdLayout') === 'hidden' &&
+                !this._isOsdVisible) {
+                log.info(`OSDController: Color button (${color}) pressed in stealth mode, revealing Layer 1`);
+                this._cancelDownHold();
+                this.show();
+                this.showAndFocusPlayPause();
+                if (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+                return true;
+            }
+            return false;
+        };
+
+        this.on('key:red', (e) => handleColorButtonReveal('red', e));
+        this.on('key:green', (e) => handleColorButtonReveal('green', e));
+        this.on('key:yellow', (e) => handleColorButtonReveal('yellow', e));
+        this.on('key:blue', (e) => handleColorButtonReveal('blue', e));
         // ENTER
         this.on('key:enter', (e) => {
             // Conditionally prevent default inside handleInput based on what is focused
@@ -1624,38 +2172,59 @@ export default class OSDController extends Component {
             return true;
         }
 
-        // Some remotes repeat OK without a reliable keyup. Consume the rest of
-        // the confirmation burst so it cannot toggle playback after committing.
-        if (key === 'enter' && this._seekConfirmTime !== null) {
+        /*
+         * ========================================================================
+         * TIMELINE SEEK CONFIRMATION & GHOST REPEAT GUARD
+         * ========================================================================
+         * TV remotes can repeat keydown events for Enter, Play, Pause, or Play/Pause
+         * without sending distinct keyup events. If a seek confirmation was just
+         * committed, consume the rest of the confirmation burst for 800ms so it does
+         * not accidentally toggle play/pause immediately after jumping.
+         * ========================================================================
+         */
+        const isConfirmSeekKey = key === 'enter' || key === 'play' || key === 'playPause' || key === 'pause';
+        if (isConfirmSeekKey && this._seekConfirmTime !== null) {
             const repeated = e?.repeat || Date.now() - this._seekConfirmTime < 800;
             this._seekConfirmTime = repeated ? Date.now() : null;
             if (repeated) {
                 e?.preventDefault();
                 return true;
             }
-        } else if (key !== 'enter') {
+        } else if (!isConfirmSeekKey) {
             this._seekConfirmTime = null;
         }
+
+        /*
+         * Cancel pending preview scrub when pressing Back.
+         * Restores player state to where it was before scrubbing started.
+         */
         if (this._seekRequiresConfirmation && key === 'back') {
             e?.preventDefault();
             return this._handleBack();
         }
-        if (this._seekRequiresConfirmation && key === 'enter' && this._currentFocusRow === 2) {
-            e?.preventDefault();
-            e?.stopPropagation();
-            const target = this._seekTargetTicks;
-            const resumePlayback = this._seekResumePlayback;
-            this._clearSeekState(false);
-            try {
-                this._player.seek(target);
-            } catch (err) {
-                log.error('Confirmed seek failed:', err);
-            } finally {
-                this._restoreSeekPlayback(resumePlayback);
-            }
-            this._seekConfirmTime = Date.now();
-            this.resetAutoHide();
-            return true;
+
+        /*
+         * ========================================================================
+         * MULTI-KEY SEEK CONFIRMATION COMMIT (EXPLICIT & HIDDEN NORMAL MODE)
+         * ========================================================================
+         * When timeline preview seeking is active on the seekbar (Row 2), users
+         * can confirm the jump using either OK/Enter, or dedicated media playback
+         * buttons (Play, Pause, Play/Pause).
+         *
+         * In explicit confirmation mode ('confirmSeekWithOK'), this commits the scrub.
+         * In default / normal mode, this functions as a "hidden confirm": when
+         * users press OK while debounced seeking is active, it immediately commits
+         * the jump to targetTicks rather than toggling play/pause at the old position
+         * (which previously caused playback to resume while seeking was still pending).
+         *
+         * Behavior:
+         *   - 'play' / 'playPause': Jumps to target and forces playback to resume.
+         *   - 'pause': Jumps to target and keeps playback paused.
+         *   - 'enter': Jumps to target and restores the initial playback state.
+         * ========================================================================
+         */
+        if (this.hasPendingSeekConfirmation() && isConfirmSeekKey && (this._seekRequiresConfirmation || this._currentFocusRow === 2)) {
+            return this.confirmPendingSeek(key, e);
         }
 
         const wasHidden = !this._isOsdVisible;
@@ -1680,6 +2249,58 @@ export default class OSDController extends Component {
         if (wasHidden && key === 'enter') {
             /*
              * ========================================================================
+             * STEALTH LAYOUT ENTER / OK INTERCEPTION
+             * ========================================================================
+             * In stealth mode, actions must not reveal Layer 1.
+             * If an overlay widget (Row -1: Skip Intro, Skip Outro, Up Next dialog)
+             * is visible and claimed focus, Enter immediately executes its action.
+             * Otherwise, Enter cleanly toggles play/pause with the transient HUD
+             * without exposing the timeline, controls, or metadata.
+             * ========================================================================
+             */
+            if (PlayerSettings.get('osdLayout') === 'hidden') {
+                /*
+                 * A skip prompt that is on screen and highlighted owns the press, because
+                 * stealth mode never reveals the controls - the press would otherwise
+                 * silently toggle playback instead of skipping.
+                 */
+                if (this._currentFocusRow === 1) {
+                    const stealthCta = this._getHighlightedSkipPrompt();
+                    if (stealthCta) {
+                        stealthCta.click();
+                        return true;
+                    }
+                }
+
+                if (this._currentFocusRow === -1) {
+                    const focusedEl = this._getFocusedOverlayElement();
+                    if (this._isConnected(focusedEl) && (
+                        focusedEl.closest('.plugin-widget.visible') ||
+                        focusedEl.closest('.upnext-dialog.visible') ||
+                        focusedEl.closest('.osd-offset-popup.visible') ||
+                        focusedEl.closest('.playback-info-overlay.visible') ||
+                        focusedEl.closest('.playback-info-popup.visible')
+                    )) {
+                        focusedEl.click();
+                        return true;
+                    }
+                }
+
+                if (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+
+                const wasPaused = this._player?.isPaused?.();
+                if (this._player?.togglePlay) {
+                    this._player.togglePlay();
+                }
+                this.showStealthHud(wasPaused ? 'play' : 'pause');
+                return true;
+            }
+
+            /*
+             * ========================================================================
              * GHOST KEY LOCKOUT GUARD:
              * Discards any wake-up Enter key events received during the active 350ms
              * lockout window. This blocks rapid TV key bounces or repeat inputs from
@@ -1693,6 +2314,15 @@ export default class OSDController extends Component {
             }
 
             if (e) e.preventDefault();
+            /*
+             * Remember the highlighted skip prompt BEFORE show()/_updateFocus() re-apply the
+             * highlight: _updateFocus() clears every .focused class first, so a prompt that was
+             * highlighted while the OSD was hidden would no longer be recognisable afterwards.
+             * See _getHighlightedSkipPrompt() for why this can happen while the controls row
+             * owns the focus.
+             */
+            const wakeSkipCta = this._currentFocusRow === 1 ? this._getHighlightedSkipPrompt() : null;
+
             this.show();
             this._updateFocus();
 
@@ -1716,13 +2346,19 @@ export default class OSDController extends Component {
              */
             const showOsdOnly = PlayerSettings.get('okShowOsdOnly') === true;
 
+            /* The user selected the prompt, so dispatch it before the row handling below. */
+            if (wakeSkipCta) {
+                wakeSkipCta.click();
+                return true;
+            }
+
             if (this._currentFocusRow === -1) {
                 // Overlay row (Row -1): a plugin widget (e.g. skip-intro) holds focus.
                 // The widget's container has a click listener registered by PluginWidgetHost
                 // that routes to the widget's onSelect() callback — so clicking the
                 // focused button is sufficient to dispatch the action correctly.
                 // We do NOT fall through to togglePlay; the widget owns this press.
-                const focusedEl = this._cachedOverlayRow[this._currentFocusIndex];
+                const focusedEl = this._getFocusedOverlayElement();
                 /*
                  * ====================================================================
                  * HIDDEN WIDGET & OVERLAY VISIBILITY GUARD
@@ -1738,10 +2374,11 @@ export default class OSDController extends Component {
                  * If the target is invalid, we fall back to controls recovery.
                  * ====================================================================
                  */
-                if (focusedEl && focusedEl.isConnected && (
+                if (this._isConnected(focusedEl) && (
                     focusedEl.closest('.plugin-widget.visible') ||
                     focusedEl.closest('.upnext-dialog.visible') ||
                     focusedEl.closest('.osd-offset-popup.visible') ||
+                    focusedEl.closest('.playback-info-overlay.visible') ||
                     focusedEl.closest('.playback-info-popup.visible')
                 )) {
                     focusedEl.click();
@@ -1789,7 +2426,7 @@ export default class OSDController extends Component {
         // (also in Row -1) would be incorrectly forwarded to the Up Next dialog
         // because activeMenu is set to upNextDialog for the whole session.
         if (this._currentFocusRow === -1 && this.activeMenu && this.activeMenu.isVisible && !this.activeMenu.isModal) {
-            const focusedEl = this._cachedOverlayRow[this._currentFocusIndex];
+            const focusedEl = this._getFocusedOverlayElement();
             const menuOwnsElement = !this.activeMenu.$el || (focusedEl && this.activeMenu.$el.contains(focusedEl));
             if (menuOwnsElement && this.activeMenu.handleKey(key)) return true;
         }
@@ -1837,7 +2474,7 @@ export default class OSDController extends Component {
                 if (this._currentFocusRow === -1) {
                     // Overlay row (Row -1): plugin widget holds focus.
                     // Click the focused button directly in JavaScript.
-                    const focusedEl = this._cachedOverlayRow[this._currentFocusIndex];
+                    const focusedEl = this._getFocusedOverlayElement();
                     /*
                      * ====================================================================
                      * HIDDEN WIDGET & OVERLAY VISIBILITY GUARD
@@ -1848,10 +2485,11 @@ export default class OSDController extends Component {
                      * Playback Info) handle Enter key clicks correctly on TV adapters.
                      * ====================================================================
                      */
-                    if (focusedEl && focusedEl.isConnected && (
+                    if (this._isConnected(focusedEl) && (
                         focusedEl.closest('.plugin-widget.visible') ||
                         focusedEl.closest('.upnext-dialog.visible') ||
                         focusedEl.closest('.osd-offset-popup.visible') ||
+                        focusedEl.closest('.playback-info-overlay.visible') ||
                         focusedEl.closest('.playback-info-popup.visible')
                     )) {
                         focusedEl.click();
@@ -1948,9 +2586,44 @@ export default class OSDController extends Component {
         const wasHidden = !this._isOsdVisible;
         const seekWithArrows = PlayerSettings.get('seekWithArrows') !== false;
 
-        // First D-pad press always reveals OSD if hidden
+        // First D-pad press always reveals OSD if hidden (except in stealth mode)
         // User requested single-press move: trigger show AND allow navigation to proceed.
         if (wasHidden) {
+            /*
+             * ====================================================================
+             * STEALTH LAYOUT REMOTE NAVIGATION (Layer 1 Hidden)
+             * ====================================================================
+             * In the stealth layout, directional keys should not wake up Layer 1:
+             * - Left / Right: routes through the unified debounced seek pipeline
+             *   (_performDebouncedSeek) so playback is cleanly paused during scrub,
+             *   inputs are debounced (800ms), and the hardware seek resumption
+             *   gate is honored (no stray frames or audio during demuxing).
+             * - Down: starts / maintains 2-second hold tracking to reveal OSD.
+             * - Up: suppressed while hidden so Layer 1 stays invisible.
+             * ====================================================================
+             */
+            if (PlayerSettings.get('osdLayout') === 'hidden') {
+                if (direction === 'left' || direction === 'right') {
+                    // Resolve user-configured skip backward or forward duration in seconds
+                    const stepSeconds = (PlayerSettings.get(direction === 'left' ? 'skipBackLength' : 'skipForwardLength') || 10000) / 1000;
+                    // Convert seconds into 100-nanosecond ticks with negative sign for rewind
+                    const offsetTicks = (stepSeconds * 10000000) * (direction === 'left' ? -1 : 1);
+                    // Determine if this is a sustained key hold from remote repeat events
+                    const held = e?.repeat === true && this._seekHeldDirection === direction;
+                    this._seekHeldDirection = direction;
+                    // Execute through debounced seeking pipeline without requiring manual OK confirmation
+                    this._performDebouncedSeek(offsetTicks, false, held);
+                    return true;
+                }
+                if (direction === 'down') {
+                    this._handleDownHold();
+                    return true;
+                }
+                if (direction === 'up') {
+                    return true;
+                }
+            }
+
             this.show();
 
             /*
@@ -2021,6 +2694,11 @@ export default class OSDController extends Component {
                             const playNow = this.upNextDialog.$el.querySelector('.upnext-btn-play');
                             const idx = playNow ? this._cachedOverlayRow.indexOf(playNow) : -1;
                             this._currentFocusIndex = idx !== -1 ? idx : 0;
+                        } else if (this.subtitleOffset?.isVisible) {
+                            const sliderIdx = this._cachedOverlayRow.findIndex(
+                                el => el.id === 'osdOffsetSlider' || el.classList.contains('osd-offset-slider')
+                            );
+                            this._currentFocusIndex = sliderIdx !== -1 ? sliderIdx : 0;
                         } else {
                             this._currentFocusIndex = 0;
                         }
@@ -2067,7 +2745,7 @@ export default class OSDController extends Component {
                     // Return from overlay row straight to Controls, landing on Play/Pause
                     this._currentFocusRow = 1;
                     const playIdx = this._findActionIndex('togglePlay');
-                    this._currentFocusIndex = playIdx !== -1 ? playIdx : 0;
+                    if (playIdx !== -1) this._currentFocusIndex = playIdx;
                 } else if (this._currentFocusRow === 0) {
                     // Mirror of Up from Row 1: if overlay widgets are visible, stop there first.
                     // Header ↓ Overlay ↓ Controls (symmetric with Controls ↑ Overlay ↑ Header)
@@ -2203,6 +2881,60 @@ export default class OSDController extends Component {
         return this._osdEl.querySelector('.focused');
     }
 
+    /**
+     * Resolve the overlay-row element that an OK press should activate.
+     *
+     * The stored index belongs to the focused row and is not reset when that row
+     * changes, so it can point outside the overlay row - which usually holds a single
+     * button while the controls row holds several. Clamp the index the same way
+     * _updateFocus() does and fall back to the element that actually carries .focused.
+     * Without this the callers read "undefined" and fell through to their
+     * no-overlay-target branch, i.e. OK toggled playback instead of triggering the
+     * visible widget.
+     */
+    _getFocusedOverlayElement() {
+        const idx = Math.min(this._currentFocusIndex, Math.max(this._cachedOverlayRow.length - 1, 0));
+        return this._cachedOverlayRow[idx] || this._getFocused();
+    }
+
+    /**
+     * Resolve the skip prompt button that is on screen and currently highlighted, or null.
+     *
+     * The plugin host only hands focus over to Row -1 while a prompt appears with the OSD
+     * hidden, so the prompt can keep looking highlighted after the focus moved on (auto-hide
+     * reset, episode change) while the row handling dispatches elsewhere. A widget that is
+     * merely .visible does not qualify: .sync-osd keeps that class while the hidden OSD renders
+     * the widget transparent and non-interactive.
+     *
+     * @returns {HTMLElement|null}
+     */
+    _getHighlightedSkipPrompt() {
+        const widget = this._osdEl.querySelector('.osd-overlays .plugin-widget.visible');
+        const cta = widget && widget.querySelector('.skip-intro-btn.focused');
+        if (!cta) return null;
+
+        const widgetStyle = getComputedStyle(widget);
+        return widgetStyle.opacity !== '0' && widgetStyle.pointerEvents !== 'none' ? cta : null;
+    }
+
+    /**
+     * Connectivity check for the overlay click guards.
+     *
+     * `Element.isConnected` is Chrome 51+ and is not covered by our polyfills: on
+     * Chromium 38 (webOS 3.x) and the other Ultra-Legacy tiers the property is
+     * `undefined`, so a guard written as `focusedEl.isConnected && …` never passes
+     * there. The OK press then falls through to the controls row - a highlighted
+     * skip prompt toggled playback instead of skipping. `document.contains()` is
+     * available on every tier we build for, so use it whenever the native property
+     * is missing.
+     *
+     * @param {Element|null} el
+     * @returns {boolean}
+     */
+    _isConnected(el) {
+        if (!el) return false;
+        return typeof el.isConnected === 'boolean' ? el.isConnected : document.contains(el);
+    }
 
     _getControls() {
         // Return only focusable controls
@@ -2238,6 +2970,16 @@ export default class OSDController extends Component {
 
     _updateFocus() {
         this._osdEl.querySelectorAll('.focused').forEach(el => el.classList.remove('focused'));
+
+        /*
+         * Anti-spoiler seekbar active state:
+         * Immediately and synchronously strip seekbar-active whenever focus is NOT on the seekbar (Row 2).
+         * Guarantees that progress bar, times, and ends-at disappear INSTANTLY when navigating away.
+         */
+        if (this._currentFocusRow !== 2) {
+            this._osdSliderRowEl?.classList.remove('seekbar-active');
+            this._osdBottomEl?.classList.remove('seekbar-active');
+        }
 
         if (this._currentFocusRow === -1) {
             const btn = this._cachedOverlayRow[Math.min(this._currentFocusIndex, this._cachedOverlayRow.length - 1)];
@@ -2294,6 +3036,17 @@ export default class OSDController extends Component {
                 sliderContainer.classList.add('focused');
                 sliderContainer.focus();
             }
+
+            /*
+             * Synchronize focused state with seekbar row and bottom container elements.
+             * Smoothly transitions times, ends-at, and progress fill into view if osdHideUnfocusedProgress is on.
+             */
+            if (this._osdSliderRowEl) {
+                this._osdSliderRowEl.classList.add('focused', 'seekbar-active');
+            }
+            if (this._osdBottomEl) {
+                this._osdBottomEl.classList.add('seekbar-active');
+            }
         }
     }
 
@@ -2301,9 +3054,75 @@ export default class OSDController extends Component {
 
 
 
+    /**
+     * Check if a timeline seek scrub session is active and awaiting confirmation or commit.
+     * In explicit confirmation mode ('confirmSeekWithOK'), this remains active until confirmed.
+     * In normal/default mode, this remains true while the debounce timer is running, allowing
+     * OK or Play/Pause to act as a hidden confirm to seek immediately without playback collision.
+     * 
+     * @returns {boolean} True if the user is scrubbing and has an uncommitted seek target
+     */
+    hasPendingSeekConfirmation() {
+        return Boolean(this._seekTargetTicks !== null);
+    }
+
+    /**
+     * Commit and confirm the pending seek preview session.
+     *
+     * @param {string} key - Triggering key: 'enter', 'play', 'playPause', or 'pause'
+     * @param {Event|null} [e] - Optional DOM keyboard/key event
+     * @returns {boolean} True if a pending seek was confirmed and committed
+     */
+    confirmPendingSeek(key = 'enter', e = null) {
+        if (!this.hasPendingSeekConfirmation()) return false;
+        if (e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        const target = this._seekTargetTicks;
+        const resumePlayback = key === 'pause'
+            ? false
+            : (key === 'play' || key === 'playPause' ? true : this._seekResumePlayback);
+
+        // Clear preview scrub flags before executing the jump
+        this._clearSeekState(false);
+        try {
+            this._player.seek(target);
+        } catch (err) {
+            log.error('Confirmed seek failed:', err);
+        } finally {
+            // Ensure playback state matches key intent
+            if (key === 'pause') {
+                if (typeof this._player.pause === 'function') this._player.pause();
+            } else {
+                this._restoreSeekPlayback(resumePlayback);
+            }
+        }
+
+        // Record confirmation timestamp to absorb ghost bounces
+        this._seekConfirmTime = Date.now();
+        this.updatePlayPauseButton();
+        this.resetAutoHide();
+        return true;
+    }
+
     _findActionIndex(action) {
         const controls = this._getControls();
-        return controls.findIndex(btn => btn.dataset.action === action);
+        const idx = controls.findIndex(btn => btn.dataset.action === action);
+        if (idx !== -1) return idx;
+
+        /*
+         * _getControls() drops every element without an offsetParent, so the list is
+         * EMPTY while the OSD is hidden. Callers receive -1 in that case and several of
+         * them fall back to index 0, i.e. the previous-track button. Resolve the action
+         * against the same DOM order without the visibility filter so the result stays
+         * correct while the OSD is hidden - tabindex="-1" stays excluded, keeping the
+         * list identical to the one used for navigation.
+         */
+        const all = Array.from(
+            this._osdEl.querySelectorAll('.osd-controls-left .osd-btn, .osd-controls-right .osd-btn')
+        ).filter(btn => btn.getAttribute('tabindex') !== '-1');
+        return all.findIndex(btn => btn.dataset.action === action);
     }
 
     // ===================================
@@ -2311,9 +3130,24 @@ export default class OSDController extends Component {
     // ===================================
 
     _executeAction(action) {
-        if (this._seekRequiresConfirmation) {
-            this._clearSeekState();
-            this._updateState();
+        /*
+         * Check if a seek scrub or debounce session is pending confirmation.
+         * If togglePlay is received (e.g. from an Enter press on Play/Pause),
+         * commit the pending seek immediately instead of toggling playback
+         * state at the pre-seek timestamp.
+         *
+         * For continuous skip actions (rewind / fastForward), preserve the
+         * active scrub session so repeated clicks accumulate rather than reset.
+         */
+        if (this.hasPendingSeekConfirmation()) {
+            if (action === 'togglePlay') {
+                this.confirmPendingSeek('playPause');
+                return;
+            }
+            if (action !== 'fastForward' && action !== 'rewind') {
+                this._clearSeekState();
+                this._updateState();
+            }
         }
         // ====================================================================
         // ACTIVE TRACK SWITCH GUARD
@@ -2416,14 +3250,22 @@ export default class OSDController extends Component {
                 break;
             case 'rewind': {
                 const skipBackMs = PlayerSettings.get('skipBackLength') || this._config.seekStepBack;
-                this._performDebouncedSeek(-skipBackMs * 10000);
-                this.resetAutoHide();
+                const requireConfirm = PlayerSettings.get('confirmSeekWithOK') === true;
+                this._performDebouncedSeek(-skipBackMs * 10000, requireConfirm);
+                // Only reset auto-hide timer if the OSD is currently displayed to the user
+                if (PlayerSettings.get('osdLayout') !== 'hidden' || this._isOsdVisible) {
+                    this.resetAutoHide();
+                }
                 break;
             }
             case 'fastForward': {
                 const skipFwdMs = PlayerSettings.get('skipForwardLength') || this._config.seekStepForward;
-                this._performDebouncedSeek(skipFwdMs * 10000);
-                this.resetAutoHide();
+                const requireConfirm = PlayerSettings.get('confirmSeekWithOK') === true;
+                this._performDebouncedSeek(skipFwdMs * 10000, requireConfirm);
+                // Only reset auto-hide timer if the OSD is currently displayed to the user
+                if (PlayerSettings.get('osdLayout') !== 'hidden' || this._isOsdVisible) {
+                    this.resetAutoHide();
+                }
                 break;
             }
             case 'previousTrack': this.emit('previous'); break;
@@ -2606,9 +3448,33 @@ export default class OSDController extends Component {
 
     _performDebouncedSeek(offsetTicks, requireConfirmation = false, held = false) {
         try {
+            if (isNaN(offsetTicks)) return;
             if (this._seekRequiresConfirmation !== requireConfirmation) this._clearSeekState();
             this._seekRequiresConfirmation = requireConfirmation;
             const now = Date.now();
+
+            /*
+             * ====================================================================
+             * SEEK DIRECTION REVERSAL & ACCELERATION RESET
+             * ====================================================================
+             * Check if the user has changed direction during the active scrub session
+             * (e.g., from forward to backward or vice versa). When the user preference
+             * 'resetSeekSpeedOnDirectionChange' is enabled, immediately reset the
+             * scrub start time and hold elapsed metrics so the speed multiplier
+             * drops back to 1x. This gives the user precision control when overshooting
+             * a scene without abruptly jumping backwards at high speed multipliers (up to 10x).
+             * ====================================================================
+             */
+            const currentDirection = offsetTicks < 0 ? 'left' : 'right';
+            if (this._seekDirection && this._seekDirection !== currentDirection) {
+                if (PlayerSettings.get('resetSeekSpeedOnDirectionChange')) {
+                    log.info(`Seek direction changed from ${this._seekDirection} to ${currentDirection} — resetting acceleration to 1x`);
+                    this._seekStartTime = now;
+                    this._seekHoldElapsed = 0;
+                    this._seekLastInputTime = now;
+                }
+            }
+            this._seekDirection = currentDirection;
             if (requireConfirmation) {
                 // Native repeat proves this is still the same physical hold, even
                 // if rendering or image decoding delayed delivery past the idle
@@ -2623,44 +3489,88 @@ export default class OSDController extends Component {
                 }
             }
             this._seekLastInputTime = now;
-            this.show();
-            this.resetAutoHide();
+
+            // In stealth layout when OSD is hidden, keep Layer 1 controls fully tucked away
+            const isStealthHidden = PlayerSettings.get('osdLayout') === 'hidden' && !this._isOsdVisible;
+            if (!isStealthHidden) {
+                this.show();
+                this.resetAutoHide();
+            }
 
             if (this._seekTargetTicks === null) {
                 const startPos = (this._player.getCurrentPositionTicks && this._player.getCurrentPositionTicks()) || 0;
                 this._seekTargetTicks = startPos;
+                this._seekInitialPos = startPos;
                 this._seekStartTime = Date.now();
-                if (requireConfirmation) {
-                    this._seekResumePlayback = !this._player.isPaused();
-                    if (this._seekResumePlayback) this._player.pause();
+
+                /*
+                 * ====================================================================
+                 * PAUSE PLAYBACK ON SCRUB INITIALIZATION
+                 * ====================================================================
+                 * When the user begins scrubbing the seekbar (either via remote arrows
+                 * or fast-forward/rewind actions), check the user's preference for
+                 * pausePlaybackOnScrub. If enabled (true by default), capture the
+                 * previous playback state and pause the video so the seek preview
+                 * remains stationary while the user maneuvers the timeline.
+                 *
+                 * CRITICAL RESUME INTENT PRESERVATION:
+                 * If consecutive seeks occur while a previous seek is still in flight
+                 * or waiting on a hardware 'seeked' event, the player is already paused.
+                 * We must preserve the existing resume intent (_seekResumePlayback or
+                 * _seekPendingResume) rather than overwriting it with false.
+                 * ====================================================================
+                 */
+                if (PlayerSettings.get('pausePlaybackOnScrub')) {
+                    // Record whether playback was actively running before scrub started
+                    this._seekResumePlayback = Boolean(
+                        this._seekResumePlayback ||
+                        this._seekPendingResume ||
+                        !this._player.isPaused()
+                    );
+                    // Pause active playback during the scrub operation
+                    if (this._seekResumePlayback && typeof this._player.pause === 'function') {
+                        this._player.pause();
+                        this.updatePlayPauseButton();
+                    }
+                } else {
+                    // Setting disabled: do not capture or alter playback pause state
+                    this._seekResumePlayback = false;
                 }
-                log.info(`Seek scrub session started from: ${this._formatTime(startPos)}`);
+
+                log.info(`Seek scrub session started from: ${this._formatTime(startPos)} (paused=${this._player.isPaused()})`);
             }
 
             /*
-             * ── SEEK ACCELERATION LOGIC ───────────────────────────────────────
-             * The longer the user holds the seek button, the faster we skip.
-             * This provides fine-grained control for short skips and massive
-             * throughput for traversing long movies.
+             * ── SEEK ACCELERATION & RAMP LOGIC ────────────────────────────────
+             * The longer directional input is sustained, the faster the timeline
+             * skips (graduating across 2x, 3x, 4x, 5x, and 10x multipliers).
+             *
+             * Governed by user preference 'enableSeekAcceleration' (enabled by default).
+             * When disabled, the multiplier remains fixed at 1x so each step maintains
+             * uniform linear progress.
              */
             const seekDuration = requireConfirmation
                 ? this._seekHoldElapsed / 1000
                 : (Date.now() - this._seekStartTime) / 1000;
             let speedMultiplier = 1;
 
-            if (requireConfirmation) {
-                if (seekDuration >= 4.5) speedMultiplier = 10;
-                else if (seekDuration >= 3) speedMultiplier = 5;
-                else if (seekDuration >= 2.25) speedMultiplier = 4;
-                else if (seekDuration >= 1.5) speedMultiplier = 3;
-                else if (seekDuration >= 0.75) speedMultiplier = 2;
-            } else {
-                // Preserve the original ramp for automatic and quick seeking.
-                if (seekDuration >= 12) speedMultiplier = 10;
-                else if (seekDuration >= 8) speedMultiplier = 5;
-                else if (seekDuration >= 6) speedMultiplier = 4;
-                else if (seekDuration >= 4) speedMultiplier = 3;
-                else if (seekDuration >= 2) speedMultiplier = 2;
+            // Evaluate if progressive acceleration is permitted by player settings
+            if (PlayerSettings.get('enableSeekAcceleration')) {
+                if (requireConfirmation) {
+                    // Confirmation mode: shorter hold thresholds for responsive ramping
+                    if (seekDuration >= 4.5) speedMultiplier = 10;
+                    else if (seekDuration >= 3) speedMultiplier = 5;
+                    else if (seekDuration >= 2.25) speedMultiplier = 4;
+                    else if (seekDuration >= 1.5) speedMultiplier = 3;
+                    else if (seekDuration >= 0.75) speedMultiplier = 2;
+                } else {
+                    // Debounce mode: standard ramp intervals for automatic seeking
+                    if (seekDuration >= 12) speedMultiplier = 10;
+                    else if (seekDuration >= 8) speedMultiplier = 5;
+                    else if (seekDuration >= 6) speedMultiplier = 4;
+                    else if (seekDuration >= 4) speedMultiplier = 3;
+                    else if (seekDuration >= 2) speedMultiplier = 2;
+                }
             }
 
             if (isNaN(offsetTicks)) return;
@@ -2684,7 +3594,14 @@ export default class OSDController extends Component {
             if (!this._cachedTooltipEl) this._cachedTooltipEl = this._osdEl.querySelector('#osdSeekTooltip');
             const tooltip = this._cachedTooltipEl;
 
-            if (tooltip) {
+            if (isStealthHidden) {
+                // In stealth mode with hidden OSD, present transient HUD badge with net scrub offset
+                const initial = this._seekInitialPos !== null ? this._seekInitialPos : (this._player.getCurrentPositionTicks?.() || 0);
+                const netOffsetTicks = this._seekTargetTicks - initial;
+                const netOffsetSec = Math.max(1, Math.round(Math.abs(netOffsetTicks) / 10000000));
+                const hudAction = netOffsetTicks < 0 ? 'seekBack' : 'seekForward';
+                this.showStealthHud(hudAction, netOffsetSec);
+            } else if (tooltip) {
                 const speedIndicator = speedMultiplier > 1 ? ` (${speedMultiplier}x)` : '';
                 const forceHours = duration >= 3600 * 10000000;
                 const timeText = this._formatTime(this._seekTargetTicks, forceHours) + speedIndicator;
@@ -2716,6 +3633,8 @@ export default class OSDController extends Component {
             }
 
             this._seekDebounceTimer = setTimeout(() => {
+                // Capture resume playback flag before clearing session state
+                const resumePlayback = this._seekResumePlayback;
                 try {
                     if (this._seekTargetTicks !== null && this._player.seek) {
                         log.info(`Seek scrub session committed. Jumping to: ${this._formatTime(this._seekTargetTicks, duration >= 3600 * 10000000)}`);
@@ -2724,14 +3643,27 @@ export default class OSDController extends Component {
                 } catch (e) {
                     log.error('Deferred seek failed:', e);
                 } finally {
+                    // Reset internal seek tracking properties
                     this._seekTargetTicks = null;
+                    this._seekInitialPos = null;
                     this._seekStartTime = null;
                     this._seekDebounceTimer = null;
                     this._isDraggingSeekbar = false;
+                    this._osdSliderRowEl?.classList.remove('dragging');
+                    this._osdBottomEl?.classList.remove('dragging');
+                    this._seekResumePlayback = false;
                     if (tooltip) tooltip.classList.remove('visible');
 
                     /* Hide trickplay thumbnail when seek session ends */
                     this._hideTrickplayThumb();
+
+                    /*
+                     * If playback was paused specifically for this scrub session,
+                     * unpause the player now that the position jump has been applied.
+                     */
+                    if (resumePlayback) {
+                        this._restoreSeekPlayback(resumePlayback);
+                    }
                 }
             }, 800);
 
@@ -2752,6 +3684,88 @@ export default class OSDController extends Component {
 
         // Update the inner SVG icons directly from unified properties
         this._osdPlayPauseBtnEl.innerHTML = isPaused ? osdIcons.play : osdIcons.pause;
+    }
+
+    /**
+     * Resolves the appropriate replay/rewind SVG icon based on the configured skip backward seconds.
+     * Maps 5s -> replay5, 10s -> replay10, 15s -> replay15, 20s -> replay20, 30s & 60s -> replay30.
+     * @param {number} [seconds] Optional duration in seconds; defaults to PlayerSettings skipBackLength
+     * @returns {string} SVG icon HTML string
+     */
+    _getRewindIcon(seconds) {
+        const icons = typeof osdIcons !== 'undefined' ? osdIcons : {};
+        // Resolve seconds from parameter or user preferences
+        const sec = seconds !== undefined
+            ? Number(seconds)
+            : Math.round((PlayerSettings.get('skipBackLength') || this._config?.seekStepBack || 10000) / 1000);
+
+        // Map duration to corresponding SVG icon (60s uses 30s icon per design)
+        switch (sec) {
+            case 5:
+                return icons.replay5 || icons.fastRewind || '';
+            case 10:
+                return icons.replay10 || icons.fastRewind || '';
+            case 15:
+                return icons.replay15 || icons.fastRewind || '';
+            case 20:
+                return icons.replay20 || icons.fastRewind || '';
+            case 30:
+            case 60:
+                return icons.replay30 || icons.fastRewind || '';
+            default:
+                return icons.replay10 || icons.fastRewind || '';
+        }
+    }
+
+    /**
+     * Resolves the appropriate forward SVG icon based on the configured skip forward seconds.
+     * Maps 5s -> forward5, 10s -> forward10, 15s -> forward15, 20s -> forward20, 30s & 60s -> forward30.
+     * @param {number} [seconds] Optional duration in seconds; defaults to PlayerSettings skipForwardLength
+     * @returns {string} SVG icon HTML string
+     */
+    _getForwardIcon(seconds) {
+        const icons = typeof osdIcons !== 'undefined' ? osdIcons : {};
+        // Resolve seconds from parameter or user preferences
+        const sec = seconds !== undefined
+            ? Number(seconds)
+            : Math.round((PlayerSettings.get('skipForwardLength') || this._config?.seekStepForward || 10000) / 1000);
+
+        // Map duration to corresponding SVG icon (60s uses 30s icon per design)
+        switch (sec) {
+            case 5:
+                return icons.forward5 || icons.fastForward || '';
+            case 10:
+                return icons.forward10 || icons.fastForward || '';
+            case 15:
+                return icons.forward15 || icons.fastForward || '';
+            case 20:
+                return icons.forward20 || icons.fastForward || '';
+            case 30:
+            case 60:
+                return icons.forward30 || icons.fastForward || '';
+            default:
+                return icons.forward10 || icons.fastForward || '';
+        }
+    }
+
+    /**
+     * Updates the inner HTML of the rewind and fastForward buttons with the appropriate
+     * numeric skip icon matching the user's configured skip lengths (unless combined skip buttons is enabled).
+     */
+    _updateSkipButtonIcons() {
+        if (!this._osdEl || PlayerSettings.get('osdCombineSkipButtons') === true) return;
+
+        // Update rewind button icon
+        const rewindBtn = this._osdEl.querySelector('[data-action="rewind"]');
+        if (rewindBtn) {
+            rewindBtn.innerHTML = this._getRewindIcon();
+        }
+
+        // Update fast-forward button icon
+        const fastForwardBtn = this._osdEl.querySelector('[data-action="fastForward"]');
+        if (fastForwardBtn) {
+            fastForwardBtn.innerHTML = this._getForwardIcon();
+        }
     }
 
     _startUpdates() {
@@ -2915,13 +3929,40 @@ export default class OSDController extends Component {
         return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
     }
     _handlePositionSliderInput(e) {
+        // Disallow scrubbing while OSD is hidden
+        if (!this._isOsdVisible) {
+            if (this._player) this._updatePositionSlider(this._player);
+            return;
+        }
+
         if (this._suppressSliderChange) {
             if (this._player) this._updatePositionSlider(this._player);
             return;
         }
 
         if (this._seekRequiresConfirmation) this._clearSeekState();
-        this._isDraggingSeekbar = true;
+
+        /*
+         * ====================================================================
+         * SLIDER SCRUB DRAGGING & PAUSE STATE
+         * ====================================================================
+         * When mouse/pointer or remote dragging starts on the slider input,
+         * engage the dragging flag and optionally pause active playback if
+         * pausePlaybackOnScrub is enabled in settings.
+         * ====================================================================
+         */
+        if (!this._isDraggingSeekbar) {
+            this._isDraggingSeekbar = true;
+            this._osdSliderRowEl?.classList.add('dragging');
+            this._osdBottomEl?.classList.add('dragging');
+            if (PlayerSettings.get('pausePlaybackOnScrub') && this._player) {
+                this._seekResumePlayback = !this._player.isPaused();
+                if (this._seekResumePlayback && typeof this._player.pause === 'function') {
+                    this._player.pause();
+                    this.updatePlayPauseButton();
+                }
+            }
+        }
         this.resetAutoHide();
 
         const percentRaw = e.target.value;
@@ -2934,6 +3975,33 @@ export default class OSDController extends Component {
 
         /* Update time labels live */
         this._syncTimeDisplayToPercent(percent);
+
+        /*
+         * Touch scrub preview: during a finger drag the native range input only
+         * emits 'input' events (no mousemove fires while dragging, and Android
+         * synthetic mousemoves are suppressed), so mirror the keyboard-scrub
+         * preview here: time tooltip plus trickplay thumbnail at the drag
+         * position. Both are hidden again on 'change' (finger release).
+         */
+        const duration = this._player.getDurationTicks ? this._player.getDurationTicks() : 0;
+        if (this._player && duration > 0) {
+            const targetTicks = duration * (percent / 100);
+            if (!this._cachedTooltipEl) this._cachedTooltipEl = this._osdEl.querySelector('#osdSeekTooltip');
+            const tooltip = this._cachedTooltipEl;
+            if (tooltip) {
+                const forceHours = duration >= 3600 * 10000000;
+                const timeText = this._formatTime(targetTicks, forceHours);
+                if (this._cachedTooltipTextEl) {
+                    this._cachedTooltipTextEl.textContent = timeText;
+                } else {
+                    tooltip.textContent = timeText;
+                }
+                tooltip.classList.add('visible');
+                tooltip.style.left = percent + '%';
+
+                this._updateTrickplayTooltip(targetTicks);
+            }
+        }
     }
 
     /**
@@ -2989,6 +4057,12 @@ export default class OSDController extends Component {
     }
 
     _handlePositionSliderChange(e) {
+        // Disallow commits to timeline while OSD is hidden
+        if (!this._isOsdVisible) {
+            if (this._player) this._updatePositionSlider(this._player);
+            return;
+        }
+
         if (this._suppressSliderChange) {
             this._suppressSliderChange = false;
             // Revert the rogue value=0 change that the TV browser forced upon us
@@ -2998,9 +4072,21 @@ export default class OSDController extends Component {
             return;
         }
 
+        // Capture scrub playback restore state before resetting drag
+        const resumePlayback = this._seekResumePlayback;
+        this._isDraggingSeekbar = false;
+        this._osdSliderRowEl?.classList.remove('dragging');
+        this._osdBottomEl?.classList.remove('dragging');
+        this._seekResumePlayback = false;
+
+        /* Hide the scrub preview (time tooltip + trickplay thumb) shown during the drag */
+        const dragTooltip = this._cachedTooltipEl || this._osdEl.querySelector('#osdSeekTooltip');
+        if (dragTooltip) dragTooltip.classList.remove('visible');
+        this._hideTrickplayThumb();
+
         try {
-            if (this._seekRequiresConfirmation) this._clearSeekState();
-            const duration = this._player.getDurationTicks();
+            if (this._seekRequiresConfirmation) this._clearSeekState(false);
+            const duration = this._player.getDurationTicks ? this._player.getDurationTicks() : 0;
             const percent = e.target.value / 100;
             const targetTicks = duration * percent;
 
@@ -3013,6 +4099,14 @@ export default class OSDController extends Component {
             this._player.seek(targetTicks);
         } catch (err) {
             log.error('Slider seek failed:', err);
+        } finally {
+            /*
+             * Restore active playback if paused when scrubbing began
+             */
+            if (resumePlayback) {
+                this._restoreSeekPlayback(resumePlayback);
+            }
+            this.updatePlayPauseButton();
         }
     }
 
@@ -3088,13 +4182,94 @@ export default class OSDController extends Component {
         }
     }
 
-    _restoreSeekPlayback(resumePlayback) {
-        if (!resumePlayback) return;
+    /*
+     * Resumes playback after committing or exiting a timeline seek scrub session
+     * if playback was active prior to scrubbing or requested by the confirm key.
+     *
+     * @param {boolean} resumePlayback - Whether to unpause playback
+     * @param {boolean} [force=false]  - Force immediate unpause, bypassing seeking gate
+     */
+    _restoreSeekPlayback(resumePlayback, force = false) {
+        // Exit early if playback should not resume or player instance is gone
+        if (!resumePlayback || !this._player) return;
+
+        /*
+         * ====================================================================
+         * ACTIVE HARDWARE SEEK PLAYBACK RESUME GATE
+         * ====================================================================
+         * When a seek is committed (either via OK button confirmation or after
+         * the debounce timer elapses), the underlying player backend (AVPlay,
+         * WebOS, or HTML5 video) begins asynchronous demuxing and buffering
+         * to the target position.
+         *
+         * If unpause() is executed synchronously while that asynchronous seek
+         * is in flight, the player unpauses the existing audio/video pipeline
+         * at the PRE-SEEK position! This manifests as several seconds of audio
+         * and video playback from the old point before abruptly jumping to the
+         * seeked target.
+         *
+         * To eliminate this, if the player is actively seeking and force is not
+         * asserted, we defer unpausing until the authoritative 'seeked' event
+         * fires from the hardware demuxer.
+         * ====================================================================
+         */
+        const isSeeking = Boolean(
+            (typeof this._player.isSeeking === 'function' ? this._player.isSeeking() : this._player.isSeeking) ||
+            this._player._isSeeking
+        );
+        if (!force && isSeeking && typeof this._player.on === 'function') {
+            log.info('OSDController: Deferring playback resume until seeked event completes');
+            // Flag that playback resumption is waiting on the hardware seeked event
+            this._seekPendingResume = true;
+            this._armSeekResumeTimeout();
+            return;
+        }
+
         try {
-            this._player.unpause();
+            // Attempt standard unpause first, falling back to play if required
+            if (typeof this._player.unpause === 'function') {
+                this._player.unpause();
+            } else if (typeof this._player.play === 'function') {
+                this._player.play();
+            }
         } catch (err) {
             log.error('Could not resume playback after timeline preview:', err);
         }
+        // Keep OSD play/pause button state in sync with actual playback state
+        this.updatePlayPauseButton();
+    }
+
+    _armSeekResumeTimeout() {
+        // Clear any previous safety timer before arming a new one
+        if (this._seekResumeTimeout) {
+            clearTimeout(this._seekResumeTimeout);
+        }
+        // Arm 3.5s safety timeout: if hardware demuxer stalls or swallows seeked,
+        // force playback resumption so the player never stays frozen forever
+        this._seekResumeTimeout = setTimeout(() => {
+            this._seekResumeTimeout = null;
+            if (this._seekPendingResume) {
+                log.warn('OSDController: Seek resume timeout reached (3.5s) — forcing playback resume');
+                this._seekPendingResume = false;
+                this._restoreSeekPlayback(true, true);
+            }
+        }, 3500);
+    }
+
+    _onPlayerSeeked(e) {
+        // Disarm safety timeout as the authoritative hardware event has arrived
+        if (this._seekResumeTimeout) {
+            clearTimeout(this._seekResumeTimeout);
+            this._seekResumeTimeout = null;
+        }
+        // If playback was deferred awaiting this seek completion, resume now
+        if (this._seekPendingResume) {
+            log.info('OSDController: Received seeked event — restoring deferred playback');
+            this._seekPendingResume = false;
+            this._restoreSeekPlayback(true, true);
+        }
+        // Update OSD timeline, clock, and trickplay elements with post-seek state
+        this._updateState();
     }
 
     _clearSeekState(restorePlayback = true) {
@@ -3104,17 +4279,32 @@ export default class OSDController extends Component {
         this._seekRequiresConfirmation = false;
         this._seekLastInputTime = null;
         this._seekConfirmTime = null;
+        this._seekDirection = null;
         if (this._seekDebounceTimer) {
             clearTimeout(this._seekDebounceTimer);
             this._seekDebounceTimer = null;
         }
         this._seekTargetTicks = null;
+        this._seekInitialPos = null;
         this._seekStartTime = null;
         this._isDraggingSeekbar = false;
+        this._osdSliderRowEl?.classList.remove('dragging');
+        this._osdBottomEl?.classList.remove('dragging');
 
         const tooltip = this._osdEl?.querySelector('#osdSeekTooltip');
         if (tooltip) tooltip.classList.remove('visible');
         this._hideTrickplayThumb();
+
+        // Only cancel pending resume and safety timeout if we are NOT restoring playback
+        // (i.e. explicit cancellation such as user pressing pause or back)
+        if (!restorePlayback) {
+            if (this._seekResumeTimeout) {
+                clearTimeout(this._seekResumeTimeout);
+                this._seekResumeTimeout = null;
+            }
+            this._seekPendingResume = false;
+        }
+
         if (restorePlayback) this._restoreSeekPlayback(resumePlayback);
     }
 
@@ -3127,8 +4317,12 @@ export default class OSDController extends Component {
             return;
         }
 
-        // Clear OSD's internal seek state whenever a seek happens (could be remote or chapter)
-        this._clearSeekState();
+        // Only clear OSD seek state if an uncommitted scrub session is active.
+        // If this._seekTargetTicks is null, the seek was committed by OSD debounce
+        // or confirmation, and clearing here would prematurely disarm _seekPendingResume.
+        if (this._seekTargetTicks !== null) {
+            this._clearSeekState(false);
+        }
 
         if (e && e.positionTicks !== undefined) {
             // Optimistic update for UI responsiveness
@@ -3219,7 +4413,7 @@ export default class OSDController extends Component {
             this.show();
             this._currentFocusRow = 1;
             const playIdx = this._findActionIndex('togglePlay');
-            this._currentFocusIndex = playIdx !== -1 ? playIdx : 0;
+            if (playIdx !== -1) this._currentFocusIndex = playIdx;
             this._updateFocus();
         }
     }
@@ -3251,7 +4445,7 @@ export default class OSDController extends Component {
             this.show();
             this._currentFocusRow = 1;
             const playIdx = this._findActionIndex('togglePlay');
-            this._currentFocusIndex = playIdx !== -1 ? playIdx : 0;
+            if (playIdx !== -1) this._currentFocusIndex = playIdx;
             this._updateFocus();
         }
     }
@@ -3368,6 +4562,26 @@ export default class OSDController extends Component {
     }
 
     /**
+     * Open or close the technical Media Info modal.
+     * Follows the BaseMenu modal lifecycle pattern.
+     * 
+     * @param {boolean} show - True to open, false to close.
+     */
+    toggleMediaInfoModal(show) {
+        if (show) {
+            this.activeMenu = this.playerMediaInfoModal;
+            this.playerMediaInfoModal.open(this._currentItem);
+        } else {
+            if (this.activeMenu === this.playerMediaInfoModal) {
+                this.activeMenu = null;
+            }
+            this.playerMediaInfoModal.hide();
+            this._cacheFocusableElements();
+            this.show();
+        }
+    }
+
+    /**
      * Show or hide the Up Next dialog.
      * Follows the same toggle pattern as togglePlaybackInfo() / toggleSubtitleOffset().
      *
@@ -3418,7 +4632,7 @@ export default class OSDController extends Component {
              * If focus was inside the dialog, we restore it back to the controls row.
              * ========================================================================
              */
-            const focusedEl = this._cachedOverlayRow[this._currentFocusIndex];
+            const focusedEl = this._getFocusedOverlayElement();
             const wasDialogFocused = focusedEl && this.upNextDialog.$el?.contains(focusedEl);
 
             this.upNextDialog.hide();
@@ -3436,7 +4650,7 @@ export default class OSDController extends Component {
                 // Return focus target to controls row (Row 1) Play/Pause
                 this._currentFocusRow = 1;
                 const playIdx = this._findActionIndex('togglePlay');
-                this._currentFocusIndex = playIdx !== -1 ? playIdx : 0;
+                if (playIdx !== -1) this._currentFocusIndex = playIdx;
                 this._updateFocus();
 
                 // Lock out inputs for 350ms to absorb keyboard-synthesized click events on the newly focused play button
@@ -3822,6 +5036,31 @@ export default class OSDController extends Component {
 
         /*
          * ============================================================================
+         * LIVE TV EPG PROGRAM METADATA CHECK:
+         * When updating metadata for the currently airing TV program (EPG guide item),
+         * the underlying media stream is already established and running. This is a
+         * metadata update, NOT a track transition between different media items.
+         * We must not engage track transition lockouts for program guide updates.
+         * ============================================================================
+         */
+        if (item?.Type === 'Program' || (this._currentItem?.Type === 'TvChannel' && item?.ChannelId)) {
+            return;
+        }
+
+        /*
+         * ============================================================================
+         * ACTIVE PLAYBACK METADATA REFRESH GUARD:
+         * If the player is already playing and no track switch is in progress on the
+         * player page, treating this call as an indefinite track transition lockout
+         * would trap focus indefinitely.
+         * ============================================================================
+         */
+        if (this._playerPage && !this._playerPage._isSwitching && this._player && !this._player.isPaused()) {
+            return;
+        }
+
+        /*
+         * ============================================================================
          * TRACK TRANSITION FOCUS RESET GUARD
          * ============================================================================
          * When switching tracks or advancing to the next episode (e.g., after clicking
@@ -3837,7 +5076,7 @@ export default class OSDController extends Component {
         if (this._currentFocusRow === -1) {
             this._currentFocusRow = 1;
             const playIdx = this._findActionIndex('togglePlay');
-            this._currentFocusIndex = playIdx !== -1 ? playIdx : 0;
+            if (playIdx !== -1) this._currentFocusIndex = playIdx;
         }
 
         /*
@@ -3851,6 +5090,26 @@ export default class OSDController extends Component {
          */
         this._trackTransitionLockoutActive = true;
         this._focusRestoreLockout = true;
+
+        /*
+         * ============================================================================
+         * SAFETY FALLBACK EXPIRATION TIMER:
+         * Never allow the transition lockout to remain active indefinitely if syncTracks()
+         * or media events fail to fire (e.g., stalled network, stream error, or dropped
+         * playback events). Automatically release the lockout after 8 seconds as a safeguard.
+         * ============================================================================
+         */
+        if (this._focusRestoreLockoutTimer) {
+            clearTimeout(this._focusRestoreLockoutTimer);
+        }
+        this._focusRestoreLockoutTimer = setTimeout(() => {
+            if (this._trackTransitionLockoutActive) {
+                log.warn('OSDController: Transition lockout safety timeout expired — releasing lockout');
+                this._focusRestoreLockout = false;
+                this._trackTransitionLockoutActive = false;
+                this._focusRestoreLockoutTimer = null;
+            }
+        }, 8000);
     }
 
     _getFormattedTitle(item) {

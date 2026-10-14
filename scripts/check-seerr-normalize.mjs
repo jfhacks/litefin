@@ -7,7 +7,14 @@
  */
 
 import assert from 'node:assert/strict';
-import { normalizeSeerrItem, seerrStatusKey, normalizeSeerrBaseUrl, SEERR_STATUS } from '../src/api/seerrNormalize.js';
+import {
+    normalizeSeerrItem,
+    seerrStatusKey,
+    normalizeSeerrBaseUrl,
+    SEERR_STATUS,
+    SEERR_ANIME_KEYWORD_ID,
+    isSeerrAnimeItem
+} from '../src/api/seerrNormalize.js';
 
 // Base URL: an explicit scheme is kept, trailing slashes dropped
 assert.equal(normalizeSeerrBaseUrl('https://seer.example.com/'), 'https://seer.example.com');
@@ -109,12 +116,45 @@ assert.equal(tvWithFallback.Type, 'Series');
 
 // Status table
 assert.equal(seerrStatusKey(SEERR_STATUS.PENDING), 'SeerrStatusPending');
-assert.equal(seerrStatusKey(SEERR_STATUS.PROCESSING), 'SeerrStatusPending');
+assert.equal(seerrStatusKey(SEERR_STATUS.PROCESSING), 'SeerrStatusProcessing');
 assert.equal(seerrStatusKey(SEERR_STATUS.PARTIALLY_AVAILABLE), 'SeerrStatusPartial');
 assert.equal(seerrStatusKey(SEERR_STATUS.AVAILABLE), 'SeerrStatusAvailable');
 assert.equal(seerrStatusKey(0), 'SeerrStatusNotRequested');
 assert.equal(seerrStatusKey(1), 'SeerrStatusNotRequested');
 assert.equal(seerrStatusKey(6), 'SeerrStatusNotRequested');
 assert.equal(seerrStatusKey(undefined), 'SeerrStatusNotRequested');
+
+// Anime detection: the TMDB "anime" keyword (210024) on a TV series
+assert.equal(SEERR_ANIME_KEYWORD_ID, 210024);
+const animeTv = normalizeSeerrItem({
+    id: 1643,
+    mediaType: 'tv',
+    name: 'Fullmetal Alchemist: Brotherhood',
+    firstAirDate: '2009-04-05',
+    keywords: [
+        { id: SEERR_ANIME_KEYWORD_ID, name: 'anime' },
+        { id: 210025, name: 'shounen' }
+    ]
+});
+assert.equal(isSeerrAnimeItem(animeTv), true);
+
+// The same keyword on a movie is never flagged (anime routing is TV-only)
+const animeMovie = normalizeSeerrItem({
+    id: 37686,
+    mediaType: 'movie',
+    title: 'Your Name',
+    releaseDate: '2016-08-26',
+    keywords: [{ id: SEERR_ANIME_KEYWORD_ID, name: 'anime' }]
+});
+assert.equal(isSeerrAnimeItem(animeMovie), false);
+
+// Classic series without the keyword
+assert.equal(isSeerrAnimeItem(tv), false);
+
+// Missing or absent keywords degrade to false, never throw
+assert.equal(isSeerrAnimeItem(null), false);
+assert.equal(isSeerrAnimeItem(undefined), false);
+assert.equal(isSeerrAnimeItem({ _mediaType: 'tv', Tags: undefined }), false);
+assert.equal(isSeerrAnimeItem({ _mediaType: 'tv' }), false);
 
 console.log('seerrNormalize: OK');

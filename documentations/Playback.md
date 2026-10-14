@@ -1,22 +1,34 @@
 # Playback
 
-Playback in Litefin is handled by a sophisticated triple-backend system that prioritizes hardware acceleration.
+Playback in Litefin is powered by a multi-engine playback system that automatically leverages platform-native hardware decoders, WebAssembly pipelines, or WebCodecs depending on the device environment.
 
 ## Advanced Player Core
 
-The player is implemented as a standalone sub-project under `src/player/` with two major modules:
+The player subsystem is organized under `src/player/` into two primary modules:
 
-- **`core/`** (11 files): Low-level playback engines and subtitle rendering.
-- **`osd/`** (19 files): On-Screen Display menus and controllers for user interaction.
+- **`core/`** (17 files): Low-level hardware playback drivers, subtitle engines, prewarming, and media helpers.
+- **`osd/`** (19 files): On-Screen Display controllers, modals, track selectors, and interactive overlays.
 
-### Platform Players
+### Platform Playback Engines
 
-- **Tizen AVPlay** (`src/player/core/TizenAVPlayer.js`): The primary backend for Samsung TVs. Utilizes native hardware decoding via `webapis.avplay` with:
-    - **Buffer Tuning**: Hardware-level buffer thresholds (byte-based and property-based).
-    - **Trickplay**: Support for previewing thumbnails during seeking.
-    - **Rewind Buffer**: A 10-second rewind buffer for direct streams to improve responsiveness.
-- **webOS Player** (`src/player/core/WebOSPlayer.js`): Dedicated hardware integration for LG webOS devices using webOS video APIs.
-- **HTML5 Web Player** (`src/player/core/HtmlVideoPlayer.js`): A fallback renderer for environments where native hardware APIs are unavailable or unsupported.
+Litefin integrates five dedicated player backends coordinated by `JellyfinPlayer.js`:
+
+1. **Samsung Tizen (AVPlay)** (`src/player/core/TizenAVPlayer.js`):
+   - Direct hardware integration with `webapis.avplay`.
+   - **Buffer Tuning**: Byte-based buffer configuration with dynamic network compensation.
+   - **Trickplay & Rewind**: Frame preview during scrubbing and a 10-second rewind buffer for direct streams.
+2. **LG webOS Player** (`src/player/core/WebOSPlayer.js`):
+   - Dedicated hardware pipeline utilizing LG webOS media APIs with full application lifecycle synchronization.
+3. **Android Media3 ExoPlayer** (`src/player/core/ExoVideoPlayer.js`):
+   - Native Android playback backend powered by Google's Media3 ExoPlayer via the **Tauri v2** Android bridge.
+   - **Multichannel Audio Passthrough**: Direct bitstream passthrough for TrueHD, DTS-HD Master Audio, and Dolby Atmos to AV receivers.
+   - **Hardware Codec Probing**: Queries Android `MediaCodecList` for dynamic hardware decode support with automatic software fallback for chipsets lacking native AV1 decoders (e.g. Amlogic S905X).
+4. **Desktop Movi Player** (`src/player/core/MoviVideoPlayer.js`):
+   - High-efficiency WebCodecs and WebAssembly-assisted video engine (`movi-player`) for Windows, Linux, and macOS.
+   - Ultra-low latency decoding with seamless failover to HTML5.
+5. **Universal HTML5 Player** (`src/player/core/HtmlVideoPlayer.js`):
+   - HTML5 `<video>` engine for browser environments (Jellyfin Web plugin) and fallback.
+
 
 ### JellyfinPlayer
 

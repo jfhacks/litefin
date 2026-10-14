@@ -17,7 +17,14 @@ function setup(enabled = true, paused = false) {
     let now = 1000;
     let nextTimer = 1;
     const timers = new Map();
-    const settings = { confirmSeekWithOK: enabled, skipBackLength: 5000, skipForwardLength: 10000 };
+    const settings = {
+        confirmSeekWithOK: enabled,
+        pausePlaybackOnScrub: true,
+        resetSeekSpeedOnDirectionChange: false,
+        enableSeekAcceleration: true,
+        skipBackLength: 5000,
+        skipForwardLength: 10000
+    };
     const context = vm.createContext({
         Component: class {},
         document: {
@@ -52,6 +59,7 @@ function setup(enabled = true, paused = false) {
     const tooltip = { classList: { add() {}, remove() {} }, style: {} };
     Object.assign(osd, {
         _seekTargetTicks: null,
+        _seekInitialPos: null,
         _seekStartTime: null,
         _seekDebounceTimer: null,
         _seekRequiresConfirmation: false,
@@ -151,6 +159,38 @@ for (const paused of [false, true]) {
     });
 }
 
+for (const playKey of ['play', 'playPause']) {
+    test(`preview, then ${playKey} button commits seek and unpauses playback`, () => {
+        const { osd, seeks, advance } = setup(true, true); // initially paused
+        osd.handleInput('right');
+        assert.equal(osd._seekTargetTicks, 110 * 10000000);
+        assert.deepEqual(seeks, []);
+        assert.equal(osd._player.isPaused(), true);
+        osd.handleInput(playKey);
+        for (let i = 0; i < 5; i++) {
+            advance(100);
+            osd.handleInput(playKey);
+        }
+        assert.deepEqual(seeks, [110 * 10000000]);
+        assert.equal(osd._player.isPaused(), false);
+    });
+}
+
+test('preview, then pause button commits seek and keeps playback paused', () => {
+    const { osd, seeks, advance } = setup(true, false); // initially playing
+    osd.handleInput('right');
+    assert.equal(osd._seekTargetTicks, 110 * 10000000);
+    assert.deepEqual(seeks, []);
+    assert.equal(osd._player.isPaused(), true); // paused during scrub
+    osd.handleInput('pause');
+    for (let i = 0; i < 5; i++) {
+        advance(100);
+        osd.handleInput('pause');
+    }
+    assert.deepEqual(seeks, [110 * 10000000]);
+    assert.equal(osd._player.isPaused(), true); // remains paused after commit
+});
+
 test('Back cancels to the real current position without seeking', () => {
     const { osd, seeks, position, advance } = setup();
     osd.handleInput('left');
@@ -180,15 +220,93 @@ test('long hold accelerates, a new burst resets acceleration, and bounds clamp',
     assert.deepEqual(seeks, [0]);
 });
 
-test('disabled option preserves 800ms debounce and accumulated seeks', () => {
+test('disabled confirmSeek preserves 800ms debounce, pauses during scrub, and unpauses on commit', () => {
     const { osd, seeks, advance } = setup(false);
     osd.handleInput('right');
+    // While scrubbing (at 400ms), playback is temporarily paused when pausePlaybackOnScrub=true
+    assert.equal(osd._player.isPaused(), true);
     advance(400);
     osd.handleInput('right');
     advance(799);
     assert.deepEqual(seeks, []);
+    assert.equal(osd._player.isPaused(), true);
     advance(1);
     assert.deepEqual(seeks, [120 * 10000000]);
+    // Once debounced seek commits, playback is automatically resumed
+    assert.equal(osd._player.isPaused(), false);
+});
+
+/*
+ * ============================================================================
+ * HIDDEN CONFIRM-TO-SEEK TESTS (DEFAULT / UNCONFIRMED SEEK MODE)
+ * ============================================================================
+ * Verifies that in default mode (confirmSeekWithOK = false), pressing OK (enter)
+ * while a debounced seek is actively scrubbed acts as a hidden confirmation.
+ * This commits the target position immediately, clears the pending debounce timer,
+ * and restores playback to its pre-scrub state (playing or paused), absorbing
+ * repeated OK bounces rather than accidentally toggling play/pause at the old position.
+ * ============================================================================
+ */
+for (const paused of [false, true]) {
+    test(`disabled confirmSeek: OK key acts as hidden confirm during debounced seek (paused=${paused})`, () => {
+        // Initialize OSD controller with confirmSeekWithOK disabled
+        const { osd, seeks, advance } = setup(false, paused);
+
+        // Step forward 10s to start debounced seek session
+        osd.handleInput('right');
+        assert.equal(osd._seekTargetTicks, 110 * 10000000);
+        assert.deepEqual(seeks, []);
+
+        // Scrubbing pauses playback when pausePlaybackOnScrub is enabled
+        assert.equal(osd._player.isPaused(), true);
+
+        // Advance 250ms into the 800ms debounce interval
+        advance(250);
+
+        // User hits OK (Enter key) — acts as hidden confirm to commit immediately
+        osd.handleInput('enter');
+
+        // Confirm jump executed immediately to target position
+        assert.deepEqual(seeks, [110 * 10000000]);
+
+        // Playback state matches pre-scrub state without ghost toggles
+        assert.equal(osd._player.isPaused(), paused);
+        assert.equal(osd._seekTargetTicks, null);
+
+        // Subsequent rapid OK presses in confirmation burst window are absorbed
+        for (let i = 0; i < 5; i++) {
+            advance(100);
+            osd.handleInput('enter');
+        }
+        assert.equal(osd._player.isPaused(), paused);
+        assert.deepEqual(seeks, [110 * 10000000]);
+
+        // Ensure original 800ms timer was cleared and doesn't seek twice
+        advance(1000);
+        assert.deepEqual(seeks, [110 * 10000000]);
+    });
+}
+
+test('pausePlaybackOnScrub=false leaves playback unpaused throughout seek scrub', () => {
+    const { osd, seeks, advance, settings } = setup(false);
+    settings.pausePlaybackOnScrub = false;
+    osd.handleInput('right');
+    assert.equal(osd._player.isPaused(), false);
+    advance(400);
+    osd.handleInput('right');
+    assert.equal(osd._player.isPaused(), false);
+    advance(800);
+    assert.deepEqual(seeks, [120 * 10000000]);
+    assert.equal(osd._player.isPaused(), false);
+});
+
+test('slider drag pauses on start and unpauses on change commit', () => {
+    const { osd, seeks } = setup(false);
+    assert.equal(osd._player.isPaused(), false);
+    osd._handlePositionSliderInput({ target: { value: 25 } });
+    assert.equal(osd._player.isPaused(), true);
+    osd._handlePositionSliderChange({ target: { value: 50 } });
+    assert.deepEqual(seeks, [1800 * 10000000]);
     assert.equal(osd._player.isPaused(), false);
 });
 
@@ -331,6 +449,36 @@ test('preference defaults off, persists as a boolean and can be reset', () => {
     // Reset back to default (false)
     settings.reset('confirmSeekWithOK');
     assert.equal(settings.get('confirmSeekWithOK'), false);
+
+    // Default pausePlaybackOnScrub is on (true)
+    assert.equal(settings.get('pausePlaybackOnScrub'), true);
+    // Test setting to disabled
+    settings.set('pausePlaybackOnScrub', false);
+    assert.equal(saved.get('player:pausePlaybackOnScrub'), 'false');
+    assert.equal(settings.get('pausePlaybackOnScrub'), false);
+    // Reset back to default (true)
+    settings.reset('pausePlaybackOnScrub');
+    assert.equal(settings.get('pausePlaybackOnScrub'), true);
+
+    // Default resetSeekSpeedOnDirectionChange is off (false)
+    assert.equal(settings.get('resetSeekSpeedOnDirectionChange'), false);
+    // Test setting to enabled
+    settings.set('resetSeekSpeedOnDirectionChange', true);
+    assert.equal(saved.get('player:resetSeekSpeedOnDirectionChange'), 'true');
+    assert.equal(settings.get('resetSeekSpeedOnDirectionChange'), true);
+    // Reset back to default (false)
+    settings.reset('resetSeekSpeedOnDirectionChange');
+    assert.equal(settings.get('resetSeekSpeedOnDirectionChange'), false);
+
+    // Default enableSeekAcceleration is on (true)
+    assert.equal(settings.get('enableSeekAcceleration'), true);
+    // Test setting to disabled
+    settings.set('enableSeekAcceleration', false);
+    assert.equal(saved.get('player:enableSeekAcceleration'), 'false');
+    assert.equal(settings.get('enableSeekAcceleration'), false);
+    // Reset back to default (true)
+    settings.reset('enableSeekAcceleration');
+    assert.equal(settings.get('enableSeekAcceleration'), true);
 });
 
 for (const hasRepeatMetadata of [true, false]) {
@@ -384,6 +532,85 @@ test('changing direction resets the multiplier immediately', () => {
     const target = osd._seekTargetTicks;
     osd.handleInput('left', arrowEvent(true));
     assert.equal(osd._seekTargetTicks, target - 5 * 10000000);
+});
+
+test('default mode: reversing direction preserves accelerated speed when resetSeekSpeedOnDirectionChange is false', () => {
+    // With confirmSeekWithOK disabled and resetSeekSpeedOnDirectionChange false (default)
+    const { osd, advance } = setup(false);
+    // Seek forward repeatedly with time advance to trigger speed acceleration (>=2s reaches 2x)
+    for (let i = 0; i < 25; i++) {
+        osd.handleInput('right');
+        advance(100);
+    }
+    const targetBeforeReverse = osd._seekTargetTicks;
+    // Reversing direction to left retains the 2x multiplier: -5s * 2 = -10s
+    osd.handleInput('left');
+    assert.equal(osd._seekTargetTicks, targetBeforeReverse - 10 * 10000000);
+});
+
+test('default mode: reversing direction resets speed to 1x when resetSeekSpeedOnDirectionChange is true', () => {
+    // With confirmSeekWithOK disabled and resetSeekSpeedOnDirectionChange enabled
+    const { osd, advance, settings } = setup(false);
+    settings.resetSeekSpeedOnDirectionChange = true;
+
+    // Seek forward repeatedly with time advance to trigger speed acceleration (>=2s reaches 2x)
+    for (let i = 0; i < 25; i++) {
+        osd.handleInput('right');
+        advance(100);
+    }
+    const targetBeforeReverse = osd._seekTargetTicks;
+    // Reversing direction to left immediately resets acceleration back to 1x: -5s * 1 = -5s
+    osd.handleInput('left');
+    assert.equal(osd._seekTargetTicks, targetBeforeReverse - 5 * 10000000);
+
+    // Continuing in the new direction stays at 1x until hold interval builds up again
+    advance(100);
+    osd.handleInput('left');
+    assert.equal(osd._seekTargetTicks, targetBeforeReverse - 10 * 10000000);
+});
+
+test('enableSeekAcceleration=false locks seek speed to 1x during hold (confirm mode)', () => {
+    // Setup in explicit confirmation mode with acceleration disabled
+    const { osd, advance, settings } = setup(true);
+    settings.enableSeekAcceleration = false;
+
+    // Trigger initial seek step (10s)
+    osd.handleInput('right', arrowEvent(false));
+
+    // Sustained hold for 5 seconds (50 repeats of 100ms) - past 4.5s 10x threshold
+    for (let i = 0; i < 50; i++) {
+        advance(100);
+        const previousTarget = osd._seekTargetTicks;
+        osd.handleInput('right', arrowEvent(true));
+
+        // Step size must strictly remain 10 seconds without acceleration scaling
+        assert.equal(osd._seekTargetTicks - previousTarget, 10 * 10000000);
+
+        // Tooltip text must never append an accelerated multiplier badge like (2x) or (10x)
+        assert.doesNotMatch(osd._cachedTooltipTextEl.textContent, /\([0-9]+x\)/);
+    }
+});
+
+test('enableSeekAcceleration=false locks seek speed to 1x during continuous seek (debounce mode)', () => {
+    // Setup in debounced automatic mode with acceleration disabled
+    const { osd, advance, settings } = setup(false);
+    settings.enableSeekAcceleration = false;
+
+    // Trigger initial seek step
+    osd.handleInput('right');
+
+    // Repeated seeking over 15 seconds (150 steps of 100ms) - past 12s 10x threshold
+    for (let i = 0; i < 150; i++) {
+        advance(100);
+        const previousTarget = osd._seekTargetTicks;
+        osd.handleInput('right');
+
+        // Step size must strictly remain 10 seconds without acceleration scaling
+        assert.equal(osd._seekTargetTicks - previousTarget, 10 * 10000000);
+
+        // Tooltip text must never append an accelerated multiplier badge
+        assert.doesNotMatch(osd._cachedTooltipTextEl.textContent, /\([0-9]+x\)/);
+    }
 });
 
 for (const paused of [true, false]) {
@@ -457,3 +684,332 @@ for (const idleTimerRunsFirst of [true, false]) {
         assert.doesNotMatch(osd._cachedTooltipTextEl.textContent, /x/);
     });
 }
+
+/*
+ * ============================================================================
+ * ASYNCHRONOUS HARDWARE SEEK PLAYBACK SYNCHRONIZATION TESTS
+ * ============================================================================
+ * Verifies that playback does not prematurely unpause at the pre-seek position
+ * while an asynchronous hardware seek is actively in flight. Covers both
+ * explicit confirmation mode (confirmSeekWithOK = true) and automatic debounce
+ * mode (confirmSeekWithOK = false), testing deferred resume on 'seeked' event
+ * arrival and safety timeout fallbacks.
+ * ============================================================================
+ */
+
+test('OSDController: confirmed seek defers playback resumption until seeked event fires', () => {
+    // Initialize controller with confirmSeekWithOK enabled and initial playback active
+    const { osd, advance } = setup(true, false);
+    let isSeekingInHardware = false;
+    let seekCount = 0;
+    const listeners = new Map();
+
+    // Wire up event emitter simulation on player mock
+    osd._player.on = (event, fn) => {
+        if (!listeners.has(event)) listeners.set(event, []);
+        listeners.get(event).push(fn);
+    };
+    osd._player.seek = (ticks) => {
+        seekCount++;
+        isSeekingInHardware = true;
+    };
+    Object.defineProperty(osd._player, 'isSeeking', {
+        get: () => isSeekingInHardware
+    });
+
+    // Re-bind listeners as OSDController constructor normally does
+    osd._player.on('seeked', (e) => osd._onPlayerSeeked(e));
+
+    // Scrub forward 10s — scrub automatically pauses playback
+    osd.handleInput('right');
+    assert.equal(osd._player.isPaused(), true);
+
+    // Press OK/Enter to confirm seek jump
+    osd.handleInput('enter');
+    assert.equal(seekCount, 1);
+
+    // Active seek is in flight: playback MUST remain paused and deferred
+    assert.equal(isSeekingInHardware, true);
+    assert.equal(osd._seekPendingResume, true);
+    assert.equal(osd._player.isPaused(), true);
+
+    // Hardware demuxer arrives at keyframe and dispatches authoritative 'seeked' event
+    isSeekingInHardware = false;
+    const seekedHandlers = listeners.get('seeked') || [];
+    for (const handler of seekedHandlers) {
+        handler();
+    }
+
+    // Playback is now safely unpaused after the seeked target lands
+    assert.equal(osd._seekPendingResume, false);
+    assert.equal(osd._player.isPaused(), false);
+});
+
+test('OSDController: debounced seek defers playback resumption until seeked event fires', () => {
+    // Initialize controller with confirmSeekWithOK disabled and initial playback active
+    const { osd, advance } = setup(false, false);
+    let isSeekingInHardware = false;
+    const listeners = new Map();
+
+    osd._player.on = (event, fn) => {
+        if (!listeners.has(event)) listeners.set(event, []);
+        listeners.get(event).push(fn);
+    };
+    osd._player.seek = () => {
+        isSeekingInHardware = true;
+    };
+    Object.defineProperty(osd._player, 'isSeeking', {
+        get: () => isSeekingInHardware
+    });
+
+    osd._player.on('seeked', (e) => osd._onPlayerSeeked(e));
+
+    // Scrub forward — pauses during scrub session
+    osd.handleInput('right');
+    assert.equal(osd._player.isPaused(), true);
+
+    // Let 800ms debounce timer fire to commit seek
+    advance(800);
+
+    // Seek is in flight: playback MUST NOT resume at pre-seek timestamp
+    assert.equal(isSeekingInHardware, true);
+    assert.equal(osd._seekPendingResume, true);
+    assert.equal(osd._player.isPaused(), true);
+
+    // Demuxer finishes buffering and emits 'seeked'
+    isSeekingInHardware = false;
+    const seekedHandlers = listeners.get('seeked') || [];
+    for (const handler of seekedHandlers) {
+        handler();
+    }
+
+    // Deferred playback now resumes at post-seek timestamp
+    assert.equal(osd._seekPendingResume, false);
+    assert.equal(osd._player.isPaused(), false);
+});
+
+test('OSDController: seek safety timer (3.5s) forces playback resume if seeked event never fires', () => {
+    // Test hardware stall recovery fallback
+    const { osd, advance } = setup(true, false);
+    let isSeekingInHardware = true;
+
+    osd._player.on = (event, fn) => {};
+    osd._player.seek = () => {
+        isSeekingInHardware = true;
+    };
+    Object.defineProperty(osd._player, 'isSeeking', {
+        get: () => isSeekingInHardware
+    });
+
+    osd.handleInput('right');
+    osd.handleInput('enter');
+
+    // Verify deferred resume state is armed
+    assert.equal(osd._seekPendingResume, true);
+    assert.equal(osd._player.isPaused(), true);
+
+    // Advance 3499ms: still safely waiting for hardware seeked event
+    advance(3499);
+    assert.equal(osd._seekPendingResume, true);
+    assert.equal(osd._player.isPaused(), true);
+
+    // Advance past 3500ms safety threshold: forces playback recovery
+    advance(2);
+    assert.equal(osd._seekPendingResume, false);
+    assert.equal(osd._player.isPaused(), false);
+});
+
+test('JellyfinPlayer: unpause queues execution while seeking and unpauses upon SEEKED event', () => {
+    // Read JellyfinPlayer source and verify event definitions and gate logic
+    const jfSource = readFileSync(new URL('../src/player/core/JellyfinPlayer.js', import.meta.url), 'utf8');
+
+    // PlayerEvent MUST include SEEK and SEEKED
+    assert.ok(jfSource.includes("SEEK: 'seek'"), 'PlayerEvent must define SEEK');
+    assert.ok(jfSource.includes("SEEKED: 'seeked'"), 'PlayerEvent must define SEEKED');
+
+    // unpause() MUST gate on isSeeking and queue _pendingPlayAfterSeek
+    assert.ok(
+        jfSource.includes('this._pendingPlayAfterSeek = true;'),
+        'JellyfinPlayer.unpause() must queue _pendingPlayAfterSeek when isSeeking'
+    );
+
+    // _handleBackendEvent MUST execute pending unpause upon SEEKED or PLAYING
+    assert.ok(
+        jfSource.includes('this._pendingPlayAfterSeek = false;') &&
+        jfSource.includes('this.unpause();'),
+        'JellyfinPlayer._handleBackendEvent must release queued unpause on seek completion'
+    );
+});
+
+test('Hardware player backends (Tizen, WebOS, HTML5) implement isSeeking and post-seek unpause guards', () => {
+    const tizenSource = readFileSync(new URL('../src/player/core/TizenAVPlayer.js', import.meta.url), 'utf8');
+    const webosSource = readFileSync(new URL('../src/player/core/WebOSPlayer.js', import.meta.url), 'utf8');
+    const htmlSource = readFileSync(new URL('../src/player/core/HtmlVideoPlayer.js', import.meta.url), 'utf8');
+
+    // 1. TizenAVPlayer
+    assert.ok(tizenSource.includes('get isSeeking()'), 'TizenAVPlayer must implement isSeeking getter');
+    assert.ok(
+        tizenSource.includes("this._pendingOpAfterSeek = 'play'"),
+        'TizenAVPlayer.unpause must queue play when seeking or deferred'
+    );
+    assert.ok(
+        tizenSource.includes('SUBTITLE_TRACK_CHANGE_COOLDOWN_MS') &&
+        tizenSource.includes('this._deferredSeekTimerId !== null'),
+        'TizenAVPlayer.seek must track subtitle cooldown deferral without deadlocking _seekInProgress'
+    );
+
+    // 2. WebOSPlayer
+    assert.ok(webosSource.includes('get isSeeking()'), 'WebOSPlayer must implement isSeeking getter');
+    assert.ok(
+        webosSource.includes('this._pendingPlayAfterSeek = true;'),
+        'WebOSPlayer.unpause must queue play when video is seeking'
+    );
+
+    // 3. HtmlVideoPlayer
+    assert.ok(htmlSource.includes('get isSeeking()'), 'HtmlVideoPlayer must implement isSeeking getter');
+    assert.ok(
+        htmlSource.includes('this._pendingPlayAfterSeek = true;'),
+        'HtmlVideoPlayer.unpause must queue play when video is seeking'
+    );
+});
+
+test('WebOSPlayer and HtmlVideoPlayer implement resume video presentation suppression to prevent frame 0 flash', () => {
+    const webosSource = readFileSync(new URL('../src/player/core/WebOSPlayer.js', import.meta.url), 'utf8');
+    const htmlSource = readFileSync(new URL('../src/player/core/HtmlVideoPlayer.js', import.meta.url), 'utf8');
+
+    // 1. WebOSPlayer must suppress and restore video presentation for resume
+    assert.ok(webosSource.includes('_resumeVideoSuppressed'), 'WebOSPlayer must track resume video suppression state');
+    assert.ok(webosSource.includes('_suppressVideoForResume'), 'WebOSPlayer must implement _suppressVideoForResume');
+    assert.ok(webosSource.includes('_restoreVideoAfterResume'), 'WebOSPlayer must implement _restoreVideoAfterResume');
+
+    // 2. HtmlVideoPlayer must suppress and restore video presentation for resume
+    assert.ok(htmlSource.includes('_resumeVideoSuppressed'), 'HtmlVideoPlayer must track resume video suppression state');
+    assert.ok(htmlSource.includes('_suppressVideoForResume'), 'HtmlVideoPlayer must implement _suppressVideoForResume');
+    assert.ok(htmlSource.includes('_restoreVideoAfterResume'), 'HtmlVideoPlayer must implement _restoreVideoAfterResume');
+});
+
+test('OSDController: consecutive debounced seeks preserve resume intent and unpause on final landing', () => {
+    const { osd, advance } = setup(false, false);
+    let isSeekingInHardware = false;
+    const listeners = new Map();
+
+    osd._player.on = (event, fn) => {
+        if (!listeners.has(event)) listeners.set(event, []);
+        listeners.get(event).push(fn);
+    };
+    osd._player.seek = () => {
+        isSeekingInHardware = true;
+        // Fire player 'seek' event to verify _onPlayerSeek does not wipe _seekPendingResume
+        const seekHandlers = listeners.get('seek') || [];
+        for (const handler of seekHandlers) handler({ positionTicks: 50000000 });
+    };
+    Object.defineProperty(osd._player, 'isSeeking', {
+        get: () => isSeekingInHardware
+    });
+
+    osd._player.on('seek', (e) => osd._onPlayerSeek(e));
+    osd._player.on('seeked', (e) => osd._onPlayerSeeked(e));
+
+    // First scrub and seek
+    osd.handleInput('right');
+    assert.equal(osd._player.isPaused(), true);
+    advance(800); // Debounce fires seek
+
+    assert.equal(isSeekingInHardware, true);
+    assert.equal(osd._seekPendingResume, true);
+
+    // Second scrub while first seek is still in flight in hardware
+    osd.handleInput('right');
+    // Ensure resume intent was preserved despite player being currently paused
+    assert.equal(osd._seekResumePlayback, true);
+
+    advance(800); // Second seek committed
+    assert.equal(osd._seekPendingResume, true);
+
+    // Hardware lands and emits seeked
+    isSeekingInHardware = false;
+    const seekedHandlers = listeners.get('seeked') || [];
+    for (const handler of seekedHandlers) handler();
+
+    // Verify playback successfully resumed
+    assert.equal(osd._seekPendingResume, false);
+    assert.equal(osd._player.isPaused(), false);
+});
+
+test('OSDController: consecutive confirmed seeks preserve resume intent across confirmations', () => {
+    const { osd } = setup(true, false);
+    let isSeekingInHardware = false;
+    const listeners = new Map();
+
+    osd._player.on = (event, fn) => {
+        if (!listeners.has(event)) listeners.set(event, []);
+        listeners.get(event).push(fn);
+    };
+    osd._player.seek = () => {
+        isSeekingInHardware = true;
+        const seekHandlers = listeners.get('seek') || [];
+        for (const handler of seekHandlers) handler({ positionTicks: 50000000 });
+    };
+    Object.defineProperty(osd._player, 'isSeeking', {
+        get: () => isSeekingInHardware
+    });
+
+    osd._player.on('seek', (e) => osd._onPlayerSeek(e));
+    osd._player.on('seeked', (e) => osd._onPlayerSeeked(e));
+
+    // First confirmed seek
+    osd.handleInput('right');
+    osd.handleInput('enter');
+    assert.equal(isSeekingInHardware, true);
+    assert.equal(osd._seekPendingResume, true);
+
+    // Second scrub and confirm while first seek is in flight
+    osd.handleInput('right');
+    assert.equal(osd._seekResumePlayback, true);
+    osd.handleInput('enter');
+    assert.equal(osd._seekPendingResume, true);
+
+    // Hardware lands and emits seeked
+    isSeekingInHardware = false;
+    const seekedHandlers = listeners.get('seeked') || [];
+    for (const handler of seekedHandlers) handler();
+
+    // Playback successfully resumed
+    assert.equal(osd._seekPendingResume, false);
+    assert.equal(osd._player.isPaused(), false);
+});
+
+test('Stealth layout: seeking uses debounced scrub pipeline with scrub pause and HUD without waking OSD', () => {
+    const { osd, advance, settings } = setup(false, false);
+    settings.osdLayout = 'hidden';
+    osd._isOsdVisible = false;
+
+    let hudCalls = [];
+    osd.showStealthHud = (action, param) => {
+        hudCalls.push({ action, param });
+    };
+
+    let showCalled = false;
+    osd.show = () => {
+        showCalled = true;
+    };
+
+    // Trigger Left arrow navigation in stealth layout while playing at 100s
+    osd.handleInput('left', arrowEvent(false));
+
+    // Must pause playback during scrub session
+    assert.equal(osd._player.isPaused(), true, 'Playback must pause on scrub start');
+    assert.equal(showCalled, false, 'Stealth seek must not wake Layer 1 OSD');
+    assert.equal(hudCalls.length, 1);
+    assert.equal(hudCalls[0].action, 'seekBack');
+    assert.equal(hudCalls[0].param, 5); // 5000ms skipBackLength = 5s
+
+    // Verify seek has not been committed yet (debounced)
+    assert.equal(osd._seekTargetTicks, 95 * 10000000);
+
+    // After 800ms debounce expires, seek is committed to player and playback is restored
+    advance(800);
+    assert.equal(osd._seekTargetTicks, null, 'Seek session state must be cleared after commit');
+    assert.equal(osd._player.isPaused(), false, 'Playback must resume after seek commit');
+});
+

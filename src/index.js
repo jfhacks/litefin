@@ -29,6 +29,7 @@ import './styles/player-osd.css';
 import './styles/upnext.css';
 import './styles/player-modals.css'; /* Chapters & Queue modal panels */
 import './styles/syncplay-menu.css'; /* SyncPlay group-selection overlay */
+import './styles/admin-modals.css'; /* Admin Identify & Image Editor modals */
 import './styles/settings.css';
 import './styles/lock-overlay.css';
 import './styles/season.css';
@@ -47,6 +48,8 @@ import './styles/modern/manual.css';
 import './styles/modern/users.css';
 import './styles/modern/home.css';
 import './styles/modern/sidebar.css';
+import './styles/android-mobile.css'; // Mobile touch & scaled viewport overrides
+import './styles/mobile-nav.css'; // Mobile portrait navigation bar & top bar
 
 /**
  * Bootstrap the application

@@ -158,6 +158,44 @@ class NavigationState {
     _doRestoreScrollFocus(pageInstance, state) {
         if (storage.getItem('pref:disableFocusRestore') === 'true') return;
 
+        // ====================================================================
+        // MODAL FOCUS TRAP ENFORCEMENT
+        // ====================================================================
+        // If a focus trap is currently active (e.g. ExitDialog or a modal menu),
+        // abort restoring scroll position or stealing focus away from the modal.
+        // ====================================================================
+        if (focusManager.isTrapped()) {
+            log.debug('Skipping NavigationState restoreScrollFocus because focus is trapped in modal');
+            // Notify page so deferred loading overlays can safely be released
+            if (pageInstance && typeof pageInstance.onScrollFocusRestored === 'function') {
+                pageInstance.onScrollFocusRestored();
+            }
+            return;
+        }
+
+        // ====================================================================
+        // ACTIVE INTERACTION GUARD
+        // ====================================================================
+        // If the user has already actively navigated via D-pad after entering
+        // this page (e.g. while async items were loading over the network),
+        // abort deferred scroll and focus restoration! Overriding manual user
+        // navigation with stale history/cache targets causes focus to jarringly
+        // snap back to previous items after ~1 second of browsing.
+        // ====================================================================
+        if (
+            pageInstance &&
+            pageInstance._initTimestamp &&
+            typeof focusManager.getLastMoveTime === 'function' &&
+            focusManager.getLastMoveTime() > pageInstance._initTimestamp
+        ) {
+            log.info('Skipping deferred NavigationState restoration: user actively navigated');
+            // Notify page so deferred loading overlays can safely be released
+            if (pageInstance && typeof pageInstance.onScrollFocusRestored === 'function') {
+                pageInstance.onScrollFocusRestored();
+            }
+            return;
+        }
+
         if (this._debug) {
             log.debug('Executing scroll/focus restoration');
         }
@@ -181,6 +219,11 @@ class NavigationState {
 
         // Restore focus position
         this._restoreFocus(state);
+
+        // Notify page instance that scroll and focus restoration pipeline has executed
+        if (pageInstance && typeof pageInstance.onScrollFocusRestored === 'function') {
+            pageInstance.onScrollFocusRestored();
+        }
     }
 
     /**

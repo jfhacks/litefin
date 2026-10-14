@@ -13,6 +13,7 @@ import {
     api,
     discoverServers,
     cancelDiscovery,
+    testServer,
     ServerUnreachableError,
     hasBackgroundDiscoveryService
 } from '../api/index.js';
@@ -29,6 +30,8 @@ import { layoutManager } from '../ui/LayoutManager.js';
 import { imageService } from '../utils/ImageService.js';
 import { pinManager } from '../utils/PinManager.js';
 import { pinDialog } from '../ui/PinDialog.js';
+import { platformInfo } from '../utils/PlatformInfo.js';
+import { androidAdapter } from '../android/AndroidAdapter.js';
 
 const log = logger.create('Login');
 
@@ -379,12 +382,23 @@ class LoginPage extends Page {
                                 </div>
                             </div>
                         </div>
+                        <!-- Action Buttons Row -->
                         <div class="login-actions modern-button-row">
+                            <!-- Primary Sign In Submit Button -->
                             <button type="button" class="btn btn-primary manual-signin-btn" tabindex="0">
                                 <span data-i18n="ButtonSignIn">Sign In</span>
                             </button>
+                            <!-- Quick Connect Button (shown during auto-redirect when no users exist) -->
+                            <button type="button" class="btn btn-secondary quick-connect-btn" tabindex="0">
+                                <span data-i18n="QuickConnect">Quick Connect</span>
+                            </button>
+                            <!-- Back Button (shown when manually navigating from users picker) -->
                             <button type="button" class="btn btn-secondary back-btn" tabindex="0">
                                 <span data-i18n="ButtonBack">Back</span>
+                            </button>
+                            <!-- Change Server Button (shown during auto-redirect fallback) -->
+                            <button type="button" class="btn btn-secondary change-server-btn" tabindex="0">
+                                <span data-i18n="ButtonChangeServer">Change Server</span>
                             </button>
                         </div>
                         <p class="login-error" id="manual-error"></p>
@@ -399,14 +413,16 @@ class LoginPage extends Page {
                             <span class="login-user-name"></span>
                         </div>
                         <div class="input-group">
-                            <input
-                                type="password"
-                                id="password-input"
-                                class="text-input tv-input"
-                                placeholder="${i18n.t('PasswordPlaceholder')}"
-                                readonly
-                                tabindex="0"
-                            >
+                            <div class="input-container pass-input-container">
+                                <input
+                                    type="password"
+                                    id="password-input"
+                                    class="text-input tv-input"
+                                    placeholder="${i18n.t('PasswordPlaceholder')}"
+                                    readonly
+                                    tabindex="0"
+                                >
+                            </div>
                         </div>
                         <div class="login-actions modern-button-row">
                             <button type="button" class="btn btn-primary login-btn" tabindex="0">
@@ -448,28 +464,11 @@ class LoginPage extends Page {
     }
 
     /**
-     * Shared logo SVG markup — extracted so both layouts stay DRY.
-     * Returns the raw SVG string for embedding in either template.
+     * Shared logo image markup for both login page layouts.
+     * Uses icon-130.png for the Litefin brand logo icon.
      */
     _logoSvg() {
-        return `<svg viewBox="0 0 100 100" class="login-logo-svg" preserveAspectRatio="xMidYMid meet">
-            <path class="logo-path-outer" d="M19.57,91c-2.24,0-4.73-0.44-6.87-2.02c-2.07-1.53-3.32-3.6-3.62-5.97
-				c-0.51-4.01,1.81-7.59,3.24-9.37c4.82-5.97,9.41-12.5,10.36-19.76c0.8-6.13-1-12.33-2.9-18.9c-0.59-2.04-1.21-4.16-1.73-6.27
-				c-0.8-3.17-1.42-6.59-0.53-10.08c1.8-7.06,9.11-10.26,21.74-9.53c10.63,0.62,21.35,5.21,30.19,12.91
-				C82.12,33.08,93.56,53.11,90.5,72.93c-0.23,1.54-0.58,2.97-1.04,4.26c-1.28,3.66-3.47,6.32-6.34,7.68
-				c-3.63,1.71-7.38,1.01-10.39,0.44c-2.45-0.46-5.35-0.99-8.34-1.37c-6.72-0.86-12.12-0.79-17.02,0.21
-				c-3.5,0.71-6.9,1.8-10.49,2.95c-4.51,1.44-9.17,2.94-14.09,3.64C21.84,90.88,20.74,91,19.57,91z M35.69,16
-				c-5.23,0-10.52,0.9-11.4,4.36c-0.5,1.98-0.04,4.37,0.53,6.65c0.5,1.99,1.09,4.04,1.67,6.02c2.02,6.97,4.11,14.17,3.12,21.75
-				c-1.17,8.98-6.38,16.48-11.85,23.25c-1.19,1.47-1.87,3.08-1.75,4.08c0.04,0.31,0.17,0.73,0.85,1.23
-				c0.89,0.66,2.51,0.81,4.95,0.46c4.34-0.62,8.53-1.96,12.95-3.38c3.61-1.16,7.35-2.35,11.22-3.14c5.67-1.16,11.81-1.26,19.31-0.3
-				c3.17,0.41,6.2,0.95,8.74,1.43c2.32,0.44,4.52,0.85,6.1,0.11c1.15-0.54,2.07-1.78,2.72-3.66l0-0.01c0.31-0.87,0.55-1.88,0.72-3
-				c2.65-17.2-7.5-34.78-18.74-44.57c-7.68-6.69-16.92-10.67-26-11.2C37.81,16.04,36.75,16,35.69,16z" />
-            <path class="logo-path-inner" d="M69.3,63.51c0.19-0.64,0.32-1.3,0.41-1.95
-				c1.26-9.44-3.2-19.55-9.22-25.63c-3.64-3.67-8.19-6.14-13.02-6.47c-2.7-0.18-7.56-0.15-8.41,3.7c-0.32,1.47-0.07,3.03,0.25,4.49
-				c1.01,4.7,2.72,9.41,2.18,14.21C41,56.22,38.72,60,36.34,63.41c-1.14,1.63-1.9,4.02-0.12,5.54c0.97,0.83,2.3,0.8,3.49,0.6
-				c3.88-0.64,7.47-2.62,11.3-3.52c2.77-0.66,5.63-0.55,8.42-0.14c1.33,0.2,2.64,0.47,3.96,0.75c1.25,0.27,2.62,0.57,3.82-0.09
-				C68.26,65.98,68.91,64.81,69.3,63.51z" />
-        </svg>`;
+        return `<img src="assets/icon-130.png" class="login-logo-img" alt="Litefin Logo" />`;
     }
 
     onMounted() {
@@ -765,10 +764,19 @@ class LoginPage extends Page {
             orientation: 'auto' // Allow spatial navigation (Left/Right for button, Down for servers)
         });
 
-        // Register users section - grid allows 2D navigation
-        this.registerFocusSection('login-users', this.$('[data-section="users"]'), {
+        // Register users grid section - dedicated to user cards inside #users-grid
+        // Retain focus on Up (no leaveUp to hidden server section)
+        // Handover Down to action buttons only when leaving grid
+        this.registerFocusSection('login-users', this.$('#users-grid'), {
             orientation: 'grid',
-            leaveUp: 'login-server'
+            leaveDown: 'login-user-actions'
+        });
+
+        // Register user screen action buttons (Quick Connect, Manual Login, Log out)
+        // Up navigates back up to the users grid
+        this.registerFocusSection('login-user-actions', this.$('[data-section="users"] .login-actions'), {
+            orientation: 'horizontal',
+            leaveUp: 'login-users'
         });
 
         // Register password section - use grid for spatial navigation
@@ -1049,14 +1057,13 @@ class LoginPage extends Page {
                             <button class="login-user-card" data-user-index="${index}" tabindex="0">
                                     <img 
                                         class="login-user-avatar ${user.PrimaryImageTag ? '' : 'hidden'}" 
-                                        src="${
-                                            user.PrimaryImageTag
-                                                ? api.getUserImageUrl(user.Id, {
-                                                      maxWidth: imageService.getParams('avatar').maxWidth,
-                                                      quality: imageService.getParams('avatar').quality
-                                                  })
-                                                : ''
-                                        }"
+                                        src="${user.PrimaryImageTag
+                            ? api.getUserImageUrl(user.Id, {
+                                maxWidth: imageService.getParams('avatar').maxWidth,
+                                quality: imageService.getParams('avatar').quality
+                            })
+                            : ''
+                        }"
                                         alt="${user.Name}"
                                         onerror="this.classList.add('hidden'); this.nextElementSibling.classList.remove('hidden')"
                                     >
@@ -1071,14 +1078,13 @@ class LoginPage extends Page {
                             <button class="user-card" data-user-index="${index}" tabindex="0">
                                 <img 
                                     class="user-avatar ${user.PrimaryImageTag ? '' : 'hidden'}" 
-                                    src="${
-                                        user.PrimaryImageTag
-                                            ? api.getUserImageUrl(user.Id, {
-                                                  maxWidth: imageService.getParams('avatar').maxWidth,
-                                                  quality: imageService.getParams('avatar').quality
-                                              })
-                                            : ''
-                                    }"
+                                    src="${user.PrimaryImageTag
+                            ? api.getUserImageUrl(user.Id, {
+                                maxWidth: imageService.getParams('avatar').maxWidth,
+                                quality: imageService.getParams('avatar').quality
+                            })
+                            : ''
+                        }"
                                     alt="${user.Name}"
                                     onerror="this.classList.add('hidden'); this.nextElementSibling.classList.remove('hidden')"
                                 >
@@ -1095,6 +1101,7 @@ class LoginPage extends Page {
 
         // Invalidate focus cache so new items are found
         focusManager.invalidateCache('login-users');
+        focusManager.invalidateCache('login-user-actions');
 
         // Click handling is delegated on _usersGrid container in _bindEvents()
         // No per-card listeners needed — delegation survives innerHTML rebuilds
@@ -1130,71 +1137,110 @@ class LoginPage extends Page {
         try {
             this._selectedUser = user;
 
-            // Check HasPassword field (key jellyfin-web pattern)
+            /*
+             * Passwordless user detection & authentication:
+             *
+             * 1. Explicit HasPassword === false:
+             *    On pre-JF12 servers (and any server accurately returning HasPassword=false),
+             *    the account definitely has no password. Log in directly without prompting.
+             *
+             * 2. Jellyfin 12+ silent empty-password probe:
+             *    Jellyfin 12+ hard-codes HasPassword to `true` on public user listings.
+             *    We speculatively execute a silent empty-password login. If accepted,
+             *    we navigate immediately. If rejected with 401, we fall through to
+             *    the password entry form without flashing an error state.
+             */
             if (user.HasPassword === false) {
-                // No password required - login directly
                 log.info(`User "${user.Name}" has no password, logging in directly`);
-                this._showState(STATE.LOADING);
 
-                // Stop any running discovery just in case
+                // Update UI state and halt any pending network server discovery
+                this._showState(STATE.LOADING);
                 cancelDiscovery();
 
+                // Authenticate with an empty password string
                 await auth.login(user.Name, '');
-                // In addUser mode, return to the profiles screen instead of going home
+
+                // Route appropriately depending on whether we are adding a profile or initial login
                 if (this._isAddUserMode) {
                     router.navigate('/profiles', { replace: true });
                 } else {
                     router.navigate('/home', { replace: true });
                 }
-            } else {
-                // Password required - show password form
-                log.info(`LoginPage: User "${user.Name}" requires password`);
-
-                // Update password section with user info
-                const userEl = this.$('#selected-user');
-                const nameEl = userEl?.querySelector('.login-user-name, .user-name');
-                if (nameEl) {
-                    nameEl.textContent = user.Name;
-                }
-
-                const img = userEl?.querySelector('.login-user-avatar, .user-avatar');
-                const placeholder = userEl?.querySelector('.user-avatar-placeholder');
-
-                if (placeholder) {
-                    placeholder.textContent = user.Name.charAt(0).toUpperCase();
-                }
-
-                if (img) {
-                    if (user.PrimaryImageTag) {
-                        const params = imageService.getParams('avatar');
-                        img.src = api.getUserImageUrl(user.Id, {
-                            maxWidth: params.maxWidth,
-                            quality: params.quality
-                        });
-                        img.classList.remove('hidden');
-                        placeholder?.classList.add('hidden');
-                    } else {
-                        img.src = '';
-                        img.classList.add('hidden');
-                        placeholder?.classList.remove('hidden');
-                    }
-                }
-
-                // Clear password input
-                this._passwordInput.value = '';
-
-                // Show password section
-                this._showState(STATE.PASSWORD);
-                this.setActiveSection('login-password');
-
-                // Focus password input
-                setTimeout(() => {
-                    if (this._passwordInput) {
-                        this._passwordInput.readOnly = true;
-                        this._passwordInput.focus();
-                    }
-                }, 100);
+                return;
             }
+
+            // Probe Jellyfin 12+ servers for passwordless accounts masked as HasPassword: true
+            if (api.isJF12Plus()) {
+                try {
+                    // Show loading indicator during candidate authentication probe
+                    this._showState(STATE.LOADING);
+                    cancelDiscovery();
+
+                    // Execute empty-password login attempt silently.
+                    // Passing silent: true ensures the probe does not log errors or
+                    // trigger session expiry for any currently authenticated profile.
+                    await auth.login(user.Name, '', { silent: true });
+
+                    // Login succeeded — account is passwordless, navigate away
+                    if (this._isAddUserMode) {
+                        router.navigate('/profiles', { replace: true });
+                    } else {
+                        router.navigate('/home', { replace: true });
+                    }
+                    return;
+                } catch (_silentErr) {
+                    // Candidate empty-password probe rejected — account requires a password
+                    log.debug(`User "${user.Name}" requires a password (silent probe rejected)`);
+                }
+            }
+
+            // Password required — show the password entry form
+            log.info(`LoginPage: User "${user.Name}" requires password`);
+
+            // Update password section with user info
+            const userEl = this.$('#selected-user');
+            const nameEl = userEl?.querySelector('.login-user-name, .user-name');
+            if (nameEl) {
+                nameEl.textContent = user.Name;
+            }
+
+            const img = userEl?.querySelector('.login-user-avatar, .user-avatar');
+            const placeholder = userEl?.querySelector('.user-avatar-placeholder');
+
+            if (placeholder) {
+                placeholder.textContent = user.Name.charAt(0).toUpperCase();
+            }
+
+            if (img) {
+                if (user.PrimaryImageTag) {
+                    const params = imageService.getParams('avatar');
+                    img.src = api.getUserImageUrl(user.Id, {
+                        maxWidth: params.maxWidth,
+                        quality: params.quality
+                    });
+                    img.classList.remove('hidden');
+                    placeholder?.classList.add('hidden');
+                } else {
+                    img.src = '';
+                    img.classList.add('hidden');
+                    placeholder?.classList.remove('hidden');
+                }
+            }
+
+            // Clear password input
+            this._passwordInput.value = '';
+
+            // Show password section
+            this._showState(STATE.PASSWORD);
+            this.setActiveSection('login-password');
+
+            // Focus password input
+            setTimeout(() => {
+                if (this._passwordInput) {
+                    this._passwordInput.readOnly = true;
+                    this._passwordInput.focus();
+                }
+            }, 100);
         } catch (error) {
             log.error('_selectUser error:', error);
             this._showState(STATE.USERS);
@@ -1230,33 +1276,47 @@ class LoginPage extends Page {
         }
     }
 
+    /**
+     * Transition the UI to the manual username/password entry screen.
+     * When isAutoRedirect is true (because the server has no public/saved users available),
+     * we suppress the Back button (since going back to an empty user grid makes no sense)
+     * and expose the Quick Connect and Change Server buttons so users can easily authenticate
+     * via mobile/web PIN or switch servers without getting trapped.
+     *
+     * @param {boolean} [isAutoRedirect=false] - True if automatically routed here due to zero discoverable users
+     */
     _goToManualLogin(isAutoRedirect = false) {
         log.info(`Going to Manual Login. AutoRedirect=${isAutoRedirect}`);
         this._isManualLoginAutoRedirect = isAutoRedirect;
 
+        // Reset input fields for fresh credential entry
         this._manualUsername.value = '';
         this._manualPassword.value = '';
 
-        // Back button and Quick Connect button visibility based on auto-redirect (as requested)
+        // Back button: Hidden on auto-redirect (empty user list), visible if user manually navigated here
         const backBtn = this.$('.manual-section .back-btn');
         if (backBtn) {
             backBtn.style.display = isAutoRedirect ? 'none' : '';
         }
 
+        // Quick Connect button: Available on auto-redirect as an alternative authentication method
         const qcBtn = this.$('.manual-section .quick-connect-btn');
         if (qcBtn) {
             qcBtn.style.display = isAutoRedirect ? '' : 'none';
         }
 
+        // Change Server button: Available on auto-redirect unless locked in "Add User" workflow
         const changeServerBtn = this.$('.manual-section .change-server-btn');
         if (changeServerBtn) {
-            changeServerBtn.style.display = isAutoRedirect ? '' : 'none';
+            changeServerBtn.style.display = isAutoRedirect && !this._isAddUserMode ? '' : 'none';
         }
 
+        // Transition active visual section and spatial focus
         this._showState(STATE.MANUAL);
         this.setActiveSection('login-manual');
         focusManager.invalidateCache('login-manual');
 
+        // Focus the username input field for user entry
         setTimeout(() => {
             if (this._manualUsername) {
                 this._manualUsername.readOnly = true;
@@ -1326,15 +1386,13 @@ class LoginPage extends Page {
              */
             if (this._isAddUserMode) {
                 router.navigate('/profiles', { replace: true });
-            } else if (typeof tizen !== 'undefined') {
-                try {
-                    storage.flush();
-                    tizen.application.getCurrentApplication().exit();
-                } catch (e) {
-                    log.error('App exit failed:', e);
-                }
+            } else if (platformInfo.isAndroid) {
+                // Ask the native shell to finish the activity (Back on the
+                // server screen with nothing behind it means "leave the app").
+                androidAdapter.exit();
+                return true;
             } else {
-                log.info('App exit (simulated)');
+                eventBus.emit('app:exitRequested');
             }
             return true;
         } else if (this._state === STATE.USERS) {
@@ -1442,12 +1500,16 @@ class LoginPage extends Page {
             if (savedServers && savedServers.length > 0) {
                 savedServers.forEach((saved) => {
                     const fallbackName = saved.serverUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
-                    this._discoveredServers.push({
+                    const serverObj = {
                         name: saved.serverName || fallbackName,
                         address: saved.serverUrl,
                         version: null,
-                        isSaved: true
-                    });
+                        isSaved: true,
+                        isLive: false // Will be updated to true if HTTP probe succeeds
+                    };
+                    this._discoveredServers.push(serverObj);
+                    // Asynchronously probe saved server reachability
+                    this._probeServer(serverObj);
                 });
             }
             this._renderDiscoveredServers();
@@ -1468,12 +1530,16 @@ class LoginPage extends Page {
             savedServers.forEach((saved) => {
                 // Use the domain/IP as the name if we don't have a specific friendly name saved
                 const fallbackName = saved.serverUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
-                this._discoveredServers.push({
+                const serverObj = {
                     name: saved.serverName || fallbackName,
                     address: saved.serverUrl,
                     version: null,
-                    isSaved: true
-                });
+                    isSaved: true,
+                    isLive: false // Will be updated to true if HTTP probe succeeds
+                };
+                this._discoveredServers.push(serverObj);
+                // Asynchronously probe saved server reachability
+                this._probeServer(serverObj);
             });
         }
         this._renderDiscoveredServers();
@@ -1493,17 +1559,26 @@ class LoginPage extends Page {
                     );
 
                     if (!existing) {
-                        // Server found! Add and render immediately
+                        // Server found via UDP! Add and render immediately
                         log.info(`LoginPage: Found server ${server.name} (${server.address})`);
-                        this._discoveredServers.push(server);
+                        const serverObj = {
+                            ...server,
+                            isLive: false // Will be confirmed by HTTP probe
+                        };
+                        this._discoveredServers.push(serverObj);
                         this._renderDiscoveredServers();
+                        // Probe immediately to confirm live status and retrieve version
+                        this._probeServer(serverObj);
                     } else {
                         // Update existing with better discovery info
                         if (existing.isSaved) {
                             existing.name = server.name || existing.name;
-                            existing.version = server.version || existing.version;
+                            if (server.version) existing.version = server.version;
+                            if (server.id) existing.id = server.id;
                             this._renderDiscoveredServers();
                         }
+                        // Re-probe existing server to ensure live status and version are current
+                        this._probeServer(existing);
                     }
                 },
                 { isManual, allowHttpFallback: isManual }
@@ -1516,7 +1591,14 @@ class LoginPage extends Page {
                         (s) => s.address.replace(/\/$/, '') === server.address.replace(/\/$/, '')
                     );
                     if (!exists) {
-                        this._discoveredServers.push(server);
+                        const serverObj = {
+                            ...server,
+                            isLive: false
+                        };
+                        this._discoveredServers.push(serverObj);
+                        this._probeServer(serverObj);
+                    } else if (!exists.isLive && !exists._probing) {
+                        this._probeServer(exists);
                     }
                 });
             }
@@ -1580,6 +1662,79 @@ class LoginPage extends Page {
         }
     }
 
+    /**
+     * =========================================================================
+     * Server Health & Version Verification Probe
+     * =========================================================================
+     * Pings the server's public system endpoint (/System/Info/Public) using
+     * lightweight asynchronous HTTP XHR.
+     *
+     * Purpose:
+     *  1. Live Status: Confirms whether the server is actively responsive on
+     *     HTTP. Only responsive servers receive the Apple-style live green dot.
+     *  2. Version Retrieval: Discovered UDP responses don't include the Jellyfin
+     *     release version. Probing fetches info.Version and displays the version tag.
+     *  3. Name Normalization: Replaces bare IP/URL strings with the friendly
+     *     server name if one was configured on the server.
+     *
+     * @private
+     * @param {Object} server - Server descriptor entry from this._discoveredServers
+     */
+    async _probeServer(server) {
+        // Guard against invalid server descriptors or missing address
+        if (!server || !server.address) {
+            return;
+        }
+
+        // Prevent redundant simultaneous HTTP probes targeting the exact same server
+        if (server._probing) {
+            return;
+        }
+        server._probing = true;
+
+        try {
+            log.info(`LoginPage: Probing server reachability for "${server.name}" (${server.address})...`);
+
+            // Probe with a 1500ms timeout to avoid hanging on dead servers
+            const info = await testServer(server.address, 1500);
+
+            if (info) {
+                log.info(`LoginPage: Server "${server.name}" confirmed LIVE (v${info.version || 'unknown'})`);
+
+                // Mark verified live status
+                server.isLive = true;
+
+                // Update server version tag if returned by the endpoint
+                if (info.version) {
+                    server.version = info.version;
+                }
+
+                // If existing server name is empty or a bare URL/IP, adopt friendly name
+                if (info.name && (!server.name || server.name === server.address || server.name.includes('://'))) {
+                    server.name = info.name;
+                }
+
+                // Attach canonical server ID if missing
+                if (info.id && !server.id) {
+                    server.id = info.id;
+                }
+            } else {
+                // Non-responsive or unreachable server
+                log.info(`LoginPage: Server "${server.name}" is offline or unreachable`);
+                server.isLive = false;
+            }
+        } catch (err) {
+            // Log transport errors and treat server as non-responsive
+            log.warn(`LoginPage: Probe failed for "${server.name}" (${server.address}):`, err);
+            server.isLive = false;
+        } finally {
+            server._probing = false;
+
+            // Re-render the server list so the live status dot and version badge update
+            this._renderDiscoveredServers();
+        }
+    }
+
     _renderDiscoveredServers() {
         // Layout-aware checks: in modern layout, we only need _serverList. In classic layout, we need both.
         const isModern = layoutManager.isModern();
@@ -1622,7 +1777,7 @@ class LoginPage extends Page {
             if (this._discoveredServers.length === 0) {
                 // If LAN discovery has finished and there are zero servers, show a clean fallback
                 if (!this._isDiscovering) {
-                    this._serverList.innerHTML = `<li class="server-item empty">${i18n.t('NoItemsFound')}</li>`;
+                    this._serverList.innerHTML = `<li class="server-item empty">${i18n.t('NoServersFound')}</li>`;
                 } else {
                     // Empty list while the background discovery scan is actively searching
                     this._serverList.innerHTML = '';
@@ -1637,7 +1792,7 @@ class LoginPage extends Page {
                         // If the server was already saved, render it with special badges and indicators
                         if (server.isSaved) {
                             return `
-                                <li class="server-item saved" data-server-index="${index}" tabindex="0">
+                                <li class="server-item saved ${server.isLive ? 'is-live' : ''}" data-server-index="${index}" tabindex="0">
                                     <div class="server-icon-box">
                                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                             <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
@@ -1645,8 +1800,8 @@ class LoginPage extends Page {
                                             <line x1="6" y1="6" x2="6.01" y2="6"></line>
                                             <line x1="6" y1="18" x2="6.01" y2="18"></line>
                                         </svg>
-                                        <!-- Active status dot indicating a fully saved/trusted server session -->
-                                        <div class="status-dot"></div>
+                                        <!-- Active status dot indicating a verified live server session -->
+                                        ${server.isLive ? '<div class="status-dot"></div>' : ''}
                                     </div>
                                     <div class="server-info">
                                         <div class="name-row">
@@ -1661,7 +1816,7 @@ class LoginPage extends Page {
                         } else {
                             // Standard discovered server card without extra saved badge
                             return `
-                                <li class="server-item" data-server-index="${index}" tabindex="0">
+                                <li class="server-item ${server.isLive ? 'is-live' : ''}" data-server-index="${index}" tabindex="0">
                                     <div class="server-icon-box">
                                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                             <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
@@ -1669,6 +1824,8 @@ class LoginPage extends Page {
                                             <line x1="6" y1="6" x2="6.01" y2="6"></line>
                                             <line x1="6" y1="18" x2="6.01" y2="18"></line>
                                         </svg>
+                                        <!-- Active status dot indicating a verified live server session -->
+                                        ${server.isLive ? '<div class="status-dot"></div>' : ''}
                                     </div>
                                     <div class="server-info">
                                         <div class="name-row">
@@ -1691,7 +1848,8 @@ class LoginPage extends Page {
                 .map((server) => {
                     const index = this._discoveredServers.indexOf(server);
                     return `
-                    <li class="server-item" data-server-index="${index}" tabindex="0">
+                    <li class="server-item ${server.isLive ? 'is-live' : ''}" data-server-index="${index}" tabindex="0">
+                        ${server.isLive ? '<span class="status-dot"></span>' : ''}
                         <span class="server-name">${escapeHtml(server.name)}</span>
                         <span class="server-badge" data-i18n="SavedBadge">Saved</span>
                         <span class="server-address">${escapeHtml(server.address)}</span>
@@ -1705,7 +1863,7 @@ class LoginPage extends Page {
             if (otherServers.length === 0) {
                 // Show empty indicator only if scanning has stopped and no saved servers either
                 if (!this._isDiscovering && savedServers.length === 0) {
-                    this._serverList.innerHTML = `<li class="server-item empty">${i18n.t('NoItemsFound')}</li>`;
+                    this._serverList.innerHTML = `<li class="server-item empty">${i18n.t('NoServersFound')}</li>`;
                 } else {
                     this._serverList.innerHTML = '';
                 }
@@ -1714,7 +1872,8 @@ class LoginPage extends Page {
                     .map((server) => {
                         const index = this._discoveredServers.indexOf(server);
                         return `
-                        <li class="server-item" data-server-index="${index}" tabindex="0">
+                        <li class="server-item ${server.isLive ? 'is-live' : ''}" data-server-index="${index}" tabindex="0">
+                            ${server.isLive ? '<span class="status-dot"></span>' : ''}
                             <span class="server-name">${escapeHtml(server.name)}</span>
                             <span class="server-address">${escapeHtml(server.address)}</span>
                             ${server.version ? `<span class="server-version">v${escapeHtml(server.version)}</span>` : ''}

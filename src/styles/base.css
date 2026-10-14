@@ -14,10 +14,22 @@
 *,
 *::before,
 *::after {
+    /* Standard box sizing model across all nested components */
     box-sizing: border-box;
+
+    /* Normalize default outer margins and inner padding */
     margin: 0;
     padding: 0;
+
+    /* Inherit global typography typeface */
     font-family: inherit;
+
+    /* Suppress outdated Android / WebKit tap highlight and inkwell box flashes on touch */
+    -webkit-tap-highlight-color: transparent !important;
+    -webkit-tap-highlight-color: rgba(0, 0, 0, 0) !important;
+
+    /* Prevent mobile long-press holding callout overlays and magnifiers */
+    -webkit-touch-callout: none !important;
 }
 
 :root {
@@ -61,10 +73,186 @@
     --jf-border-radius-lg: 4px;
 }
 
-/* Global Rounded Corners */
+/* Global Rounded Corners (Modern CSS Variables) */
 html[data-rounded-corners="true"] {
     --jf-border-radius: 12px;
     --jf-border-radius-lg: 16px;
+}
+
+/*
+ * ============================================================================
+ * Ultra-Legacy Rounded Corners Engine (Chrome <47 / Tizen 2.x / WebOS 1.x)
+ * ============================================================================
+ * Ancient layout engines lack CSS custom property (var()) support.
+ * Properties relying exclusively on var(--jf-border-radius) drop to 0px.
+ * The rules below map standard UI elements directly to static pixel values
+ * following the exact --jf-border-radius (12px) and --jf-border-radius-lg (16px)
+ * allocations defined across modern styles.
+ * ============================================================================
+ */
+
+/* Ultra-Legacy: Rounded Corners Enabled (data-rounded-corners="true") - Large (16px, matching --jf-border-radius-lg) */
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .media-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .card-image,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .card-image img,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .card-image-wrap,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .media-fallback,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .settings-modal,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .modal-content,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .modal-options,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .modal-option-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .dialog-option,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .dialog-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .dialog-content,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .dialog-container,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .quick-menu-item,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .subtitle-result-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .track-option,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .image-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .setting-item,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .setting-action-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .custom-select-trigger,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .modal-action-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .profile-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .server-item,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .library-controls,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .control-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .library-tab-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .filter-pill,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .sort-pill,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .pagination-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .search-container,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .search-input,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .details-poster,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .details-banner,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .season-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .episode-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .cast-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .hero-banner-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .quick-menu-dialog,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .upnext-dialog,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .syncplay-modal,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .syncplay-container,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .see-more-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .meta-chip,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .played-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .count-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .details-actions .btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .play-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .resume-btn {
+    border-radius: 16px;
+    -webkit-border-radius: 16px;
+}
+
+/* Ultra-Legacy: Rounded Corners Enabled (data-rounded-corners="true") - Standard (12px, matching --jf-border-radius) */
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .settings-menu-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .details-action-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .meta-pill,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .identity-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .search-tag,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .upnext-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .syncplay-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .syncplay-action-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .btn-primary,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .btn-secondary,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .action-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .player-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .tab-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .filter-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .filter-chip,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .toast,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .tech-pill,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .meta-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .episode-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .quality-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .game-card-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .seerr-type-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .details-rich-meta,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .action-btn-tooltip-text,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .image-card-action-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="true"] .image-tab-btn {
+    border-radius: 12px;
+    -webkit-border-radius: 12px;
+}
+
+/* Ultra-Legacy: Rounded Corners Disabled (data-rounded-corners="false") - Subtle (4px, matching base default) */
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .media-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .card-image,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .card-image img,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .card-image-wrap,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .media-fallback,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .settings-modal,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .modal-content,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .modal-options,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .modal-option-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .dialog-option,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .dialog-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .dialog-content,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .dialog-container,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .quick-menu-item,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .subtitle-result-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .track-option,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .image-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .setting-item,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .setting-action-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .settings-menu-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .custom-select-trigger,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .modal-action-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .profile-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .server-item,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .library-controls,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .control-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .library-tab-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .filter-pill,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .sort-pill,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .pagination-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .search-container,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .details-poster,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .details-banner,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .season-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .episode-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .cast-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .hero-banner-card,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .quick-menu-dialog,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .upnext-dialog,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .syncplay-modal,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .syncplay-container,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .details-action-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .action-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .btn-primary,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .btn-secondary,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .player-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .search-input,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .tab-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .filter-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .filter-chip,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .meta-pill,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .search-tag,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .upnext-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .syncplay-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .syncplay-action-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .tech-pill,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .meta-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .see-more-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .meta-chip,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .played-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .count-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .episode-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .quality-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .game-card-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .seerr-type-badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .details-rich-meta,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .action-btn-tooltip-text,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .image-card-action-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .image-tab-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .details-actions .btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .play-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .resume-btn,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .badge,
+html[data-layout-tier="ultra-legacy"][data-rounded-corners="false"] .toast {
+    border-radius: 4px;
+    -webkit-border-radius: 4px;
 }
 
 /* 
@@ -117,7 +305,7 @@ html[data-button-style="monochrome-wb"] {
     --jf-btn-primary-color: #ffffff;
     --jf-btn-primary-border: #000000;
 
-    --jf-btn-primary-focus-bg: #1c1c1e; /* HIG dark gray secondary surface background */
+    --jf-btn-primary-focus-bg: #1c1c1e; /* dark gray secondary surface background */
     --jf-btn-primary-focus-color: #ffffff;
     --jf-btn-primary-focus-border: #ffffff;
     --jf-btn-primary-focus-color-rgb: 255, 255, 255;
@@ -141,7 +329,7 @@ html[data-button-style="black-accent"] {
     --jf-btn-primary-color: var(--jf-accent);
     --jf-btn-primary-border: #000000;
 
-    --jf-btn-primary-focus-bg: #1c1c1e; /* HIG dark gray secondary surface background */
+    --jf-btn-primary-focus-bg: #1c1c1e; /* dark gray secondary surface background */
     --jf-btn-primary-focus-color: var(--jf-accent);
     --jf-btn-primary-focus-border: var(--jf-accent);
     --jf-btn-primary-focus-color-rgb: var(--jf-accent-rgb, 0, 164, 220);
@@ -591,6 +779,10 @@ html[data-ui-font="atkinson"] {
     --jf-font-family: 'Atkinson Hyperlegible', sans-serif;
 }
 
+html[data-ui-font="manrope"] {
+    --jf-font-family: 'Manrope', sans-serif;
+}
+
 /* 
  * ============================================================================
  * Poiret One & Zen Kaku Gothic New UI Font overrides
@@ -731,8 +923,11 @@ body.player-active #sidebar-container {
     width: 100vw;
     height: 100vh;
     display: none;
+    /* Covers everything including the sidebar — z-index 9999 sits above
+     * #sidebar-container (z-index 200) and all modals below 9999.
+     * Background fills the full screen so the sidebar doesn't bleed through. */
     z-index: 9999;
-    background-color: transparent;
+    background-color: var(--jf-background, #000000);
 }
 
 .page.loading .page-loading {
@@ -1181,11 +1376,77 @@ body {
 }
 
 
+.game-card-badge {
+    height: 40px;
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    padding: 0 12px;
+    border-radius: var(--jf-border-radius);
+    -webkit-border-radius: var(--jf-border-radius);
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    z-index: 8;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    background: rgba(0, 164, 220, 0.22);
+    color: #4dc2f8;
+    border: 1px solid rgba(77, 194, 248, 0.5);
+    box-sizing: border-box;
+    pointer-events: none;
+}
+
+.count-badge ~ .game-card-badge {
+    right: 60px;
+}
+
+.game-card-badge .game-badge-icon svg {
+    width: 18px;
+    height: 18px;
+    display: block;
+}
+
+.game-card-badge .icon-filled,
+.media-fallback-game-icon .icon-filled {
+    display: none !important;
+}
+
+.game-card-badge .icon-outline,
+.media-fallback-game-icon .icon-outline {
+    display: block !important;
+}
+
+/* Game fallback cover with central gamepad icon */
+.media-fallback.game-fallback {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.media-fallback-game-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255, 255, 255, 0.45);
+    margin-bottom: 8px;
+}
+
+.media-fallback-game-icon svg {
+    width: 52px;
+    height: 52px;
+}
+
 /* Badge Skins: Tinted vs Translucent Dark */
 html[data-badge-style="tinted"] .count-badge,
 html[data-badge-style="tinted"] .played-badge,
 html[data-badge-style="tinted"] .episode-badge,
-html[data-badge-style="tinted"] .quality-badge {
+html[data-badge-style="tinted"] .quality-badge,
+html[data-badge-style="tinted"] .game-card-badge {
     background-color: var(--jf-accent);
     color: var(--jf-accent-content-color);
     border: none;
@@ -1194,22 +1455,31 @@ html[data-badge-style="tinted"] .quality-badge {
 html[data-badge-style="dark"] .count-badge,
 html[data-badge-style="dark"] .played-badge,
 html[data-badge-style="dark"] .episode-badge,
-html[data-badge-style="dark"] .quality-badge {
+html[data-badge-style="dark"] .quality-badge,
+html[data-badge-style="dark"] .game-card-badge {
     background-color: rgba(0, 0, 0, 0.65);
     color: #ffffff;
     border: 1px solid rgba(255, 255, 255, 0.15);
 }
 
 /* ============================================================================
-   Magic Remote Support (WebOS)
+   Magic Remote Support (WebOS) & Mouse Cursor Visibility
    ============================================================================ */
 
 /* 
- * By default on TV Platforms we hide the cursor unless the Magic Remote 
- * (pointer mode) is active. The web platform (PC browsers) always shows it.
+ * By default on dedicated TV platforms (Tizen, webOS) we hide 
+ * the mouse cursor unless the Magic Remote (pointer mode) is active.
+ * Desktop (Tauri/Electron), Web, and mobile/touch Android platforms must 
+ * keep cursor interaction active without unwanted hiding.
  */
-html:not([data-platform="web"]) body:not(.webos-cursor-active) {
+html:not([data-platform="web"]):not([data-platform="desktop"]):not([data-platform="android"]) body:not(.webos-cursor-active) {
     cursor: none !important;
+}
+
+/* Explicit baseline cursor for mouse-driven desktop and web platforms */
+html[data-platform="desktop"] body,
+html[data-platform="web"] body {
+    cursor: default;
 }
 
 /* 
@@ -1232,8 +1502,8 @@ body.webos-cursor-active .focused {
  * Disables expensive GPU-accelerated CSS properties to prevent compositor 
  * memory exhaustion and rendering glitches on Tizen/WebOS hardware.
  */
-/* Global transition removal, EXCLUDING media cards, loading indicators, and OSD (handled by scaling toggle) */
-html[data-low-vram="true"] *:not(.media-card):not(.grid-card):not(.result-card):not(.person-card):not(.episode-card):not(.loading-spinner):not(.loading-spinner-small):not(.player-osd):not(.osd-main):not(.osd-top):not(.osd-bottom) {
+/* Global transition removal, EXCLUDING media cards, loading indicators, OSD, and subtitle renderers */
+html[data-low-vram="true"] *:not(.media-card):not(.grid-card):not(.result-card):not(.person-card):not(.episode-card):not(.loading-spinner):not(.loading-spinner-small):not(.player-osd):not(.osd-main):not(.osd-top):not(.osd-bottom):not(.subtitle-overlay):not(.subtitle-line):not(.libjass-wrapper):not(.libjass-subs):not([class*="ASS-"]):not(.libass-wasm-wrapper):not(.pgs-subtitle-wrapper) {
     /* Stop forcing GPU promotion for every moving part */
     will-change: auto !important;
 
@@ -1262,6 +1532,30 @@ html[data-low-vram="true"] .loading-spinner-small::before {
 }
 
 /* 
+ * Subtitle Renderers & Overlays Exception
+ * Subtitle animations (ASS/SSA transforms, movements, fades, karaoke, and dynamic cue styles)
+ * are localized strictly to active cues. We explicitly restore animations, transitions,
+ * and transforms for all subtitle containers and their descendant elements in Low VRAM mode.
+ */
+html[data-low-vram="true"] .subtitle-overlay,
+html[data-low-vram="true"] .subtitle-overlay *,
+html[data-low-vram="true"] .libjass-wrapper,
+html[data-low-vram="true"] .libjass-wrapper *,
+html[data-low-vram="true"] .libjass-subs,
+html[data-low-vram="true"] .libjass-subs *,
+html[data-low-vram="true"] [class*="ASS-"],
+html[data-low-vram="true"] [class*="ASS-"] *,
+html[data-low-vram="true"] .libass-wasm-wrapper,
+html[data-low-vram="true"] .libass-wasm-wrapper *,
+html[data-low-vram="true"] .pgs-subtitle-wrapper,
+html[data-low-vram="true"] .pgs-subtitle-wrapper * {
+    -webkit-transition: inherit;
+    transition: inherit;
+    -webkit-animation: inherit;
+    animation: inherit;
+}
+
+/* 
  * UI ELEMENT SCALING (OSD, Tabs, Buttons)
  * In Low VRAM mode, we disable scaling for UI controls to ensure maximum stability.
  */
@@ -1284,6 +1578,14 @@ html[data-low-vram="true"] .focusable.focused {
 /* Ensure will-change is removed even for cards to save memory */
 html[data-low-vram="true"] .media-card,
 html[data-low-vram="true"] .grid-card {
+    will-change: auto !important;
+}
+
+/* Ensure card progress bar remains visible in Low VRAM mode without requiring CSS fade-in animations */
+html[data-low-vram="true"] .card-progress-container {
+    opacity: 1 !important;
+    -webkit-animation: none !important;
+    animation: none !important;
     will-change: auto !important;
 }
 
@@ -1341,26 +1643,833 @@ html[data-low-vram="true"] .hero-dot.active .hero-dot-progress {
 }
 
 /* 
- * 4. SIMPLE LOADING INDICATOR
+ * 4. SIMPLE / RING LOADING INDICATOR
  * Replaces the complex pulsing dot spinner with a lightweight rotating ring.
+ * Supports both legacy data-simple-loader="true" and modern data-loader-style="ring".
  */
 html[data-simple-loader="true"] .loading-spinner,
-html[data-simple-loader="true"] .loading-spinner-small {
+html[data-simple-loader="true"] .loading-spinner-small,
+html[data-loader-style="ring"] .loading-spinner,
+html[data-loader-style="ring"] .loading-spinner-small {
     border: 3px solid rgba(255, 255, 255, 0.1);
     border-top-color: var(--jf-accent);
     border-radius: 50%;
     background: transparent !important;
 }
 
-html[data-simple-loader="true"] .loading-spinner-small {
+html[data-simple-loader="true"] .loading-spinner-small,
+html[data-loader-style="ring"] .loading-spinner-small {
     border-width: 2px;
 }
 
 html[data-simple-loader="true"] .loading-spinner::after,
 html[data-simple-loader="true"] .loading-spinner::before,
 html[data-simple-loader="true"] .loading-spinner-small::after,
-html[data-simple-loader="true"] .loading-spinner-small::before {
+html[data-simple-loader="true"] .loading-spinner-small::before,
+html[data-loader-style="ring"] .loading-spinner::after,
+html[data-loader-style="ring"] .loading-spinner::before,
+html[data-loader-style="ring"] .loading-spinner-small::after,
+html[data-loader-style="ring"] .loading-spinner-small::before {
     display: none !important;
+}
+
+/* 
+ * 5. DUAL RING LOADING INDICATOR
+ * Concentric inner ring with theme accent outer arc.
+ */
+html[data-loader-style="dual-ring"] .loading-spinner,
+html[data-loader-style="dual-ring"] .loading-spinner-small {
+    border: 3px solid rgba(255, 255, 255, 0.25);
+    border-radius: 50%;
+    background: transparent !important;
+}
+
+html[data-loader-style="dual-ring"] .loading-spinner::before,
+html[data-loader-style="dual-ring"] .loading-spinner-small::before {
+    display: none !important;
+}
+
+html[data-loader-style="dual-ring"] .loading-spinner::after {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    -webkit-transform: translate(-50%, -50%);
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    border: 3px solid transparent;
+    border-bottom-color: var(--jf-accent);
+    background: transparent !important;
+    animation: none !important;
+    -webkit-animation: none !important;
+}
+
+html[data-loader-style="dual-ring"] .loading-spinner-small {
+    border-width: 2px;
+}
+
+html[data-loader-style="dual-ring"] .loading-spinner-small::after {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    -webkit-transform: translate(-50%, -50%);
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    border-bottom-color: var(--jf-accent);
+    background: transparent !important;
+    animation: none !important;
+    -webkit-animation: none !important;
+}
+
+/* 
+ * 6. ORBITAL BEAD LOADING INDICATOR (Style 1)
+ * Translucent circular boundary with an orbiting accent satellite dot.
+ */
+html[data-loader-style="orbit"] .loading-spinner,
+html[data-loader-style="orbit"] .loading-spinner-small {
+    border: 3px solid rgba(255, 255, 255, 0.25);
+    border-radius: 50%;
+    background: transparent !important;
+}
+
+html[data-loader-style="orbit"] .loading-spinner-small {
+    border-width: 2px;
+}
+
+html[data-loader-style="orbit"] .loading-spinner::before,
+html[data-loader-style="orbit"] .loading-spinner-small::before {
+    display: none !important;
+}
+
+html[data-loader-style="orbit"] .loading-spinner::after {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 0;
+    top: 0;
+    background: var(--jf-accent);
+    width: 16px;
+    height: 16px;
+    transform: translate(-50%, 50%);
+    -webkit-transform: translate(-50%, 50%);
+    border-radius: 50%;
+    animation: none !important;
+    -webkit-animation: none !important;
+}
+
+html[data-loader-style="orbit"] .loading-spinner-small::after {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 0;
+    top: 0;
+    background: var(--jf-accent);
+    width: 8px;
+    height: 8px;
+    transform: translate(-50%, 50%);
+    -webkit-transform: translate(-50%, 50%);
+    border-radius: 50%;
+    animation: none !important;
+    -webkit-animation: none !important;
+}
+
+/* 
+ * 7. SATELLITE RING LOADING INDICATOR (Style 2)
+ * Primary rotating accent ring with an offset secondary orbiting ring.
+ */
+html[data-loader-style="satellite"] .loading-spinner,
+html[data-loader-style="satellite"] .loading-spinner-small {
+    border: 2px solid var(--jf-accent);
+    border-radius: 50%;
+    background: transparent !important;
+}
+
+html[data-loader-style="satellite"] .loading-spinner::before,
+html[data-loader-style="satellite"] .loading-spinner-small::before {
+    display: none !important;
+}
+
+html[data-loader-style="satellite"] .loading-spinner::after {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 4px;
+    top: 4px;
+    border: 2px solid rgba(255, 255, 255, 0.85);
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: transparent !important;
+    animation: none !important;
+    -webkit-animation: none !important;
+}
+
+html[data-loader-style="satellite"] .loading-spinner-small::after {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 2px;
+    top: 2px;
+    border: 1.5px solid rgba(255, 255, 255, 0.85);
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: transparent !important;
+    animation: none !important;
+    -webkit-animation: none !important;
+}
+
+/* 
+ * 8. TRIPLE GYRO LOADING INDICATOR (Style 3)
+ * Concentric dual and triple counter-rotating arcs.
+ */
+html[data-loader-style="triple-ring"] .loading-spinner {
+    border: 3px solid transparent;
+    border-color: rgba(255, 255, 255, 0.85) rgba(255, 255, 255, 0.85) transparent transparent;
+    border-radius: 50%;
+    background: transparent !important;
+}
+
+html[data-loader-style="triple-ring"] .loading-spinner-small {
+    border: 2px solid transparent;
+    border-color: rgba(255, 255, 255, 0.85) rgba(255, 255, 255, 0.85) transparent transparent;
+    border-radius: 50%;
+    background: transparent !important;
+}
+
+html[data-loader-style="triple-ring"] .loading-spinner::before,
+html[data-loader-style="triple-ring"] .loading-spinner::after {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    margin: auto;
+    border-radius: 50%;
+    background: transparent !important;
+    transform-origin: center center;
+    -webkit-transform-origin: center center;
+}
+
+html[data-loader-style="triple-ring"] .loading-spinner::after {
+    border: 3px solid transparent;
+    border-color: transparent transparent var(--jf-accent) var(--jf-accent);
+    width: 40px;
+    height: 40px;
+    animation: rotationBack 0.5s linear infinite !important;
+    -webkit-animation: rotationBack 0.5s linear infinite !important;
+}
+
+html[data-loader-style="triple-ring"] .loading-spinner::before {
+    border: 3px solid transparent;
+    border-color: rgba(255, 255, 255, 0.85) rgba(255, 255, 255, 0.85) transparent transparent;
+    width: 32px;
+    height: 32px;
+    animation: rotation 1.5s linear infinite !important;
+    -webkit-animation: rotation 1.5s linear infinite !important;
+}
+
+html[data-loader-style="triple-ring"] .loading-spinner-small::after {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    margin: auto;
+    border-radius: 50%;
+    background: transparent !important;
+    transform-origin: center center;
+    -webkit-transform-origin: center center;
+    border: 2px solid transparent;
+    border-color: transparent transparent var(--jf-accent) var(--jf-accent);
+    width: 20px;
+    height: 20px;
+    animation: rotationBack 0.5s linear infinite !important;
+    -webkit-animation: rotationBack 0.5s linear infinite !important;
+}
+
+html[data-loader-style="triple-ring"] .loading-spinner-small::before {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    margin: auto;
+    border-radius: 50%;
+    background: transparent !important;
+    transform-origin: center center;
+    -webkit-transform-origin: center center;
+    border: 2px solid transparent;
+    border-color: rgba(255, 255, 255, 0.85) rgba(255, 255, 255, 0.85) transparent transparent;
+    width: 16px;
+    height: 16px;
+    animation: rotation 1.5s linear infinite !important;
+    -webkit-animation: rotation 1.5s linear infinite !important;
+}
+
+/* 
+ * 9. DOTTED ECLIPSE LOADING INDICATOR (Style 4)
+ * Concentric spinner with alternating dotted and solid tracks.
+ */
+html[data-loader-style="dotted-ring"] .loading-spinner {
+    border: 3px dotted rgba(255, 255, 255, 0.85);
+    border-style: solid solid dotted dotted;
+    border-radius: 50%;
+    background: transparent !important;
+    animation: rotation 2s linear infinite;
+    -webkit-animation: rotation 2s linear infinite;
+}
+
+html[data-loader-style="dotted-ring"] .loading-spinner-small {
+    border: 2px dotted rgba(255, 255, 255, 0.85);
+    border-style: solid solid dotted dotted;
+    border-radius: 50%;
+    background: transparent !important;
+    animation: rotation 2s linear infinite;
+    -webkit-animation: rotation 2s linear infinite;
+}
+
+html[data-loader-style="dotted-ring"] .loading-spinner::before,
+html[data-loader-style="dotted-ring"] .loading-spinner-small::before {
+    display: none !important;
+}
+
+html[data-loader-style="dotted-ring"] .loading-spinner::after {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    margin: auto;
+    border: 3px dotted var(--jf-accent);
+    border-style: solid solid dotted;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: transparent !important;
+    animation: rotationBack 1s linear infinite !important;
+    -webkit-animation: rotationBack 1s linear infinite !important;
+    transform-origin: center center;
+    -webkit-transform-origin: center center;
+}
+
+html[data-loader-style="dotted-ring"] .loading-spinner-small::after {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    margin: auto;
+    border: 2px dotted var(--jf-accent);
+    border-style: solid solid dotted;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: transparent !important;
+    animation: rotationBack 1s linear infinite !important;
+    -webkit-animation: rotationBack 1s linear infinite !important;
+    transform-origin: center center;
+    -webkit-transform-origin: center center;
+}
+
+/* Reusable counter-rotation keyframe for multi-ring spinners */
+@keyframes rotationBack {
+    0% {
+        transform: translateZ(0) rotate(0deg);
+    }
+    100% {
+        transform: translateZ(0) rotate(-360deg);
+    }
+}
+
+@-webkit-keyframes rotationBack {
+    0% {
+        -webkit-transform: translateZ(0) rotate(0deg);
+    }
+    100% {
+        -webkit-transform: translateZ(0) rotate(-360deg);
+    }
+}
+
+/* 
+ * 10. CRESCENT SWEEP LOADING INDICATOR (Style 0)
+ * Inset crescent shadow sweep across a circular boundary.
+ */
+html[data-loader-style="eclipse-sweep"] .loading-spinner,
+html[data-loader-style="eclipse-sweep"] .loading-spinner-small {
+    border-radius: 50%;
+    background: transparent !important;
+    animation: eclipse-sweep-anim 1s linear infinite !important;
+    -webkit-animation: eclipse-sweep-anim 1s linear infinite !important;
+}
+
+html[data-loader-style="eclipse-sweep"] .loading-spinner::before,
+html[data-loader-style="eclipse-sweep"] .loading-spinner::after,
+html[data-loader-style="eclipse-sweep"] .loading-spinner-small::before,
+html[data-loader-style="eclipse-sweep"] .loading-spinner-small::after {
+    display: none !important;
+}
+
+@keyframes eclipse-sweep-anim {
+    0% {
+        box-shadow: -72px 0 var(--jf-accent) inset;
+    }
+    100% {
+        box-shadow: 48px 0 var(--jf-accent) inset;
+    }
+}
+
+@-webkit-keyframes eclipse-sweep-anim {
+    0% {
+        -webkit-box-shadow: -72px 0 var(--jf-accent) inset;
+    }
+    100% {
+        -webkit-box-shadow: 48px 0 var(--jf-accent) inset;
+    }
+}
+
+/* 
+ * 11. SONAR APERTURE LOADING INDICATOR (Style 1)
+ * Rotating circular disc with theme-color backdrop and translucent aperture arcs.
+ */
+html[data-loader-style="sonar-ring"] .loading-spinner,
+html[data-loader-style="sonar-ring"] .loading-spinner-small {
+    border: 2px solid rgba(255, 255, 255, 0.85);
+    background: var(--jf-accent) !important;
+    border-radius: 50%;
+    animation: rotation 2s linear infinite;
+    -webkit-animation: rotation 2s linear infinite;
+}
+
+html[data-loader-style="sonar-ring"] .loading-spinner::before,
+html[data-loader-style="sonar-ring"] .loading-spinner-small::before {
+    display: none !important;
+}
+
+html[data-loader-style="sonar-ring"] .loading-spinner::after {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    border: 24px solid;
+    border-color: transparent rgba(255, 255, 255, 0.95);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    -webkit-transform: translate(-50%, -50%);
+    background: transparent !important;
+    animation: none !important;
+    -webkit-animation: none !important;
+}
+
+html[data-loader-style="sonar-ring"] .loading-spinner-small::after {
+    content: '';
+    display: block !important;
+    box-sizing: border-box;
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    border: 12px solid;
+    border-color: transparent rgba(255, 255, 255, 0.95);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    -webkit-transform: translate(-50%, -50%);
+    background: transparent !important;
+    animation: none !important;
+    -webkit-animation: none !important;
+}
+
+/* 
+ * 12. PUSH PULSE LOADING INDICATOR (Style 2)
+ * Alternating concentric dual-pulse spheres expanding and contracting.
+ */
+html[data-loader-style="push-pulse"] .loading-spinner,
+html[data-loader-style="push-pulse"] .loading-spinner-small {
+    background: transparent !important;
+    border: none !important;
+    animation: none !important;
+    -webkit-animation: none !important;
+}
+
+html[data-loader-style="push-pulse"] .loading-spinner::before,
+html[data-loader-style="push-pulse"] .loading-spinner::after {
+    content: '';
+    display: block !important;
+    position: absolute;
+    border-radius: 50%;
+    box-sizing: border-box;
+    animation: push-pulse-anim 1s infinite linear alternate !important;
+    -webkit-animation: push-pulse-anim 1s infinite linear alternate !important;
+}
+
+html[data-loader-style="push-pulse"] .loading-spinner::before {
+    right: 0;
+    top: 0;
+    left: auto;
+    bottom: auto;
+    background: var(--jf-accent);
+}
+
+html[data-loader-style="push-pulse"] .loading-spinner::after {
+    left: 0;
+    bottom: 0;
+    top: auto;
+    right: auto;
+    background: rgba(255, 255, 255, 0.85);
+    animation-direction: alternate-reverse !important;
+    -webkit-animation-direction: alternate-reverse !important;
+}
+
+html[data-loader-style="push-pulse"] .loading-spinner-small::before,
+html[data-loader-style="push-pulse"] .loading-spinner-small::after {
+    content: '';
+    display: block !important;
+    position: absolute;
+    border-radius: 50%;
+    box-sizing: border-box;
+    animation: push-pulse-small-anim 1s infinite linear alternate !important;
+    -webkit-animation: push-pulse-small-anim 1s infinite linear alternate !important;
+}
+
+html[data-loader-style="push-pulse"] .loading-spinner-small::before {
+    right: 0;
+    top: 0;
+    left: auto;
+    bottom: auto;
+    background: var(--jf-accent);
+}
+
+html[data-loader-style="push-pulse"] .loading-spinner-small::after {
+    left: 0;
+    bottom: 0;
+    top: auto;
+    right: auto;
+    background: rgba(255, 255, 255, 0.85);
+    animation-direction: alternate-reverse !important;
+    -webkit-animation-direction: alternate-reverse !important;
+}
+
+@keyframes push-pulse-anim {
+    0% {
+        width: 10px;
+        height: 10px;
+    }
+    100% {
+        width: 48px;
+        height: 48px;
+    }
+}
+
+@-webkit-keyframes push-pulse-anim {
+    0% {
+        width: 10px;
+        height: 10px;
+    }
+    100% {
+        width: 48px;
+        height: 48px;
+    }
+}
+
+@keyframes push-pulse-small-anim {
+    0% {
+        width: 6px;
+        height: 6px;
+    }
+    100% {
+        width: 24px;
+        height: 24px;
+    }
+}
+
+@-webkit-keyframes push-pulse-small-anim {
+    0% {
+        width: 6px;
+        height: 6px;
+    }
+    100% {
+        width: 24px;
+        height: 24px;
+    }
+}
+
+/* 
+ * 13. FADING TRIO LOADING INDICATOR (Style 3)
+ * Horizontal inline three-dot sequence with progressive wave shadow fades.
+ */
+html[data-loader-style="horizontal-dots"] .loading-spinner {
+    font-size: 7px;
+    width: 2.5em;
+    height: 2.5em;
+    border-radius: 50%;
+    background: transparent !important;
+    border: none !important;
+    color: var(--jf-accent);
+    text-indent: -9999em;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+    animation: bblFadInOut 1.8s infinite ease-in-out both !important;
+    -webkit-animation: bblFadInOut 1.8s infinite ease-in-out both !important;
+    animation-delay: -0.16s !important;
+    -webkit-animation-delay: -0.16s !important;
+}
+
+html[data-loader-style="horizontal-dots"] .loading-spinner::before,
+html[data-loader-style="horizontal-dots"] .loading-spinner::after {
+    content: '';
+    display: block !important;
+    position: absolute;
+    top: 0;
+    width: 2.5em;
+    height: 2.5em;
+    border-radius: 50%;
+    background: transparent !important;
+    animation: bblFadInOut 1.8s infinite ease-in-out both !important;
+    -webkit-animation: bblFadInOut 1.8s infinite ease-in-out both !important;
+}
+
+html[data-loader-style="horizontal-dots"] .loading-spinner::before {
+    left: -3.5em;
+    animation-delay: -0.32s !important;
+    -webkit-animation-delay: -0.32s !important;
+}
+
+html[data-loader-style="horizontal-dots"] .loading-spinner::after {
+    left: 3.5em;
+}
+
+html[data-loader-style="horizontal-dots"] .loading-spinner-small {
+    font-size: 4px;
+    width: 2.5em;
+    height: 2.5em;
+    border-radius: 50%;
+    background: transparent !important;
+    border: none !important;
+    color: var(--jf-accent);
+    text-indent: -9999em;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+    animation: bblFadInOut 1.8s infinite ease-in-out both !important;
+    -webkit-animation: bblFadInOut 1.8s infinite ease-in-out both !important;
+    animation-delay: -0.16s !important;
+    -webkit-animation-delay: -0.16s !important;
+}
+
+html[data-loader-style="horizontal-dots"] .loading-spinner-small::before,
+html[data-loader-style="horizontal-dots"] .loading-spinner-small::after {
+    content: '';
+    display: block !important;
+    position: absolute;
+    top: 0;
+    width: 2.5em;
+    height: 2.5em;
+    border-radius: 50%;
+    background: transparent !important;
+    animation: bblFadInOut 1.8s infinite ease-in-out both !important;
+    -webkit-animation: bblFadInOut 1.8s infinite ease-in-out both !important;
+}
+
+html[data-loader-style="horizontal-dots"] .loading-spinner-small::before {
+    left: -3.5em;
+    animation-delay: -0.32s !important;
+    -webkit-animation-delay: -0.32s !important;
+}
+
+html[data-loader-style="horizontal-dots"] .loading-spinner-small::after {
+    left: 3.5em;
+}
+
+@keyframes bblFadInOut {
+    0%,
+    80%,
+    100% {
+        box-shadow: 0 2.5em 0 -1.3em;
+    }
+    40% {
+        box-shadow: 0 2.5em 0 0;
+    }
+}
+
+@-webkit-keyframes bblFadInOut {
+    0%,
+    80%,
+    100% {
+        -webkit-box-shadow: 0 2.5em 0 -1.3em;
+    }
+    40% {
+        -webkit-box-shadow: 0 2.5em 0 0;
+    }
+}
+
+/* 
+ * 14. MORPHING GRID LOADING INDICATOR (Style 4)
+ * Pinwheel four-quadrant pin grid that shrinks, rotates, and expands.
+ */
+html[data-loader-style="pulsing-grid"] .loading-spinner {
+    width: 48px;
+    height: 48px;
+    margin-top: -24px;
+    margin-left: -24px;
+    background-color: transparent !important;
+    background-image:
+        linear-gradient(rgba(255, 255, 255, 0.9) 12px, transparent 0),
+        linear-gradient(var(--jf-accent) 12px, transparent 0),
+        linear-gradient(var(--jf-accent) 12px, transparent 0),
+        linear-gradient(rgba(255, 255, 255, 0.9) 12px, transparent 0);
+    background-repeat: no-repeat;
+    background-size: 12px 12px;
+    background-position:
+        left top,
+        left bottom,
+        right top,
+        right bottom;
+    border: none !important;
+    border-radius: 0 !important;
+    animation: pulsing-grid-anim 1s linear infinite !important;
+    -webkit-animation: pulsing-grid-anim 1s linear infinite !important;
+}
+
+html[data-loader-style="pulsing-grid"] .loading-spinner-small {
+    width: 24px;
+    height: 24px;
+    background-color: transparent !important;
+    background-image:
+        linear-gradient(rgba(255, 255, 255, 0.9) 6px, transparent 0),
+        linear-gradient(var(--jf-accent) 6px, transparent 0),
+        linear-gradient(var(--jf-accent) 6px, transparent 0),
+        linear-gradient(rgba(255, 255, 255, 0.9) 6px, transparent 0);
+    background-repeat: no-repeat;
+    background-size: 6px 6px;
+    background-position:
+        left top,
+        left bottom,
+        right top,
+        right bottom;
+    border: none !important;
+    border-radius: 0 !important;
+    animation: pulsing-grid-small-anim 1s linear infinite !important;
+    -webkit-animation: pulsing-grid-small-anim 1s linear infinite !important;
+}
+
+html[data-loader-style="pulsing-grid"] .loading-spinner::before,
+html[data-loader-style="pulsing-grid"] .loading-spinner::after,
+html[data-loader-style="pulsing-grid"] .loading-spinner-small::before,
+html[data-loader-style="pulsing-grid"] .loading-spinner-small::after {
+    display: none !important;
+}
+
+@keyframes pulsing-grid-anim {
+    0% {
+        width: 48px;
+        height: 48px;
+        margin-top: -24px;
+        margin-left: -24px;
+        transform: translateZ(0) rotate(0deg);
+    }
+    50% {
+        width: 24px;
+        height: 24px;
+        margin-top: -12px;
+        margin-left: -12px;
+        transform: translateZ(0) rotate(180deg);
+    }
+    100% {
+        width: 48px;
+        height: 48px;
+        margin-top: -24px;
+        margin-left: -24px;
+        transform: translateZ(0) rotate(360deg);
+    }
+}
+
+@-webkit-keyframes pulsing-grid-anim {
+    0% {
+        width: 48px;
+        height: 48px;
+        margin-top: -24px;
+        margin-left: -24px;
+        -webkit-transform: translateZ(0) rotate(0deg);
+    }
+    50% {
+        width: 24px;
+        height: 24px;
+        margin-top: -12px;
+        margin-left: -12px;
+        -webkit-transform: translateZ(0) rotate(180deg);
+    }
+    100% {
+        width: 48px;
+        height: 48px;
+        margin-top: -24px;
+        margin-left: -24px;
+        -webkit-transform: translateZ(0) rotate(360deg);
+    }
+}
+
+@keyframes pulsing-grid-small-anim {
+    0% {
+        width: 24px;
+        height: 24px;
+        transform: translateZ(0) rotate(0deg);
+    }
+    50% {
+        width: 14px;
+        height: 14px;
+        transform: translateZ(0) rotate(180deg);
+    }
+    100% {
+        width: 24px;
+        height: 24px;
+        transform: translateZ(0) rotate(360deg);
+    }
+}
+
+@-webkit-keyframes pulsing-grid-small-anim {
+    0% {
+        width: 24px;
+        height: 24px;
+        -webkit-transform: translateZ(0) rotate(0deg);
+    }
+    50% {
+        width: 14px;
+        height: 14px;
+        -webkit-transform: translateZ(0) rotate(180deg);
+    }
+    100% {
+        width: 24px;
+        height: 24px;
+        -webkit-transform: translateZ(0) rotate(360deg);
+    }
 }
 
 /* ============================================================================
@@ -1499,4 +2608,26 @@ html[data-card-label-style="titleOnly2Lines"] .media-card:not(.list-skeleton):no
     display: inline-block;
     /* Set margin to isolate from rating numeric score values */
     margin-right: 4px;
+}
+
+/*
+ * ── Chrome 26 Quirks Overrides: Media Card Badges Centering ──────────────────
+ * Uses the 2009 webkit-box model to align and center checkmark icons and episode 
+ * numbers inside round card badges, bypassing broken flex alignments.
+ */
+html[data-layout-quirks="c26"] .count-badge,
+html[data-layout-quirks="c26"] .played-badge {
+    display: -webkit-box !important;
+    -webkit-box-orient: horizontal !important;
+    -webkit-box-pack: center !important;
+    -webkit-box-align: center !important;
+}
+
+html[data-layout-quirks="c26"] .count-badge {
+    line-height: 39px !important;
+}
+
+html[data-layout-quirks="c26"] .played-badge svg {
+    display: block !important;
+    margin: 0 !important;
 }

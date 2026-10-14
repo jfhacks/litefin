@@ -31,11 +31,15 @@ import { state } from '../core/StateManager.js';
 import { api, ServerUnreachableError, sendWakeOnLan } from './ApiClient.js';
 import { tizenAdapter } from '../tizen/TizenAdapter.js';
 import { webosAdapter } from '../webos/WebOSAdapter.js';
+import { androidAdapter } from '../android/AndroidAdapter.js';
+import { desktopAdapter } from '../desktop/DesktopAdapter.js';
+import { webAdapter } from '../web/WebAdapter.js';
 import { platformInfo } from '../utils/PlatformInfo.js';
 import { storage } from '../utils/StorageService.js';
 import { buildJellyfinProfile } from './DeviceProfile.js';
 import { focusManager } from '../ui/FocusManager.js';
 import { imageCache } from '../utils/ImageCache.js';
+import { seerr } from './seerrClient.js';
 import { logger } from '../utils/Logger.js';
 
 const log = logger.create('AuthManager');
@@ -123,6 +127,10 @@ class AuthManager {
         this._onUnauthorized = this._onUnauthorized.bind(this);
         this._onWebosDeviceInfo = this._onWebosDeviceInfo.bind(this);
 
+        // Track active login/probe lifecycle to prevent candidate credential
+        // failures (such as empty-password checks) from invalidating existing sessions.
+        this._isLoggingIn = false;
+
         // Listen for unauthorized events from API
         eventBus.on('api:unauthorized', this._onUnauthorized);
         eventBus.on('webos:deviceInfoReady', this._onWebosDeviceInfo);
@@ -174,12 +182,23 @@ class AuthManager {
             log.info('Generated new device ID');
         }
 
-        // Resolve device name from the platform adapter
+        // Resolve device name from the corresponding platform adapter
         let deviceName;
         if (platformInfo.isWebOS) {
+            // LG webOS TV device name (e.g., "LG OLED55...")
             deviceName = webosAdapter.getDeviceName();
-        } else {
+        } else if (platformInfo.isAndroid) {
+            // Android / Fire TV device model name
+            deviceName = androidAdapter.getDeviceName();
+        } else if (platformInfo.isDesktop) {
+            // Desktop Tauri client (e.g., "Litefin Desktop (Windows)")
+            deviceName = desktopAdapter.getDeviceName();
+        } else if (platformInfo.isTizen) {
+            // Samsung Tizen TV model name
             deviceName = tizenAdapter.getDeviceName();
+        } else {
+            // Generic browser client (e.g., "Litefin Web (Chrome)")
+            deviceName = webAdapter.getDeviceName();
         }
 
         log.info(`Identification check: platform=${platformInfo.platformString}, deviceName="${deviceName}"`);
@@ -518,11 +537,47 @@ class AuthManager {
     }
 
     /**
-     * Get the saved server URL.
+     * ========================================================================
+     * Saved Server URL Resolution
+     * ========================================================================
+     * Retrieves the active or persisted server URL from persistent storage.
+     * When running inside a browser environment (such as when hosted directly
+     * by the Litefin Web Jellyfin server plugin), if no explicit server URL has
+     * been entered yet, we automatically resolve the origin from the browser's
+     * current window location. This allows seamless zero-configuration access
+     * when users navigate to http://jellyfin:8096/litefin.
+     *
      * @returns {string|null} Server URL or null
      */
     getSavedServerUrl() {
-        return storage.getItem(STORAGE_KEYS.SERVER_URL);
+        // First check explicitly persisted server URL
+        const saved = storage.getItem(STORAGE_KEYS.SERVER_URL);
+        if (saved) {
+            return saved;
+        }
+
+        // In standard browser environments, infer the hosting server origin
+        if (
+            typeof window !== 'undefined' &&
+            window.location &&
+            window.location.origin &&
+            typeof window.location.protocol === 'string' &&
+            window.location.protocol.startsWith('http')
+        ) {
+            // Check if the application is running under a reverse proxy or sub-path prefix
+            // (e.g., http://example.com/jellyfin/litefin)
+            const pathname = window.location.pathname || '';
+            const litefinIdx = pathname.toLowerCase().indexOf('/litefin');
+
+            // Strip the /litefin routing segment while preserving any upstream reverse proxy path
+            const subpath = litefinIdx > 0 ? pathname.substring(0, litefinIdx) : '';
+            const detected = `${window.location.origin}${subpath}`.replace(/\/+$/, '');
+
+            log.info(`Auto-detected server URL from browser location: ${detected}`);
+            return detected;
+        }
+
+        return null;
     }
 
     // ========================================================================
@@ -544,31 +599,51 @@ class AuthManager {
      *
      * @param {string} username - Jellyfin username (case-insensitive on most servers)
      * @param {string} [password=''] - Password; empty string for passwordless users
+     * @param {Object} [options={}] - Optional request configurations (e.g. silent probe)
      * @returns {Promise<Object>} Authentication result from the server
      */
-    async login(username, password = '') {
-        log.info(`Logging in as "${username}"`);
+    async login(username, password = '', options = {}) {
+        // Emit debug log for silent probes and info log for interactive user sign-ins
+        if (!options.silent) {
+            log.info(`Logging in as "${username}"`);
+        } else {
+            log.debug(`Silent probe login as "${username}"`);
+        }
 
         // Save in-memory credentials so we can restore them if this login fails
         // (prevents the app from being half-logged-out on a wrong password)
         const prevToken = api.accessToken;
         const prevUserId = api.userId;
 
+        // Arm the authentication guard flag to shield existing stored sessions
+        // from unexpected session invalidation events while probing credentials.
+        this._isLoggingIn = true;
+
         try {
             // Clear in-memory token so ApiClient doesn't send a stale one in the header
             api.setAuth(null, null);
 
-            // Call the Jellyfin authenticate endpoint
-            const result = await api.post('/Users/AuthenticateByName', {
-                Username: username,
-                Pw: password,
-                // Newer Jellyfin versions (10.9+) strictly validate IAuthenticationRequest
-                // parameters in the POST body rather than relying on the Auth header
-                App: api.clientName,
-                Device: api.deviceName,
-                DeviceId: api.deviceId,
-                Version: api.clientVersion
-            });
+            // Call the Jellyfin authenticate endpoint.
+            // Explicitly mark the request with suppressUnauthorized so candidate credential
+            // failures do not cascade into global session expiry events.
+            const result = await api.post(
+                '/Users/AuthenticateByName',
+                {
+                    Username: username,
+                    Pw: password,
+                    // Newer Jellyfin versions (10.9+) strictly validate IAuthenticationRequest
+                    // parameters in the POST body rather than relying on the Auth header
+                    App: api.clientName,
+                    Device: api.deviceName,
+                    DeviceId: api.deviceId,
+                    Version: api.clientVersion
+                },
+                {
+                    suppressUnauthorized: true,
+                    silent: Boolean(options.silent),
+                    warnOnError: Boolean(options.silent || options.warnOnError)
+                }
+            );
 
             // Unpack response
             const accessToken = result.AccessToken || result.accessToken;
@@ -616,7 +691,12 @@ class AuthManager {
 
             return result;
         } catch (error) {
-            log.error('Login request failed:', error);
+            // Log as error for interactive failures, debug for silent candidate probes
+            if (!options.silent) {
+                log.error('Login request failed:', error);
+            } else {
+                log.debug('Silent login probe failed (password required):', error.message || error);
+            }
 
             // Restore previous in-memory credentials on failure
             if (prevToken && prevUserId) {
@@ -625,20 +705,31 @@ class AuthManager {
             }
 
             throw error;
+        } finally {
+            // Always disarm the authentication guard flag once the request completes
+            this._isLoggingIn = false;
         }
     }
 
     /**
      * Login with a public user object.
-     * Checks HasPassword to determine whether a password prompt is needed.
+     *
+     * On JF 10.10 / 10.11 we honour the HasPassword field to decide whether
+     * to send an empty string or the real password.  On JF 12+ HasPassword is
+     * always hard-coded to `true` and carries no meaningful information, so we
+     * skip that check and send the supplied password directly (empty string for
+     * passwordless users, real password for everyone else).
      *
      * @param {Object} user - User object from getPublicUsers()
-     * @param {string} [password=''] - Password (only meaningful when HasPassword)
+     * @param {string} [password=''] - Password (or empty string for passwordless)
+     * @param {Object} [options={}] - Additional request configurations
      * @returns {Promise<Object>} Authentication result
      */
-    async loginWithUser(user, password = '') {
-        const pw = user.HasPassword ? password : '';
-        return this.login(user.Name, pw);
+    async loginWithUser(user, password = '', options = {}) {
+        // On legacy servers HasPassword correctly indicates whether a password
+        // is needed; on JF12+ it's always true so we just pass through as-is.
+        const pw = api.isJF12Plus() ? password : (user.HasPassword ? password : '');
+        return this.login(user.Name, pw, options);
     }
 
     /**
@@ -646,14 +737,28 @@ class AuthManager {
      * Follows the exact same session-persistence path as login().
      *
      * @param {string} secret - Authorized Quick Connect secret
+     * @param {Object} [options={}] - Additional request configurations
      * @returns {Promise<Object>} Authentication result (same shape as login())
      */
-    async loginWithQuickConnect(secret) {
+    async loginWithQuickConnect(secret, options = {}) {
         log.info('Completing login via Quick Connect...');
 
+        // Preserve current active credentials to prevent accidental partial sign-out
+        const prevToken = api.accessToken;
+        const prevUserId = api.userId;
+
+        // Guard active session against spurious session-expiry events during secret exchange
+        this._isLoggingIn = true;
+
         try {
+            // Clear in-memory token while negotiating secret exchange
+            api.setAuth(null, null);
+
             // Exchange the authorized secret for a real access token
-            const result = await api.authenticateWithQuickConnect(secret);
+            const result = await api.authenticateWithQuickConnect(secret, {
+                suppressUnauthorized: true,
+                ...options
+            });
 
             const accessToken = result.AccessToken || result.accessToken;
             const user = result.User || result.user;
@@ -700,7 +805,17 @@ class AuthManager {
             return result;
         } catch (error) {
             log.error('Quick Connect login failed:', error);
+
+            // Restore in-memory credentials if exchange failed
+            if (prevToken && prevUserId) {
+                log.info('Restoring previous in-memory credentials after failed Quick Connect login');
+                api.setAuth(prevToken, prevUserId);
+            }
+
             throw error;
+        } finally {
+            // Release login guard
+            this._isLoggingIn = false;
         }
     }
 
@@ -740,6 +855,10 @@ class AuthManager {
         state.clearByPrefix('search:');
         state.clearByPrefix('person:');
         state.clearByPrefix('player:');
+        state.clearByPrefix('discover:');
+
+        // Wipe Seerr client response cache so user-scoped requests and watchlist are refetched
+        seerr.clearCache();
 
         // Clear focus memory so old user's spatial focus targets don't persist
         focusManager.clearMemory();
@@ -838,6 +957,10 @@ class AuthManager {
         state.clearByPrefix('search:');
         state.clearByPrefix('person:');
         state.clearByPrefix('player:');
+        state.clearByPrefix('discover:');
+
+        // Wipe Seerr client response cache so user-scoped requests and watchlist are refetched
+        seerr.clearCache();
 
         // Clear focus manager memory
         focusManager.clearMemory();
@@ -1047,6 +1170,28 @@ class AuthManager {
      * @private
      */
     _onUnauthorized() {
+        // ====================================================================
+        // Guard 1: Active Login / Candidate Probe Shield
+        // ====================================================================
+        // If a login attempt or empty-password probe is currently in flight,
+        // a 401 error signifies that the candidate credentials were rejected,
+        // NOT that our currently signed-in profile has expired. Never evict here.
+        if (this._isLoggingIn) {
+            log.debug('Ignoring 401 unauthorized event during active login attempt');
+            return;
+        }
+
+        // ====================================================================
+        // Guard 2: Missing Session Token Shield
+        // ====================================================================
+        // A session can only legitimately expire if ApiClient was actually
+        // configured with an active session token when the rejection occurred.
+        // If no token was loaded into memory, no active session was on the wire.
+        if (!api.accessToken) {
+            log.debug('Ignoring 401 unauthorized event — no active session token present in ApiClient');
+            return;
+        }
+
         log.warn('Unauthorized — session expired');
 
         const activeUserId = storage.getItem(STORAGE_KEYS.ACTIVE_USER);

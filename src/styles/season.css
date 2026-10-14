@@ -2,8 +2,9 @@
 .season-page {
     /* Additional overrides if necessary */
     position: relative;
-    /* Force GPU acceleration for the whole page */
-    transform: translate3d(0, 0, 0);
+    /* Avoid forced full-page layer promotion to save GPU VRAM on weak hardware */
+    transform: none;
+    -webkit-transform: none;
 }
 
 /* Override DetailsPage grid for vertical episode list */
@@ -59,10 +60,13 @@
 
 
     text-align: left;
-    /* KEEP: Interactive element needs layer for smooth scaling */
-    -webkit-transform: translateZ(0);
-    transform: translateZ(0);
-    will-change: transform;
+    /*
+     * Avoid permanent compositor layer promotion across all 20+ cards.
+     * Layers are only promoted on focus to eliminate GPU VRAM thrashing.
+     */
+    -webkit-transform: none;
+    transform: none;
+    will-change: auto;
 }
 
 /* PERFORMANCE HACK: Use pseudo-element for border to avoid reflow/repaint */
@@ -85,6 +89,8 @@
 .episode-row-card.focused {
     -webkit-transform: scale(1.02);
     transform: scale(1.02);
+    /* Promote only the actively focused card to its own compositor layer */
+    will-change: transform;
     /* Make it pop slightly less than grid cards */
     background: var(--jf-card-bg-darker, rgba(var(--jf-accent-dark-rgb, 15, 15, 20), 0.85));
     z-index: 10;
@@ -102,9 +108,10 @@
     height: 100%;
     flex-shrink: 0;
     position: relative;
-    /* Fix potential image bleeds during transform */
-    -webkit-mask-image: -webkit-radial-gradient(white, black);
-    mask-image: radial-gradient(white, black);
+    overflow: hidden;
+    /* Standard CSS border radius clipping replaces legacy alpha masks */
+    border-top-left-radius: var(--jf-border-radius);
+    border-bottom-left-radius: var(--jf-border-radius);
 }
 
 .episode-row-thumb img {

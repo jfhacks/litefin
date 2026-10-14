@@ -116,9 +116,17 @@ html[data-osd-progress-color="theme-inverted"] {
     z-index: 10;
 }
 
+/* When Layer 1 is hidden, disable all pointer hit-testing and hide from accessibility/render tree */
 .osd-main.osd-hidden {
     opacity: 0;
-    pointer-events: none;
+    pointer-events: none !important;
+    visibility: hidden;
+}
+
+/* Force all descendants to ignore pointer events so invisible buttons and sliders cannot be clicked */
+.osd-main.osd-hidden,
+.osd-main.osd-hidden * {
+    pointer-events: none !important;
 }
 
 .osd-main > * {
@@ -472,6 +480,54 @@ html[data-layout-tier="ultra-legacy"] .osd-btn .osd-icon {
     border: 2px solid var(--jf-osd-btn-focus-border) !important;
 }
 
+/*
+ * ── OSD Button Focus GROW Effect ───────────────────────────────────────────
+ * The focused control - play/pause included - scales up a little so the current
+ * D-pad target is readable from couch distance; the icon grows with it. The
+ * Next-Up buttons scale on focus in the same way (.upnext-btn in upnext.css).
+ * .osd-btn already carries the transform transition, which is armed here for the
+ * icon as well.
+ */
+.osd-btn:focus,
+.osd-btn.focused {
+    -webkit-transform: scale(1.08);
+    transform: scale(1.08);
+}
+
+.osd-btn .osd-icon {
+    -webkit-transition: -webkit-transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+    transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.osd-btn:focus .osd-icon,
+.osd-btn.focused .osd-icon {
+    -webkit-transform: scale(1.12);
+    transform: scale(1.12);
+}
+
+/*
+ * "Low VRAM" mode disables the focus scaling for UI controls, including
+ * .osd-btn (see the html[data-low-vram="true"] rules in base.css). Those rules
+ * match the button only, so the icon is reset here as well - otherwise the
+ * button would stay at scale(1) while its icon still jumped to scale(1.12).
+ */
+html[data-low-vram="true"] .osd-btn:focus .osd-icon,
+html[data-low-vram="true"] .osd-btn.focused .osd-icon {
+    -webkit-transform: none !important;
+    transform: none !important;
+}
+
+/*
+ * The Magic Remote pointer mode disables focus transforms for the focused element
+ * as well (body.webos-cursor-active in base.css). That rule matches the button, not
+ * the icon, so the icon is reset here too while the pointer is active.
+ */
+body.webos-cursor-active .osd-btn:focus .osd-icon,
+body.webos-cursor-active .osd-btn.focused .osd-icon {
+    -webkit-transform: none !important;
+    transform: none !important;
+}
+
 /* Accent color for active toggle buttons when not focused */
 .osd-btn.active:not(#osdFavoriteBtn) {
     color: var(--jf-osd-btn-bg) !important;
@@ -539,7 +595,7 @@ html[data-layout-tier="ultra-legacy"] .osd-btn .osd-icon {
     right: 6px;
     width: 11px;
     height: 11px;
-    background: #32D74B; /* Apple green */
+    background: #32D74B; /* Accent green */
     border-radius: 50%;
     border: 2px solid #000;
     opacity: 0;
@@ -946,6 +1002,119 @@ html[data-layout-tier="ultra-legacy"] .osd-btn .osd-icon {
 }
 
 /* ============================================================================
+   ANTI-SPOILER / MINIMALIST OSD SEEKBAR (HIDE PROGRESS, TIME & ENDS AT WHEN UNFOCUSED)
+   ============================================================================
+   - Preserves box dimensions to prevent layout jitter or sudden element jumps.
+   - Hides INSTANTLY (0ms) when leaving the seekbar as requested by user.
+   - Smoothly reveals progress fill, thumb, times, and ends-at when focusing or interacting with seekbar.
+   - Strictly decoupled from play/pause or other control buttons (no :focus-within on bottom container).
+   ============================================================================ */
+
+/* Base state: Hidden INSTANTLY when unfocused (no delay or trailing fade-out) */
+.osd-bottom.hide-unfocused-progress .osd-ends-at,
+.osd-bottom.hide-unfocused-progress .osd-time,
+.osd-slider-row.hide-unfocused-progress .osd-time {
+    opacity: 0 !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+    transition: none !important;
+}
+
+/* Mask progress bar fill until focus is received */
+.osd-bottom.hide-unfocused-progress .osd-slider-fill,
+.osd-slider-row.hide-unfocused-progress .osd-slider-fill {
+    opacity: 0 !important;
+    transition: none !important;
+}
+
+/* Mask seekbar thumbs until focus is received */
+.osd-bottom.hide-unfocused-progress .osd-slider::-webkit-slider-thumb,
+.osd-slider-row.hide-unfocused-progress .osd-slider::-webkit-slider-thumb {
+    opacity: 0 !important;
+    transition: none !important;
+}
+
+.osd-bottom.hide-unfocused-progress .osd-slider::-moz-range-thumb,
+.osd-slider-row.hide-unfocused-progress .osd-slider::-moz-range-thumb {
+    opacity: 0 !important;
+    transition: none !important;
+}
+
+/* ============================================================================
+   ACTIVE / REVEALED STATES
+   ============================================================================
+   Triggered EXCLUSIVELY when the user focuses the seekbar (.seekbar-active),
+   hovers directly over the seekbar row (.osd-slider-row:hover / .hovered),
+   points via Magic Remote on the seekbar (.magic-hover), or scrubs (.dragging).
+   Note: Does NOT trigger when play/pause or other control buttons are focused!
+   ============================================================================ */
+
+/* Revealed state for Ends At indicator (standard 0.9 opacity) */
+.osd-bottom.hide-unfocused-progress.seekbar-active .osd-ends-at,
+.osd-bottom.hide-unfocused-progress.magic-hover .osd-ends-at,
+.osd-bottom.hide-unfocused-progress.dragging .osd-ends-at,
+.osd-bottom.hide-unfocused-progress.hovered .osd-ends-at {
+    opacity: 0.9 !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+    transition: opacity 0.15s cubic-bezier(0.25, 1, 0.5, 1) !important;
+}
+
+/* Revealed states for Time labels */
+.osd-bottom.hide-unfocused-progress.seekbar-active .osd-time,
+.osd-bottom.hide-unfocused-progress.magic-hover .osd-time,
+.osd-bottom.hide-unfocused-progress.dragging .osd-time,
+.osd-bottom.hide-unfocused-progress.hovered .osd-time,
+.osd-slider-row.hide-unfocused-progress.seekbar-active .osd-time,
+.osd-slider-row.hide-unfocused-progress:hover .osd-time,
+.osd-slider-row.hide-unfocused-progress.magic-hover .osd-time,
+.osd-slider-row.hide-unfocused-progress.dragging .osd-time {
+    opacity: 1 !important;
+    visibility: visible !important;
+    pointer-events: auto !important;
+    transition: opacity 0.15s cubic-bezier(0.25, 1, 0.5, 1) !important;
+}
+
+/* Revealed states for Progress Fill */
+.osd-bottom.hide-unfocused-progress.seekbar-active .osd-slider-fill,
+.osd-bottom.hide-unfocused-progress.magic-hover .osd-slider-fill,
+.osd-bottom.hide-unfocused-progress.dragging .osd-slider-fill,
+.osd-bottom.hide-unfocused-progress.hovered .osd-slider-fill,
+.osd-slider-row.hide-unfocused-progress.seekbar-active .osd-slider-fill,
+.osd-slider-row.hide-unfocused-progress:hover .osd-slider-fill,
+.osd-slider-row.hide-unfocused-progress.magic-hover .osd-slider-fill,
+.osd-slider-row.hide-unfocused-progress.dragging .osd-slider-fill {
+    opacity: 1 !important;
+    transition: width 0.1s ease-out, opacity 0.15s cubic-bezier(0.25, 1, 0.5, 1) !important;
+}
+
+/* Revealed states for WebKit Thumb */
+.osd-bottom.hide-unfocused-progress.seekbar-active .osd-slider::-webkit-slider-thumb,
+.osd-bottom.hide-unfocused-progress.magic-hover .osd-slider::-webkit-slider-thumb,
+.osd-bottom.hide-unfocused-progress.dragging .osd-slider::-webkit-slider-thumb,
+.osd-bottom.hide-unfocused-progress.hovered .osd-slider::-webkit-slider-thumb,
+.osd-slider-row.hide-unfocused-progress.seekbar-active .osd-slider::-webkit-slider-thumb,
+.osd-slider-row.hide-unfocused-progress:hover .osd-slider::-webkit-slider-thumb,
+.osd-slider-row.hide-unfocused-progress.magic-hover .osd-slider::-webkit-slider-thumb,
+.osd-slider-row.hide-unfocused-progress.dragging .osd-slider::-webkit-slider-thumb {
+    opacity: 1 !important;
+    transition: height 0.1s, width 0.1s, margin-top 0.1s, opacity 0.15s cubic-bezier(0.25, 1, 0.5, 1) !important;
+}
+
+/* Revealed states for Mozilla Thumb */
+.osd-bottom.hide-unfocused-progress.seekbar-active .osd-slider::-moz-range-thumb,
+.osd-bottom.hide-unfocused-progress.magic-hover .osd-slider::-moz-range-thumb,
+.osd-bottom.hide-unfocused-progress.dragging .osd-slider::-moz-range-thumb,
+.osd-bottom.hide-unfocused-progress.hovered .osd-slider::-moz-range-thumb,
+.osd-slider-row.hide-unfocused-progress.seekbar-active .osd-slider::-moz-range-thumb,
+.osd-slider-row.hide-unfocused-progress:hover .osd-slider::-moz-range-thumb,
+.osd-slider-row.hide-unfocused-progress.magic-hover .osd-slider::-moz-range-thumb,
+.osd-slider-row.hide-unfocused-progress.dragging .osd-slider::-moz-range-thumb {
+    opacity: 1 !important;
+    transition: opacity 0.15s cubic-bezier(0.25, 1, 0.5, 1) !important;
+}
+
+/* ============================================================================
    Utility
    ============================================================================ */
 
@@ -1060,20 +1229,22 @@ html[data-layout-tier="ultra-legacy"] .osd-btn .osd-icon {
     opacity: 1;
 }
 
-/* ── Unsupported Audio Track Styling ──────────────────────────────────────
- * Audio tracks that cannot be decoded natively by the current backend
- * (e.g. FLAC in MKV on HTML5 browsers) are visually dimmed. Selecting
- * them still works — it triggers a server-side transcode restart — but
- * the reduced opacity communicates that switching will be slower.
+/* ── Transcoded Audio Track Styling ───────────────────────────────────────
+ * To ensure optimal visual clarity and legibility, audio tracks that require
+ * server-side transcoding preserve full 100% text opacity and contrast
+ * rather than being visually dimmed. Actionable items remain completely
+ * readable and responsive, with the dedicated "TRANSCODE" pill badge
+ * providing the clean semantic indicator.
  * ────────────────────────────────────────────────────────────────────── */
 .track-option.track-unsupported {
-    opacity: 0.45;
+    /* Maintain full text opacity and contrast across all states */
+    opacity: 1;
 }
 
-/* Restore full opacity on focus/hover so the dimmed track is still readable */
 .track-option.track-unsupported.focused,
 .track-option.track-unsupported:hover {
-    opacity: 0.7;
+    /* Full contrast on focus and hover */
+    opacity: 1;
 }
 
 /* Distinct badge color for the "TRANSCODE" indicator on unsupported tracks */
@@ -1083,6 +1254,79 @@ html[data-layout-tier="ultra-legacy"] .osd-btn .osd-icon {
     font-size: 0.75em;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Unsupported Playback Speeds Styling
+ * ────────────────────────────────────────────────────────────────────────────
+ * Unsupported rates are greyed out with subdued opacity in rest state to
+ * establish a clear visual hierarchy, while preserving interactive accessibility.
+ * Hover, keyboard focus, and remote D-pad selection smoothly ramp to 95% opacity
+ * using fluid cubic-bezier spring easing (cubic-bezier(0.25, 1, 0.5, 1)).
+ * The item remains 100% interactive so the user can test or override if desired.
+ * ──────────────────────────────────────────────────────────────────────────── */
+.track-option.speed-unsupported {
+    opacity: 0.52;
+    transition: opacity 0.22s cubic-bezier(0.25, 1, 0.5, 1),
+                background-color 0.22s cubic-bezier(0.25, 1, 0.5, 1),
+                transform 0.22s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.track-option.speed-unsupported .track-label-text {
+    color: rgba(255, 255, 255, 0.65);
+}
+
+.track-option.speed-unsupported:hover,
+.track-option.speed-unsupported.focused,
+.track-option.speed-unsupported:focus,
+.track-option.speed-unsupported.magic-hover {
+    opacity: 0.95;
+}
+
+.track-option.speed-unsupported:hover .track-label-text,
+.track-option.speed-unsupported.focused .track-label-text,
+.track-option.speed-unsupported:focus .track-label-text {
+    color: #ffffff;
+}
+
+.track-option.speed-unsupported.selected {
+    opacity: 1;
+}
+
+.track-option.speed-unsupported.selected .track-label-text {
+    color: #ffffff;
+}
+
+/* Capsule Pill Badge for Unsupported Speeds */
+.track-option .track-badge-unsupported {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px 7px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    border-radius: 9999px;
+    background: rgba(255, 159, 10, 0.18) !important;
+    color: #ff9f0a !important;
+    border: 1px solid rgba(255, 159, 10, 0.35) !important;
+    margin-left: 8px;
+    vertical-align: middle;
+    flex-shrink: 0;
+    transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.track-option.focused .track-badge-unsupported,
+.track-option:hover .track-badge-unsupported {
+    background: rgba(255, 159, 10, 0.28) !important;
+    border-color: rgba(255, 159, 10, 0.5) !important;
+}
+
+[dir="rtl"] .track-option .track-badge-unsupported {
+    margin-left: 0;
+    margin-right: 8px;
 }
 .track-option-icon {
     width: 28.8px;
@@ -1253,14 +1497,16 @@ html[data-layout-tier="ultra-legacy"] .osd-btn .osd-icon {
 
 #osdPlaybackInfoOverlay {
     position: fixed;
-    top: 100px;
+    top: 60px;
     right: 40px;
     width: 420px;
-    max-height: calc(100vh - 300px);
-    background: rgba(0, 0, 0, 0.65);
-    border-radius: var(--jf-border-radius-lg);
-    padding: 15px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    max-height: min(680px, calc(100vh - 100px));
+    background: rgba(14, 14, 18, 0.92);
+    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(20px);
+    border-radius: var(--jf-border-radius-lg, 16px);
+    padding: 16px 20px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
     color: #fff;
     display: flex;
     flex-direction: column;
@@ -1269,6 +1515,7 @@ html[data-layout-tier="ultra-legacy"] .osd-btn .osd-icon {
     pointer-events: none;
     transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     overflow-y: auto;
+    box-sizing: border-box;
 }
 
 #osdPlaybackInfoOverlay.visible {
@@ -1526,9 +1773,22 @@ body.lyrics-active .subtitle-overlay {
 .osd-header, 
 .osd-controls, 
 .player-container, 
-.loading-backdrop-layer,
-.subtitle-overlay {
+.loading-backdrop-layer {
+    -webkit-transition: width 0.4s cubic-bezier(0.25, 1, 0.5, 1), left 0.4s cubic-bezier(0.25, 1, 0.5, 1);
     transition: width 0.4s cubic-bezier(0.25, 1, 0.5, 1), left 0.4s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.subtitle-overlay {
+    -webkit-transition: 
+        width 0.4s cubic-bezier(0.25, 1, 0.5, 1), 
+        left 0.4s cubic-bezier(0.25, 1, 0.5, 1),
+        -webkit-transform 0.38s cubic-bezier(0.16, 1, 0.3, 1),
+        transform 0.38s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: 
+        width 0.4s cubic-bezier(0.25, 1, 0.5, 1), 
+        left 0.4s cubic-bezier(0.25, 1, 0.5, 1),
+        -webkit-transform 0.38s cubic-bezier(0.16, 1, 0.3, 1),
+        transform 0.38s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .osd-modal-header {
@@ -1597,6 +1857,10 @@ body.lyrics-active .subtitle-overlay {
     color: #fff;
     transform: scale(1.1);
     text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+}
+
+html[data-light-music-player="true"] .lyric-line.current {
+    text-shadow: none !important;
 }
 
 .lyric-line.focused {
@@ -2089,3 +2353,382 @@ body.hdr-darker-white .track-menu-overlay .track-option:not(.focused):not(.selec
 body.hdr-darker-white .track-menu-overlay .track-menu-title {
     color: #a9a9a9 !important;
 }
+.resume-profiles-overlay {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 2147483647;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    background: var(--jf-background, #000);
+}
+
+.resume-profiles-overlay.visible {
+    display: flex;
+}
+
+.resume-profiles-panel h1 {
+    margin: 0 0 64px;
+    color: var(--jf-text-primary);
+    font-size: 3.8rem;
+    text-align: center;
+}
+
+body.resume-profile-selection-active .jellyfin-video-player {
+    visibility: hidden !important;
+}
+
+.resume-profiles-grid {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+
+/* ============================================================================
+   STEALTH / ANTI-SPOILER OSD LAYOUT & TRANSIENT ACTION HUD
+   ============================================================================ */
+
+/* Main container state for stealth layout */
+/* Main container state for stealth layout: strictly suppress pointer events and hit-testing */
+.player-osd.osd-layout-hidden .osd-main.osd-hidden,
+.player-osd.osd-layout-hidden .osd-main.osd-hidden * {
+    opacity: 0 !important;
+    pointer-events: none !important;
+    visibility: hidden !important;
+}
+
+/* Overlays (Layer 2: UpNextDialog, Skip Intro/Outro buttons, Modals) remain fully visible and active */
+.player-osd.osd-layout-hidden .osd-overlays {
+    pointer-events: none;
+    z-index: 1000;
+}
+
+.player-osd.osd-layout-hidden .osd-overlays > * {
+    pointer-events: all;
+}
+
+/* ============================================================================
+   TRANSIENT ACTION HUD
+   ============================================================================ */
+.osd-stealth-hud {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) scale(1);
+    z-index: 950;
+    pointer-events: none;
+    opacity: 1;
+    transition: opacity 0.22s ease-out, transform 0.32s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.osd-stealth-hud.hidden {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.82);
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.osd-stealth-hud-pill {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 20px 32px;
+    min-width: 96px;
+    min-height: 96px;
+    border-radius: 48px;
+    background: rgba(22, 22, 26, 0.78);
+    -webkit-backdrop-filter: blur(28px) saturate(190%);
+    backdrop-filter: blur(28px) saturate(190%);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    /* Strict rule adherence: No drop shadows or text shadows */
+    box-shadow: none !important;
+    text-shadow: none !important;
+    filter: none !important;
+    color: #ffffff;
+    box-sizing: border-box;
+}
+
+.osd-stealth-icon-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.osd-stealth-icon-wrap svg {
+    width: 48px;
+    height: 48px;
+    display: block;
+    fill: currentColor;
+    color: #ffffff;
+    filter: none !important;
+}
+
+.osd-stealth-text {
+    font-family: var(--jf-font-family, sans-serif);
+    font-size: 1.55rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: #ffffff;
+    white-space: nowrap;
+}
+
+/* ============================================================================
+   STEALTH 2-SECOND HOLD GESTURE INDICATOR
+   - Subtle bottom-docked capsule with radial SVG progress ring
+   - Smooth 2-second linear fill transition on active hold
+   ============================================================================ */
+.osd-hold-indicator {
+    position: absolute;
+    bottom: 72px;
+    left: 50%;
+    transform: translateX(-50%) scale(1);
+    z-index: 960;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 22px;
+    border-radius: 32px;
+    background: rgba(20, 20, 24, 0.82);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    backdrop-filter: blur(24px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    box-shadow: none !important;
+    text-shadow: none !important;
+    filter: none !important;
+    opacity: 1;
+    transition: opacity 0.22s ease-out, transform 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.osd-hold-indicator.hidden {
+    opacity: 0;
+    transform: translateX(-50%) scale(0.85);
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.osd-hold-ring {
+    width: 32px;
+    height: 32px;
+    transform: rotate(-90deg);
+    flex-shrink: 0;
+}
+
+.osd-hold-ring-bg {
+    stroke: rgba(255, 255, 255, 0.18);
+    fill: none;
+    stroke-width: 3.5;
+}
+
+.osd-hold-ring-progress {
+    /* Dynamic theme accent color stroke */
+    stroke: var(--jf-accent, #00a4dc);
+    fill: none;
+    stroke-width: 3.5;
+    stroke-linecap: round;
+    stroke-dasharray: 98;
+    stroke-dashoffset: 98;
+    transition: none;
+}
+
+.osd-hold-indicator.active .osd-hold-ring-progress {
+    stroke-dashoffset: 0;
+    transition: stroke-dashoffset 2s linear;
+}
+
+.osd-hold-label {
+    font-family: var(--jf-font-family, sans-serif);
+    font-size: 0.95rem;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    color: rgba(255, 255, 255, 0.92);
+    white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+    .osd-stealth-hud-pill {
+        padding: 14px 22px;
+        min-width: 76px;
+        min-height: 76px;
+        border-radius: 38px;
+        gap: 10px;
+    }
+
+    .osd-stealth-icon-wrap svg {
+        width: 36px;
+        height: 36px;
+    }
+
+    .osd-stealth-text {
+        font-size: 1.25rem;
+    }
+
+    .osd-hold-indicator {
+        bottom: 36px;
+        padding: 10px 18px;
+        gap: 10px;
+    }
+
+    .osd-hold-label {
+        font-size: 0.85rem;
+    }
+}
+
+/* ============================================================================
+ * MOBILE & TOUCH OSD MENUS & PANELS
+ * ============================================================================
+ * Compact layout adjustments for mobile phone and touch displays:
+ * 1. Dimensions & Padding: Replaces heavy TV 1.8em padding with compact 14px
+ *    padding. Eliminates 750px TV minimum width so menus fit mobile viewports.
+ * 2. Touch Targets: Option rows enforce 44px min-height touch targets.
+ * 3. Scrollability: Max-height expanded to 86vh with momentum touch scrolling.
+ * 4. Sliders: Subtitle appearance sliders wrap labels above slider tracks
+ *    on mobile viewports so controls remain fully visible without clipping.
+ * ============================================================================ */
+
+/* Primary Track and Settings Menus (Audio, Subtitles, Quality, Speed, Playback Mode) */
+html[data-litefin-scaled] .track-menu,
+html[data-litefin-touch] .track-menu {
+    min-width: 0 !important;
+    width: 92vw !important;
+    max-width: 520px !important;
+    max-height: 86vh !important;
+    padding: 14px 16px !important;
+    background: rgba(var(--jf-overlay-bg-rgb, 18, 18, 22), 0.95) !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    border-radius: var(--jf-border-radius-lg, 12px) !important;
+    box-sizing: border-box !important;
+    -webkit-overflow-scrolling: touch !important;
+    overscroll-behavior: contain !important;
+}
+
+/* Landscape orientation optimization: slightly wider and compact */
+@media (orientation: landscape) {
+    html[data-litefin-scaled] .track-menu,
+    html[data-litefin-touch] .track-menu {
+        max-height: 88vh !important;
+        max-width: 560px !important;
+        padding: 12px 18px !important;
+    }
+}
+
+/* Menu Header Title */
+html[data-litefin-scaled] .track-menu-title,
+html[data-litefin-touch] .track-menu-title {
+    font-size: 1.15rem !important;
+    letter-spacing: -0.01em !important;
+    margin-bottom: 10px !important;
+    padding-bottom: 8px !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+    text-align: center !important;
+}
+
+/* Compact spacing between options */
+html[data-litefin-scaled] .track-menu-options > * + *,
+html[data-litefin-touch] .track-menu-options > * + * {
+    margin-top: 5px !important;
+}
+
+/* Option Buttons: Touch target, compact padding & active feedback */
+html[data-litefin-scaled] .track-option,
+html[data-litefin-touch] .track-option {
+    padding: 10px 14px !important;
+    font-size: 0.95rem !important;
+    min-height: 44px !important;
+    border-radius: var(--jf-border-radius, 8px) !important;
+    gap: 8px !important;
+    box-sizing: border-box !important;
+    transition: background 0.15s ease !important;
+}
+
+html[data-litefin-scaled] .track-option:active,
+html[data-litefin-touch] .track-option:active {
+    transform: scale(0.985) !important;
+}
+
+/* Compact Icon & Checkmark indicators */
+html[data-litefin-scaled] .track-option-check,
+html[data-litefin-touch] .track-option-check,
+html[data-litefin-scaled] .track-option-icon,
+html[data-litefin-touch] .track-option-icon {
+    width: 22px !important;
+    height: 22px !important;
+    margin-right: 8px !important;
+    flex-shrink: 0 !important;
+}
+
+/* Label and secondary metadata wrap cleanly */
+html[data-litefin-scaled] .track-option .track-label-text,
+html[data-litefin-touch] .track-option .track-label-text {
+    font-size: 0.95rem !important;
+    margin-right: 12px !important;
+}
+
+html[data-litefin-scaled] .track-option .track-badges,
+html[data-litefin-touch] .track-option .track-badges {
+    gap: 6px !important;
+}
+
+/* Subtitle Quick Appearance Settings Menu */
+html[data-litefin-scaled] .subtitle-setting-item,
+html[data-litefin-touch] .subtitle-setting-item {
+    padding: 10px 14px !important;
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+    box-sizing: border-box !important;
+}
+
+html[data-litefin-scaled] .sub-setting-label,
+html[data-litefin-touch] .sub-setting-label {
+    flex: 1 1 auto !important;
+    font-size: 0.92rem !important;
+    max-width: 100% !important;
+}
+
+html[data-litefin-scaled] .sub-setting-control,
+html[data-litefin-touch] .sub-setting-control {
+    flex: 1 1 auto !important;
+    justify-content: flex-end !important;
+}
+
+html[data-litefin-scaled] .sub-setting-slider-group,
+html[data-litefin-touch] .sub-setting-slider-group {
+    flex: 1 1 100% !important;
+    width: 100% !important;
+    gap: 12px !important;
+    margin-top: 4px !important;
+}
+
+html[data-litefin-scaled] .sub-setting-value,
+html[data-litefin-touch] .sub-setting-value {
+    font-size: 0.9rem !important;
+    margin-left: 8px !important;
+    min-width: 2.2em !important;
+}
+
+/* Lyrics Drawer on Mobile */
+html[data-litefin-scaled] .lyrics-modal,
+html[data-litefin-touch] .lyrics-modal {
+    width: 88vw !important;
+    max-width: 440px !important;
+    padding: 18px !important;
+    border-radius: 20px 0 0 20px !important;
+}
+
+/* Resume Profiles Overlay on Mobile */
+html[data-litefin-scaled] .resume-profiles-panel,
+html[data-litefin-touch] .resume-profiles-panel {
+    padding: 24px 16px !important;
+    max-width: 92vw !important;
+}
+
+html[data-litefin-scaled] .resume-profiles-panel h1,
+html[data-litefin-touch] .resume-profiles-panel h1 {
+    font-size: 1.8rem !important;
+    margin-bottom: 24px !important;
+}
+

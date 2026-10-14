@@ -95,7 +95,11 @@ class SmartHubManager {
          * run (a real auth:login fired). Restoring a session at startup does NOT
          * set this, so a PIN-locked profile stays gated until the user enters it.
          */
-        this._unlocked = false;
+        /**
+         * @type {boolean} - True when media playback is actively running.
+         * Used to suspend background updates and IPC to prevent socket / CPU contention.
+         */
+        this._isPlaying = false;
     }
 
     // ========================================================================
@@ -161,7 +165,14 @@ class SmartHubManager {
             this._stopRefreshCycle();
         });
 
-        // ── Playback end — refresh tiles ────────────────────────────────
+        // ── Playback lifecycle — suspend background sync during playback ─
+        eventBus.on('player:play', () => {
+            this._isPlaying = true;
+        });
+        eventBus.on('player:playing', () => {
+            this._isPlaying = true;
+        });
+
         // ── Playback end / stop — refresh tiles ─────────────────────────
         // When the user finishes watching or stops an item, the Continue Watching
         // and Next Up data may have changed. We listen to both 'player:ended' (natural completion)
@@ -171,10 +182,11 @@ class SmartHubManager {
         // server has fully received, processed, and committed the playback stop report
         // before we query the fresh lists. This avoids fetching stale data due to network race conditions.
         const handlePlaybackFinished = () => {
+            this._isPlaying = false;
             if (this._cycleActive) {
                 log.info('Playback finished or stopped — scheduling Smart Hub preview refresh in 2s');
                 setTimeout(() => {
-                    if (this._cycleActive) {
+                    if (this._cycleActive && !this._isPlaying) {
                         this.update();
                     }
                 }, 2000);
@@ -257,23 +269,24 @@ class SmartHubManager {
      * @private
      */
     _navigateToItem(actionData) {
-        /* Establish /home as the Back-key destination before navigating
-         * to the content. Use replace:true so the router doesn't record
-         * an empty "previous page" entry before home. */
-        router.navigate('/home', { replace: true });
+        // Build the breadcrumb history array required by Samsung Return Key Policy.
+        // Deep linking directly to content must allow the user to press Return/Back
+        // to navigate back to the main homepage rather than exiting to the TV UI.
+        const breadcrumbHistory = ['/home'];
 
-        if (actionData.type === 'episode') {
-            /* For episodes, push the parent series into history so the
-             * user can navigate back up the series → season → episode
-             * hierarchy naturally via the Back key. */
-            if (actionData.seriesid) {
-                router.navigate(`/details/${actionData.seriesid}`);
-            }
-            router.navigate(`/details/${actionData.id}`);
-        } else {
-            /* Movies — navigate straight to the details page. */
-            router.navigate(`/details/${actionData.id}`);
+        // If the deep-linked target is a TV episode with an associated parent series ID,
+        // push the series details route into the breadcrumb hierarchy so Back key
+        // navigation naturally walks: episode -> series -> home -> exit.
+        if (actionData.type === 'episode' && actionData.seriesid) {
+            breadcrumbHistory.push(`/details/${actionData.seriesid}`);
         }
+
+        // Seed the router's internal navigation history stack with the breadcrumb trail.
+        // This ensures router.canGoBack() is true and router.back() correctly targets /home.
+        router.setHistory(breadcrumbHistory);
+
+        // Navigate directly to the requested content item details page
+        router.navigate(`/details/${actionData.id}`);
     }
 
     /**
@@ -300,6 +313,12 @@ class SmartHubManager {
             return;
         }
 
+        /* Skip if video playback is actively running to prevent network/IPC contention on TV NIC */
+        if (this._isPlaying) {
+            log.info('Video playback is actively running — deferring Smart Hub update');
+            return;
+        }
+
         // Lock the updating process
         this._updating = true;
 
@@ -308,15 +327,38 @@ class SmartHubManager {
             let mergedItems = [];
 
             // ─── Phase 1: Try server-side Litefin plugin first ─────────────────
+            // ─── Phase 1: Server-side pre-merged row fetching ──────────────────
+            // Parse configured Next Up max days filter from preferences, defaulting to 365
+            const maxDays = parseInt(storage.getItem('pref:nextUpMaxDays'), 10);
+            const daysLimit = isNaN(maxDays) ? 365 : maxDays;
+            const mergedParams = { limit: 10 };
+
+            // Compute cutoff timestamp if a positive days limit constraint is defined
+            let cutoffIso = null;
+            if (daysLimit > 0) {
+                const cutoff = new Date();
+                cutoff.setDate(cutoff.getDate() - daysLimit);
+                cutoffIso = cutoff.toISOString();
+                // Supply cutoff to server companion plugin query parameters
+                mergedParams.nextUpDateCutoff = cutoffIso;
+                mergedParams.NextUpDateCutoff = cutoffIso;
+            }
+
             // Query the custom endpoint provided by our Litefin plugin.
             // When using the plugin, we fetch up to 10 pre-merged, deduplicated,
             // and chronologically sorted items directly from the server.
             try {
                 log.info('Attempting to fetch pre-merged continue/next-up items from Litefin plugin');
-                const response = await api.getMergedRows({ limit: 10 });
+                const response = await api.getMergedRows(mergedParams);
                 if (response && response.Items && response.Items.length > 0) {
-                    log.info('Successfully fetched merged items from server-side Litefin plugin');
-                    mergedItems = response.Items.slice(0, 10);
+                    // Filter out container items defensively
+                    const validPluginItems = response.Items.filter(
+                        (item) => item && item.Type !== 'Season' && item.Type !== 'Series' && !item.IsFolder
+                    );
+                    if (validPluginItems.length > 0) {
+                        log.info('Successfully fetched merged items from server-side Litefin plugin');
+                        mergedItems = validPluginItems.slice(0, 10);
+                    }
                 }
             } catch (err) {
                 // Plugin is not installed or returned an error; fallback to client-side logic
@@ -338,9 +380,6 @@ class SmartHubManager {
                         EnableTotalRecordCount: false
                     }),
                     (async () => {
-                        // Extract Next Up max days filter from preferences, defaults to 365
-                        const maxDays = parseInt(storage.getItem('pref:nextUpMaxDays'), 10);
-                        const daysLimit = isNaN(maxDays) ? 365 : maxDays;
                         const params = {
                             Limit: 5,
                             ImageTypeLimit: 1,
@@ -349,23 +388,27 @@ class SmartHubManager {
                         };
 
                         // Apply the cutoff date constraint if configured
-                        if (daysLimit > 0) {
-                            const cutoff = new Date();
-                            cutoff.setDate(cutoff.getDate() - daysLimit);
-                            params.NextUpDateCutoff = cutoff.toISOString();
+                        if (cutoffIso) {
+                            params.NextUpDateCutoff = cutoffIso;
                         }
                         return api.getNextUp(params);
                     })()
                 ]);
 
-                // Map items and tag them so we can distinguish them during sorting
-                const resumeItems = (resumeRes?.Items || []).map((item) => ({
-                    ...item,
-                    _isResume: true
-                }));
+                // Map items and tag them so we can distinguish them during sorting.
+                // Filter out any container items (Seasons/Series) to ensure only playable media displays.
+                const resumeItems = (resumeRes?.Items || [])
+                    .filter((item) => item && item.Type !== 'Season' && item.Type !== 'Series' && !item.IsFolder)
+                    .map((item) => ({
+                        ...item,
+                        _isResume: true
+                    }));
 
                 const nextUpItems = (nextUpRes?.Items || [])
                     .filter((item) => {
+                        // Defensive guard: Drop non-playable container folders (e.g. Season/Series)
+                        if (!item || item.Type === 'Season' || item.Type === 'Series' || item.IsFolder) return false;
+
                         // Filter out next-up items that have already been partially played,
                         // as they will already be included in the continue watching list.
                         const position = item.UserData?.PlaybackPositionTicks || 0;

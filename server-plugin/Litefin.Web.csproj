@@ -1,0 +1,80 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ==================================================================== -->
+  <!-- Project Configuration & Target Framework                             -->
+  <!-- ==================================================================== -->
+  <!-- Targets .NET 8.0 to ensure wide compatibility with Jellyfin 10.9 and -->
+  <!-- 10.10+ server installations without binary breakages.                -->
+  <!-- ==================================================================== -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Litefin.Web</RootNamespace>
+    <AssemblyName>Litefin.Web</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>CS1591</NoWarn>
+    <!-- Default version stamped into assembly metadata; overridden during CI packaging -->
+    <Version>1.9.82</Version>
+    <AssemblyVersion>1.9.82.0</AssemblyVersion>
+    <FileVersion>1.9.82.0</FileVersion>
+    <!-- Ensures dependencies resolve and copy cleanly if needed -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <!-- ==================================================================== -->
+  <!-- Tier-Specific Plugin Identity Metadata                              -->
+  <!-- ==================================================================== -->
+  <!-- Stamped into assembly metadata at build time to configure the tier   -->
+  <!-- (Modern, Normal, Legacy, or Ultra-Legacy) and its registered GUID.   -->
+  <!-- ==================================================================== -->
+  <ItemGroup Condition="'$(PluginGuid)' != ''">
+    <AssemblyMetadata Include="PluginGuid" Value="$(PluginGuid)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(PluginName)' != ''">
+    <AssemblyMetadata Include="PluginName" Value="$(PluginName)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(PluginDescription)' != ''">
+    <AssemblyMetadata Include="PluginDescription" Value="$(PluginDescription)" />
+  </ItemGroup>
+
+  <!-- ==================================================================== -->
+  <!-- Jellyfin Core Dependencies                                           -->
+  <!-- ==================================================================== -->
+  <!-- Host-provided by the Jellyfin server runtime at execution time.      -->
+  <!-- ExcludeAssets="runtime" prevents packaging duplicate server DLLs.    -->
+  <!-- ==================================================================== -->
+  <ItemGroup>
+    <PackageReference Include="Jellyfin.Controller" Version="10.10.0">
+      <PrivateAssets>all</PrivateAssets>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <PackageReference Include="Jellyfin.Model" Version="10.10.0">
+      <PrivateAssets>all</PrivateAssets>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!-- ==================================================================== -->
+  <!-- Embedded Resources                                                   -->
+  <!-- ==================================================================== -->
+  <!-- Configuration pages embedded directly into the plugin assembly.      -->
+  <!-- ==================================================================== -->
+  <ItemGroup>
+    <EmbeddedResource Include="Configuration/configPage.html">
+      <LogicalName>Litefin.Web.Configuration.configPage.html</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <!-- ==================================================================== -->
+  <!-- Plugin Preview Artwork                                               -->
+  <!-- ==================================================================== -->
+  <!-- Copies existing icon_oblong.png from assets without duplicate files.  -->
+  <!-- ==================================================================== -->
+  <ItemGroup>
+    <None Include="..\assets\icon_oblong.png" Link="icon_oblong.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

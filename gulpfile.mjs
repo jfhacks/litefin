@@ -14,6 +14,7 @@ import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import archiver from 'archiver';
 import path from 'path';
+import { moveTauriOutputs, cleanObsoleteArtifacts } from './scripts/move-tauri-artifacts.js';
 
 /*
  * exec() buffers ALL stdout + stderr in the parent process's RAM.
@@ -80,6 +81,15 @@ function cleanWgt() {
 
 function cleanIpk() {
     return del(['*.ipk']);
+}
+
+/*
+ * Remove all desktop and mobile Tauri application packages from the repository root.
+ * Targets Windows installers (.exe, .msi), Linux packages (.deb, .AppImage),
+ * macOS disk images (.dmg), and Android packages (.apk, .aab).
+ */
+function cleanTauri() {
+    return del(['*.exe', '*.msi', '*.deb', '*.AppImage', '*.dmg', '*.apk', '*.aab']);
 }
 
 // ============================================================================
@@ -187,11 +197,13 @@ function copySignatures(buildDir) {
  *     meaningless (and potentially harmful) without the service itself.
  *   • Optionally <tizen:setting ... /> — if stripSetting is true, removes setting tag
  *     which causes installation errors on certain legacy hardware.
+ *   • Optionally appId — rewrites the <tizen:application id="..."> attribute (e.g.
+ *     'LitefinApp.litefin' for Ultra-Legacy No-Service builds).
  *
  * We edit the COPY inside buildDir — the root config.xml is never touched,
  * so concurrent build tasks targeting other variants are unaffected.
  */
-function stripServiceFromConfig(buildDir, stripSetting = false) {
+function stripServiceFromConfig(buildDir, stripSetting = false, appId = null) {
     const configPath = path.join(buildDir, 'config.xml');
 
     // Bail out gracefully if webpack hasn't copied the config yet
@@ -220,8 +232,13 @@ function stripServiceFromConfig(buildDir, stripSetting = false) {
         xml = xml.replace(/<tizen:setting[\s\S]*?(?:\/>|<\/tizen:setting>)\s*/g, '');
     }
 
+    // Optionally rewrite application id (e.g. 'LitefinApp.litefin' for Ultra-Legacy No-Service builds)
+    if (appId) {
+        xml = xml.replace(/(<tizen:application[^>]*\bid=")[^"]*(")/, `$1${appId}$2`);
+    }
+
     writeFileSync(configPath, xml, 'utf8');
-    console.info(`Stripped <tizen:service>, use.preview metadata, and preview privilege${stripSetting ? ' (and tizen:setting)' : ''} from ${configPath}`);
+    console.info(`Stripped <tizen:service>, use.preview metadata, and preview privilege${stripSetting ? ' (and tizen:setting)' : ''}${appId ? ` (application id set to '${appId}')` : ''} from ${configPath}`);
 }
 
 /*
@@ -247,12 +264,12 @@ async function createWgt(buildDir, outputName, includeServices = true) {
 
         archive.pipe(output);
 
-        // Tizen packages should not include LG WebOS's appinfo.json, webOS SDK scripts, or large launcher icons.
-        // We use glob with an ignore rule instead of deleting the file from disk,
-        // because WebOS packaging tasks are running in parallel against the exact same buildDir.
+        // Exclude WebOS-only launcher assets and app metadata from Tizen packages.
+        // icon-130.png is now included in Tizen builds (referenced by config.xml),
+        // so it is no longer in the ignore list.
         archive.glob('**/*', {
             cwd: buildDir,
-            ignore: ['appinfo.json', 'js/webOSTV.js', 'assets/icon-130.png']
+            ignore: ['appinfo.json', 'js/webOSTV.js']
         });
 
         // Only include the background-service directory when the build target
@@ -508,9 +525,10 @@ async function packageUltraLegacyNoService() {
     /*
      * Ultra-legacy No Service targets Tizen / WebOS hardware without background service support
      * or where service/metadata/settings tags cause installation failures.
-     * Strips <tizen:service>, use.preview metadata, preview privilege, and <tizen:setting> from config.xml.
+     * Strips <tizen:service>, use.preview metadata, preview privilege, and <tizen:setting> from config.xml,
+     * and sets application id to 'LitefinApp.litefin' (lowercase) specifically for the UL no-service Tizen build.
      */
-    await stripServiceFromConfig(stagingDir, /* stripSetting */ true);
+    await stripServiceFromConfig(stagingDir, /* stripSetting */ true, 'LitefinApp.litefin');
 
     copySignatures(stagingDir);
     console.info(`Creating ${wgtName}...`);
@@ -538,7 +556,7 @@ async function syncVersion() {
         console.info('package.json version is already up to date');
     }
 
-    // Sync appinfo.json
+    // Sync appinfo.json (WebOS platform configuration)
     if (fs.existsSync('./appinfo.json')) {
         const appinfo = JSON.parse(fs.readFileSync('./appinfo.json', 'utf8'));
         if (appinfo.version !== version) {
@@ -549,6 +567,22 @@ async function syncVersion() {
             console.info('appinfo.json version is already up to date');
         }
     }
+
+    // Sync src-tauri/tauri.conf.json (Desktop & Android Tauri application manifest)
+    // Ensures the native Tauri build metadata aligns with Tizen config.xml
+    if (fs.existsSync('./src-tauri/tauri.conf.json')) {
+        const tauriConfig = JSON.parse(fs.readFileSync('./src-tauri/tauri.conf.json', 'utf8'));
+        if (tauriConfig.version !== version) {
+            console.info(`Syncing tauri.conf.json version: ${tauriConfig.version} -> ${version}`);
+            tauriConfig.version = version;
+            fs.writeFileSync('./src-tauri/tauri.conf.json', JSON.stringify(tauriConfig, null, 2) + '\n');
+        } else {
+            console.info('tauri.conf.json version is already up to date');
+        }
+    }
+
+    // Automatically purge stale build artifacts from previous versions in root and cache
+    cleanObsoleteArtifacts(version);
 }
 
 // ============================================================================
@@ -702,6 +736,9 @@ export {
     cleanDist,
     cleanWgt,
     cleanIpk,
+    cleanTauri,
+    cleanObsoleteArtifacts,
+    moveTauriOutputs,
     webpackModern,
     webpackNormal,
     webpackNormalOblong,
@@ -709,6 +746,7 @@ export {
     webpackUltraLegacy,
     webpackDebug,
     webpackAll,
+    syncVersion,
     // Tizen WGT packaging
     packageModern,
     packageNormal,

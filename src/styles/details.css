@@ -33,6 +33,7 @@
 }
 
 .details-backdrop {
+    /* Fixed viewport background layer */
     position: fixed;
     top: 0;
     left: 0;
@@ -42,47 +43,64 @@
     background-position: center center;
     opacity: 0;
     transition: opacity 1s ease-in-out;
-    /* Soften the bottom edge to blend with page background */
-    -webkit-mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
-    mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
+    pointer-events: none;
 
-    /* PERFORMANCE: Promote backdrop to its own layer */
-    transform: translateZ(0);
-    will-change: opacity;
+    /*
+     * Hardware Layer Optimization (Android / Smart TV WebViews):
+     * Avoid CSS mask-image on fixed full-viewport elements. In Chromium engines
+     * on low-end ARM GPUs, mask-image forces an offscreen FBO surface allocation
+     * and a Skia CPU/GPU alpha blend pass on every compositor frame.
+     * The child .backdrop-gradient already handles the visual gradient fade
+     * directly in the fragment shader without FBO or CPU overhead.
+     */
 }
 
 .backdrop-gradient {
+    /* Full-bleed overlay positioning */
     position: absolute;
     top: 0;
     left: 0;
     right: 0;
     bottom: 0;
+    /* Clean gradient blend transitioning seamlessly into the page background */
     background: linear-gradient(to bottom,
             rgba(16, 16, 16, 0.45) 0%,
-            var(--jf-background) 125%);
-    /* PERFORMANCE: Isolate gradient from main layout */
-    transform: translateZ(0);
+            rgba(16, 16, 16, 0.75) 60%,
+            var(--jf-background) 100%);
+    pointer-events: none;
 }
 
 /* Details Content Scroller */
 .details-content,
 .details-page .page-content,
 .person-page .page-content {
-    /* CRITICAL: Position Relative required for offsetParent calculations in FocusManager */
+    /* Position Relative required for offsetParent calculations in FocusManager */
     position: relative;
     padding: 0;
     flex: 1;
     overflow-y: auto;
-    /* THIS IS THE SCROLLER */
+    /* Primary scroll container */
 
     outline: none;
-    /* remove focus outline if focused programmatically */
+    /* Remove focus outline if focused programmatically */
 
-    /* PERFORMANCE: GPU acceleration and layout isolation */
+    /*
+     * GPU Compositor & Scrolling Optimization (Android ARM / Smart TVs):
+     * Overrides the global .page-content transform: translateZ(0) and
+     * will-change: transform. On weak ARM processors and Android WebViews,
+     * declaring will-change: transform on an overflow-y scroll container tells
+     * the compositor to allocate a transform-ready layer. As programmatic
+     * scrollTop values update during smooth scrolling, the compositor invalidates
+     * the entire layer's raster cache every frame, causing severe frame drops.
+     * Reverting to native scrolling (transform: none, will-change: auto) and
+     * removing paint containment allows Blink/Chromium to scroll smoothly
+     * using pre-rasterized tiles without continuous CPU/GPU raster stalls.
+     */
     -webkit-overflow-scrolling: touch;
-    transform: translateZ(0);
-    will-change: transform;
-    contain: layout paint style;
+    transform: none;
+    -webkit-transform: none;
+    will-change: auto;
+    contain: layout style;
 }
 
 /* Main Split Layout */
@@ -168,7 +186,6 @@
     justify-content: center;
     width: 100%;
     margin-top: 12px;
-    margin-bottom: 24px;
 }
 
 .details-page.layout-backdrop-minimal .details-overview {
@@ -178,8 +195,9 @@
 }
 
 .details-page.layout-backdrop-minimal .details-backdrop {
-    -webkit-mask-image: linear-gradient(to bottom, black 85%, transparent 100%);
-    mask-image: linear-gradient(to bottom, black 85%, transparent 100%);
+    /* Mask removed to prevent offscreen compositor allocations during vertical scroll */
+    -webkit-mask-image: none;
+    mask-image: none;
 }
 
 /* Cinematic Backdrop Left Aligned Layout Mode */
@@ -245,8 +263,9 @@
 }
 
 .details-page.layout-backdrop-left .details-backdrop {
-    -webkit-mask-image: linear-gradient(to bottom, black 85%, transparent 100%);
-    mask-image: linear-gradient(to bottom, black 85%, transparent 100%);
+    /* Mask removed to prevent offscreen compositor allocations during vertical scroll */
+    -webkit-mask-image: none;
+    mask-image: none;
 }
 
 .hero-poster {
@@ -286,8 +305,103 @@
     transition: opacity 0.3s ease-in;
 }
 
+/* 
+ * ============================================================================
+ * Modern Layouts: Proportionally Rounded Hero Poster
+ * ============================================================================
+ * Uses a generous 28px squircle radius matching modern card aesthetics.
+ * ============================================================================
+ */
+html[data-layout-media-rows="modern"] .hero-poster,
+html[data-layout-media-rows="expanded"] .hero-poster,
+html[data-layout-media-rows="modern-posters"] .hero-poster {
+    border-radius: 28px;
+    -webkit-border-radius: 28px;
+}
+
+html[data-layout-media-rows="modern"] .hero-poster img,
+html[data-layout-media-rows="modern"] .hero-poster .media-fallback,
+html[data-layout-media-rows="expanded"] .hero-poster img,
+html[data-layout-media-rows="expanded"] .hero-poster .media-fallback,
+html[data-layout-media-rows="modern-posters"] .hero-poster img,
+html[data-layout-media-rows="modern-posters"] .hero-poster .media-fallback {
+    border-radius: 28px;
+    -webkit-border-radius: 28px;
+}
+
+/*
+ * ============================================================================
+ * Live TV Channel Hero Poster
+ * ============================================================================
+ * Preserve channel logo aspect ratio with contain and centered breathing room.
+ * Matches .media-card channel styling for complete visual harmony.
+ * ============================================================================
+ */
+.hero-poster.tv-channel-poster img,
+.hero-poster[data-type="TvChannel"] img,
+.hero-poster.square[data-type="TvChannel"] img,
+.details-page[data-item-type="TvChannel"] .hero-poster img {
+    object-fit: contain !important;
+    padding: 24px !important;
+    box-sizing: border-box !important;
+    background: rgba(0, 0, 0, 0.5) !important;
+}
+
 .hero-poster img.loaded {
     opacity: 1;
+}
+
+/* 
+ * ============================================================================
+ * Hero Poster Fallback Styling
+ * ============================================================================
+ * Ensures gradient covers fill the entire poster container with calibrated
+ * typography and gamepad icon scale for 420px poster containers.
+ * ============================================================================
+ */
+.hero-poster .media-fallback {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    border-radius: var(--jf-border-radius);
+    -webkit-border-radius: var(--jf-border-radius);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 30px;
+    box-sizing: border-box;
+    text-align: center;
+}
+
+.hero-poster .media-fallback-initials {
+    font-size: 5.5rem;
+    font-weight: 800;
+    letter-spacing: -1px;
+    margin-bottom: 12px;
+}
+
+.hero-poster .media-fallback-name {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.9);
+    max-width: 90%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.hero-poster .media-fallback.game-fallback .media-fallback-game-icon {
+    margin-bottom: 16px;
+}
+
+.hero-poster .media-fallback.game-fallback .media-fallback-game-icon svg {
+    width: 84px;
+    height: 84px;
 }
 
 .details-info-col {
@@ -534,14 +648,16 @@
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 10px;
-    margin-bottom: 16px;
+    /* Margin-bottom adjusted to 8px to account for tech-pill vertical margins */
+    margin-bottom: 8px;
 }
 
 .tech-pill {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    /* Physical margin provides bulletproof spacing across all layout tiers (including ultra-legacy) */
+    margin-right: 10px;
+    margin-bottom: 8px;
     padding: 4px 12px;
     border-radius: var(--jf-border-radius, 8px);
     background: rgba(255, 255, 255, 0.09);
@@ -552,6 +668,10 @@
     letter-spacing: 0.02em;
     line-height: 1.4;
     transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.tech-pill:last-child {
+    margin-right: 0;
 }
 
 .tech-pill-res {
@@ -595,6 +715,8 @@
     justify-content: center;
     width: 16px;
     height: 16px;
+    /* Physical margin provides spacing between icon and badge label text across all tiers */
+    margin-right: 6px;
     flex-shrink: 0;
 }
 
@@ -620,6 +742,10 @@
     flex-wrap: wrap;
     align-items: center;
     /* Reduce margin-bottom slightly to compensate for button margins below  */
+    margin-bottom: 44px;
+}
+
+.details-page.tooltips-disabled .details-actions {
     margin-bottom: 20px;
 }
 
@@ -629,6 +755,53 @@
 
 .details-actions>*:last-child {
     margin-right: 0;
+}
+
+/* Focused Action Button Tooltip Bar */
+.details-info-col {
+    position: relative;
+}
+
+.details-actions {
+    position: relative;
+}
+
+.action-btn-tooltip-bar {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform: translate(-50%, 12px);
+    -webkit-transform: translate(-50%, 12px);
+    pointer-events: none;
+    z-index: 10;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.2s ease-in-out, visibility 0.2s;
+    -webkit-transition: opacity 0.2s ease-in-out, visibility 0.2s;
+    white-space: nowrap;
+}
+
+.action-btn-tooltip-bar.visible {
+    opacity: 1;
+    visibility: visible;
+    transform: translate(-50%, 12px);
+    -webkit-transform: translate(-50%, 12px);
+}
+
+.action-btn-tooltip-text {
+    display: inline-block;
+    padding: 6px 14px;
+    background-color: var(--jf-badge-bg, rgba(255, 255, 255, 0.14));
+    color: var(--jf-text-primary, #ffffff);
+    border: 1px solid var(--jf-action-btn-border, rgba(255, 255, 255, 0.22));
+    border-radius: var(--jf-border-radius-md, 8px);
+    font-size: 1.15rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    text-shadow: none !important;
 }
 
 /* Action Buttons */
@@ -679,6 +852,34 @@
     width: 24px;
     height: 24px;
     flex-shrink: 0;
+}
+
+/* Circular Play Button when tooltips mode is active */
+.details-page:not(.tooltips-disabled) .play-btn {
+    width: 72px !important;
+    height: 72px !important;
+    min-width: 72px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
+    -webkit-border-radius: 50% !important;
+    justify-content: center;
+}
+
+.details-page:not(.tooltips-disabled) .play-btn span {
+    display: none !important;
+}
+
+.details-page:not(.tooltips-disabled) .play-btn svg {
+    margin-right: 0 !important;
+    width: 28px !important;
+    height: 28px !important;
+}
+
+/* Compact Resume Button when tooltips mode is active */
+.details-page:not(.tooltips-disabled) .resume-btn {
+    padding: 0 22px !important;
+    border-radius: 36px !important;
+    -webkit-border-radius: 36px !important;
 }
 
 /* Reset Button */
@@ -905,12 +1106,90 @@ html[data-layout-tier="ultra-legacy"] .details-actions .btn-icon svg {
     color: inherit;
 }
 
+/*
+ * ── Line Clamping Utility Styles ────────────────────────────────────────────
+ * Fluid, typography-preserving line clamping rules for item synopses, episode
+ * descriptions, and actor biographies. Implements standard WebKit multiline
+ * truncation across modern browsers and smart TV rendering engines (Tizen/webOS).
+ */
+.line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.line-clamp-3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.line-clamp-4 {
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.line-clamp-5 {
+    display: -webkit-box;
+    -webkit-line-clamp: 5;
+    line-clamp: 5;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
 .line-clamp-6 {
     display: -webkit-box;
     -webkit-line-clamp: 6;
     line-clamp: 6;
     -webkit-box-orient: vertical;
     overflow: hidden;
+}
+
+.line-clamp-7 {
+    display: -webkit-box;
+    -webkit-line-clamp: 7;
+    line-clamp: 7;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.line-clamp-8 {
+    display: -webkit-box;
+    -webkit-line-clamp: 8;
+    line-clamp: 8;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.line-clamp-10 {
+    display: -webkit-box;
+    -webkit-line-clamp: 10;
+    line-clamp: 10;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.line-clamp-12 {
+    display: -webkit-box;
+    -webkit-line-clamp: 12;
+    line-clamp: 12;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.line-clamp-none {
+    display: block;
+    -webkit-line-clamp: unset;
+    line-clamp: unset;
+    -webkit-box-orient: unset;
+    overflow: visible;
 }
 
 /* Rich Metadata */
@@ -920,17 +1199,19 @@ html[data-layout-tier="ultra-legacy"] .details-actions .btn-icon svg {
     border: 2px solid transparent;
     border-radius: var(--jf-border-radius);
     -webkit-border-radius: var(--jf-border-radius);
-    overflow: hidden;
-    background-clip: padding-box;
+    /* Allow visible overflow to avoid expensive rounded-rect clipping masks in Skia */
+    overflow: visible;
     background-color: transparent;
-    transition: background-color 0.5s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    /* Limit transition to border-color to prevent multi-frame background repaints */
+    transition: border-color 0.12s ease;
+    contain: layout style;
 }
 
 .details-rich-meta:focus,
 .details-rich-meta.active-table,
 .details-rich-meta.focused {
     border-color: var(--jf-btn-primary-bg) !important;
-    /* Focus highlight */
+    /* Focus highlight background tint applied cleanly without continuous transition */
     background-color: rgba(var(--jf-accent-dark-rgb,15,15,20),0.65);
     outline: none;
 }
@@ -939,9 +1220,9 @@ html[data-layout-tier="ultra-legacy"] .details-actions .btn-icon svg {
     display: flex;
     align-items: baseline;
     padding: 6px 0;
-    /* Touch target spacing */
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     /* Row separators */
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    contain: layout style;
 }
 
 .rich-meta-row:last-child {
@@ -960,9 +1241,7 @@ html[data-layout-tier="ultra-legacy"] .details-actions .btn-icon svg {
     flex: 1;
     display: flex;
     flex-wrap: wrap;
-    /* gap: 8px; REMOVED for perf */
 }
-
 
 .meta-chip {
     margin-right: 4px;
@@ -973,19 +1252,15 @@ html[data-layout-tier="ultra-legacy"] .details-actions .btn-icon svg {
     -webkit-border-radius: var(--jf-border-radius-lg);
     background: rgba(255, 255, 255, 0.05);
     border: 2px solid rgba(255, 255, 255, 0.1) !important;
-    background-clip: padding-box;
     color: var(--jf-text-primary);
     font-size: 1.1rem;
     font-weight: 500;
     cursor: pointer;
     text-decoration: none;
-    transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
     display: inline-flex;
     align-items: center;
-    /* No permanent will-change — genre/studio/cast chips can be 20+ per page.
-       Only the focused chip gets a compositor layer (via :focus rule below). */
+    /* Idle chips have zero active transition overhead to conserve CPU cycles */
 }
-
 
 /*
  * ── RICH DATA METADATA CHIPS FOCUS/HOVER HIGHLIGHT ───────────────────────────
@@ -1005,6 +1280,8 @@ html[data-layout-tier="ultra-legacy"] .details-actions .btn-icon svg {
     z-index: 5;
     /* Promote only the focused chip to avoid unnecessary composite layers */
     will-change: transform;
+    /* Smooth interactive scaling applied strictly to active chip */
+    transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.18s ease, border-color 0.18s ease;
 }
 
 /* Comma removed for chip-style design */
@@ -1225,11 +1502,16 @@ html[data-layout-tier="ultra-legacy"] .details-actions .btn-icon svg {
 
 /* Person Page Actions (Favorite, Seerr) */
 .person-actions-row {
+    position: relative;
     margin-top: 24px;
-    margin-bottom: 24px;
+    margin-bottom: 44px;
     display: flex;
     align-items: center;
     gap: 16px;
+}
+
+.person-page.tooltips-disabled .person-actions-row {
+    margin-bottom: 20px;
 }
 
 /*
@@ -1373,9 +1655,42 @@ html[data-layout-tier="ultra-legacy"] .details-actions .btn-icon svg {
     outline-offset: 2px;
 }
 
-/* 9 items per row on Seerr Person Grids */
+/* ============================================================================
+ * Seerr Person Page Grids (7 items per row)
+ * ============================================================================
+ * Precision 7-column layout.
+ * Width is calculated as 100% / 7 with 8px horizontal gutters (16px total).
+ * Fixed 350px image height preserves standard 2:3 theatrical poster ratio on 1080p.
+ * ============================================================================ */
 .person-grid.seerr-person-grid .media-card {
-    width: calc(11.111% - 16px) !important; /* 100% / 9 items per row */
+    /* Set 7 items per row (100% / 7 = 14.2857%) minus lateral margin gutters */
+    width: calc(14.2857% - 16px) !important;
+    /* balanced 8px horizontal separation */
+    margin-right: 8px !important;
+    margin-left: 8px !important;
+    /* Generous vertical breathing room between grid rows */
+    margin-bottom: 24px !important;
+    flex: none !important;
+    max-width: unset !important;
+    min-width: 0 !important;
+}
+
+.person-grid.seerr-person-grid .card-image {
+    /* Full width card container fill */
+    width: 100%;
+    /* Height scaled to 350px for 7 items per row maintaining authentic 2:3 poster ratio */
+    height: 350px;
+}
+
+/* ============================================================================
+ * Person Page Appearances Grid (7 items per row)
+ * ============================================================================
+ * Precision 7-column layout.
+ * Width is calculated as 100% / 7 with 8px horizontal gutters (16px total).
+ * Fixed 350px image height preserves standard 2:3 theatrical poster ratio on 1080p.
+ * ============================================================================ */
+.person-grid.person-appearances-grid .media-card {
+    width: calc(14.2857% - 16px) !important; /* 100% / 7 items per row */
     margin-right: 8px !important;
     margin-left: 8px !important;
     margin-bottom: 24px !important;
@@ -1384,7 +1699,611 @@ html[data-layout-tier="ultra-legacy"] .details-actions .btn-icon svg {
     min-width: 0 !important;
 }
 
-.person-grid.seerr-person-grid .card-image {
+.person-grid.person-appearances-grid .card-image {
     width: 100%;
-    height: 270px; /* Scaled proportionally for 9 items per row (2:3 aspect ratio) */
+    height: 350px; /* Proportionally scaled for 7 items per row (2:3 aspect ratio) */
+}
+
+/* ============================================================================
+ * Person Page Episodes Grid (5 items per row)
+ * ============================================================================
+ * 5-column landscape layout for episodic guest appearances and credits.
+ * Width is calculated as 100% / 5 with 8px horizontal gutters (16px total).
+ * Fixed 194px image height maintains true 16:9 widescreen broadcast proportion.
+ * ============================================================================ */
+.person-grid.landscape-grid.person-episodes-grid .media-card,
+.person-page #person-episodes .media-card {
+    width: calc(20% - 16px) !important; /* 100% / 5 items per row */
+    margin-right: 8px !important;
+    margin-left: 8px !important;
+    margin-bottom: 24px !important;
+    flex: none !important;
+    max-width: unset !important;
+    min-width: 0 !important;
+}
+
+.person-grid.landscape-grid.person-episodes-grid .card-image,
+.person-page #person-episodes .card-image {
+    width: 100%;
+    height: 194px !important; /* True 16:9 widescreen ratio (~344px card width) */
+}
+
+/* Modern Layouts: Rounded Corners for Person Page & Seerr Grids */
+html[data-layout-media-rows="modern"] .person-grid .card-image,
+html[data-layout-media-rows="expanded"] .person-grid .card-image,
+html[data-layout-media-rows="modern-posters"] .person-grid .card-image,
+html[data-layout-media-rows="modern"] .person-page #person-episodes .card-image,
+html[data-layout-media-rows="expanded"] .person-page #person-episodes .card-image,
+html[data-layout-media-rows="modern-posters"] .person-page #person-episodes .card-image {
+    border-radius: 24px !important;
+    -webkit-border-radius: 24px !important;
+    border: none !important;
+    background: var(--jf-surface, rgba(255, 255, 255, 0.05)) !important;
+    overflow: hidden !important;
+    position: relative !important;
+}
+
+html[data-layout-media-rows="modern"] .person-grid .card-image img,
+html[data-layout-media-rows="expanded"] .person-grid .card-image img,
+html[data-layout-media-rows="modern-posters"] .person-grid .card-image img,
+html[data-layout-media-rows="modern"] .person-page #person-episodes .card-image img,
+html[data-layout-media-rows="expanded"] .person-page #person-episodes .card-image img,
+html[data-layout-media-rows="modern-posters"] .person-page #person-episodes .card-image img {
+    border-radius: 24px !important;
+    -webkit-border-radius: 24px !important;
+    width: 100% !important;
+    height: 100% !important;
+}
+
+html[data-layout-media-rows="modern"] .person-grid .media-card:focus .card-image,
+html[data-layout-media-rows="modern"] .person-grid .media-card.focused .card-image,
+html[data-layout-media-rows="expanded"] .person-grid .media-card:focus .card-image,
+html[data-layout-media-rows="expanded"] .person-grid .media-card.focused .card-image,
+html[data-layout-media-rows="modern-posters"] .person-grid .media-card:focus .card-image,
+html[data-layout-media-rows="modern-posters"] .person-grid .media-card.focused .card-image,
+html[data-layout-media-rows="modern"] .person-page #person-episodes .media-card:focus .card-image,
+html[data-layout-media-rows="modern"] .person-page #person-episodes .media-card.focused .card-image,
+html[data-layout-media-rows="expanded"] .person-page #person-episodes .media-card:focus .card-image,
+html[data-layout-media-rows="expanded"] .person-page #person-episodes .media-card.focused .card-image,
+html[data-layout-media-rows="modern-posters"] .person-page #person-episodes .media-card:focus .card-image,
+html[data-layout-media-rows="modern-posters"] .person-page #person-episodes .media-card.focused .card-image {
+    border: none !important;
+    outline: none !important;
+}
+
+/* Modern Layouts: Person & Episode Grid Overlay Focus Ring */
+html[data-layout-media-rows="modern"] .person-grid .media-card:focus .card-image::after,
+html[data-layout-media-rows="modern"] .person-grid .media-card.focused .card-image::after,
+html[data-layout-media-rows="expanded"] .person-grid .media-card:focus .card-image::after,
+html[data-layout-media-rows="expanded"] .person-grid .media-card.focused .card-image::after,
+html[data-layout-media-rows="modern-posters"] .person-grid .media-card:focus .card-image::after,
+html[data-layout-media-rows="modern-posters"] .person-grid .media-card.focused .card-image::after,
+html[data-layout-media-rows="modern"] .person-page #person-episodes .media-card:focus .card-image::after,
+html[data-layout-media-rows="modern"] .person-page #person-episodes .media-card.focused .card-image::after,
+html[data-layout-media-rows="expanded"] .person-page #person-episodes .media-card:focus .card-image::after,
+html[data-layout-media-rows="expanded"] .person-page #person-episodes .media-card.focused .card-image::after,
+html[data-layout-media-rows="modern-posters"] .person-page #person-episodes .media-card:focus .card-image::after,
+html[data-layout-media-rows="modern-posters"] .person-page #person-episodes .media-card.focused .card-image::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    border-radius: 24px;
+    -webkit-border-radius: 24px;
+    border: 4px solid var(--jf-focus-border-color, var(--jf-accent));
+    box-sizing: border-box;
+    z-index: 10;
+    pointer-events: none;
+}
+
+
+/*
+ * ── Chrome 26 Quirks Overrides: Details Page Split Layout ────────────────────
+ * Forces a horizontal columns layout for the main info panel and action rows
+ * using the 2009 webkit-box model and classic inline-block fallbacks on Chrome 26.
+ */
+html[data-layout-quirks="c26"] .details-main-split {
+    display: -webkit-box !important;
+    -webkit-box-orient: horizontal !important;
+    -webkit-box-align: start !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+html[data-layout-quirks="c26"] .details-info-col {
+    display: -webkit-box !important;
+    -webkit-box-orient: vertical !important;
+    -webkit-box-flex: 1 !important;
+    width: 0 !important; /* Forces the box model to compute and stretch columns correctly */
+}
+
+/* Fix metadata items wrapping */
+html[data-layout-quirks="c26"] .details-meta-row {
+    display: block !important;
+}
+
+html[data-layout-quirks="c26"] .meta-item {
+    display: inline-block !important;
+    vertical-align: middle !important;
+}
+
+/* Fix action buttons horizontal alignment and exclude hidden buttons from display overrides */
+html[data-layout-quirks="c26"] .details-actions {
+    display: block !important;
+}
+
+html[data-layout-quirks="c26"] .details-actions > :not(.hidden) {
+    display: inline-block !important;
+    vertical-align: middle !important;
+}
+
+/* Disable transitions on details buttons to prevent layout and render lag on TV engines */
+html[data-layout-quirks="c26"] .details-actions .btn,
+html[data-layout-quirks="c26"] .details-actions .btn-icon {
+    -webkit-transition: none !important;
+    transition: none !important;
+}
+
+/* Force outline icons and hide filled icons across all states to prevent focus rendering glitches on Chrome 26 */
+html[data-layout-quirks="c26"] .details-actions .btn .icon-outline,
+html[data-layout-quirks="c26"] .details-actions .btn-icon .icon-outline,
+html[data-layout-quirks="c26"] .details-actions .btn:focus .icon-outline,
+html[data-layout-quirks="c26"] .details-actions .btn.focused .icon-outline,
+html[data-layout-quirks="c26"] .details-actions .btn-icon:focus .icon-outline,
+html[data-layout-quirks="c26"] .details-actions .btn-icon.focused .icon-outline {
+    display: inline-block !important;
+}
+
+html[data-layout-quirks="c26"] .details-actions .btn .icon-filled,
+html[data-layout-quirks="c26"] .details-actions .btn-icon .icon-filled,
+html[data-layout-quirks="c26"] .details-actions .btn:focus .icon-filled,
+html[data-layout-quirks="c26"] .details-actions .btn.focused .icon-filled,
+html[data-layout-quirks="c26"] .details-actions .btn-icon:focus .icon-filled,
+html[data-layout-quirks="c26"] .details-actions .btn-icon.focused .icon-filled {
+    display: none !important;
+}
+
+/* Fix rich metadata rows horizontal and vertical alignment */
+html[data-layout-quirks="c26"] .rich-meta-row {
+    display: -webkit-box !important;
+    -webkit-box-orient: horizontal !important;
+    -webkit-box-align: center !important; /* Center vertically to align label text and chips */
+    width: 100% !important;
+    padding: 10px 0 !important;
+}
+
+html[data-layout-quirks="c26"] .meta-label {
+    display: block !important;
+    width: 120px !important;
+    line-height: normal !important;
+    margin: 0 !important;
+    -webkit-box-sizing: border-box !important;
+    box-sizing: border-box !important;
+}
+
+html[data-layout-quirks="c26"] .meta-value-list {
+    display: block !important;
+    -webkit-box-flex: 1 !important;
+    width: 0 !important;
+}
+
+html[data-layout-quirks="c26"] .meta-chip {
+    display: inline-block !important;
+    vertical-align: middle !important;
+    margin: 4px 8px 4px 0 !important; /* Proper spacing, no vertical overlap */
+}
+
+/* ============================================================================
+ * ── Chrome 26 Quirks Overrides: Details Page Next Up & Episode List Rows ─────
+ * Reconstructs the horizontal card layout using the 2009 -webkit-box model
+ * so the thumbnail and metadata info panel sit side-by-side on older WebKit engines
+ * (e.g. webOS 1.x/2.x and Tizen 2.4) where modern CSS Flexbox is unsupported.
+ * ============================================================================ */
+
+/* Ensure the episode list container behaves as a full-width block container */
+html[data-layout-quirks="c26"] .episode-list-container {
+    display: block !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+/* Force each episode row to lay out as a horizontal webkit-box */
+html[data-layout-quirks="c26"] .episode-row {
+    display: -webkit-box !important;
+    -webkit-box-orient: horizontal !important;
+    -webkit-box-align: center !important;
+    width: 100% !important;
+    height: 250px !important;
+    margin-bottom: 24px !important;
+    box-sizing: border-box !important;
+}
+
+/* 
+ * Episode card button: spans the full width of the row via -webkit-box-flex: 1,
+ * and internally acts as a horizontal -webkit-box container for the thumb and info.
+ */
+html[data-layout-quirks="c26"] .episode-row-card {
+    -webkit-box-flex: 1 !important;
+    width: 0 !important; /* Forces -webkit-box to calculate horizontal distribution properly */
+    height: 100% !important;
+    display: -webkit-box !important;
+    -webkit-box-orient: horizontal !important;
+    -webkit-box-align: stretch !important;
+    background: var(--jf-card-bg-darker, rgba(20, 20, 25, 0.75)) !important;
+    border-radius: var(--jf-border-radius, 12px) !important;
+    overflow: hidden !important;
+    position: relative !important;
+    box-sizing: border-box !important;
+    border: none !important;
+    text-align: left !important;
+    -webkit-transition: none !important;
+    transition: none !important;
+}
+
+/* Native outline focus feedback for older TV rendering engines */
+html[data-layout-quirks="c26"] .episode-row-card:focus,
+html[data-layout-quirks="c26"] .episode-row-card.focused {
+    background: var(--jf-card-bg-darker, rgba(30, 30, 42, 0.95)) !important;
+    outline: 3px solid var(--jf-accent, #00a4dc) !important;
+    outline-offset: -3px !important;
+    -webkit-transform: none !important;
+    transform: none !important;
+}
+
+/* Suppress heavy animated pseudo-element focus border to prevent rendering lag */
+html[data-layout-quirks="c26"] .episode-row-card:focus::after,
+html[data-layout-quirks="c26"] .episode-row-card.focused::after {
+    display: none !important;
+}
+
+/* Fixed-width thumbnail wrapper anchored to the left of the card */
+html[data-layout-quirks="c26"] .episode-row-thumb {
+    -webkit-box-flex: 0 !important;
+    width: 390px !important;
+    min-width: 390px !important;
+    max-width: 390px !important;
+    height: 100% !important;
+    position: relative !important;
+    overflow: hidden !important;
+    box-sizing: border-box !important;
+    -webkit-mask-image: none !important;
+    mask-image: none !important;
+    border-top-left-radius: var(--jf-border-radius, 12px) !important;
+    border-bottom-left-radius: var(--jf-border-radius, 12px) !important;
+}
+
+/* Ensure thumbnail image fills the container completely */
+html[data-layout-quirks="c26"] .episode-row-thumb img {
+    display: block !important;
+    width: 100% !important;
+    height: 100% !important;
+    -webkit-transform: none !important;
+    transform: none !important;
+}
+
+/* 
+ * Episode info column: takes remaining space horizontally and aligns
+ * title, metadata, and overview vertically inside the card.
+ */
+html[data-layout-quirks="c26"] .episode-row-info {
+    -webkit-box-flex: 1 !important;
+    width: 0 !important;
+    height: 100% !important;
+    display: -webkit-box !important;
+    -webkit-box-orient: vertical !important;
+    -webkit-box-pack: center !important;
+    -webkit-box-align: start !important;
+    padding: 18px 24px !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+}
+
+/* Episode title line with clean ellipsis truncation */
+html[data-layout-quirks="c26"] .episode-row-title {
+    display: block !important;
+    width: 100% !important;
+    font-size: 1.4rem !important;
+    font-weight: 600 !important;
+    color: var(--jf-text-primary, #ffffff) !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    margin-bottom: 6px !important;
+    line-height: 1.3 !important;
+}
+
+/* Episode metadata row displaying rating, duration, and end time */
+html[data-layout-quirks="c26"] .episode-row-meta {
+    display: block !important;
+    width: 100% !important;
+    font-size: 1.2rem !important;
+    color: var(--jf-text-secondary, rgba(255, 255, 255, 0.7)) !important;
+    margin-bottom: 10px !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+
+/* Inline alignment for metadata chips */
+html[data-layout-quirks="c26"] .episode-row-meta > * {
+    display: inline-block !important;
+    vertical-align: middle !important;
+    margin-right: 16px !important;
+}
+
+/* Rating score label and star icon */
+html[data-layout-quirks="c26"] .episode-row-rating {
+    display: inline-block !important;
+    vertical-align: middle !important;
+    color: #f5c518 !important;
+    font-weight: 600 !important;
+}
+
+html[data-layout-quirks="c26"] .episode-row-rating svg {
+    display: inline-block !important;
+    vertical-align: middle !important;
+    width: 18px !important;
+    height: 18px !important;
+    margin-right: 4px !important;
+    fill: currentColor !important;
+}
+
+/* Multi-line overview text clamp using webkit-box */
+html[data-layout-quirks="c26"] .episode-row-overview {
+    display: -webkit-box !important;
+    -webkit-line-clamp: 4 !important;
+    -webkit-box-orient: vertical !important;
+    overflow: hidden !important;
+    width: 100% !important;
+    font-size: 1.3rem !important;
+    color: var(--jf-text-secondary, rgba(255, 255, 255, 0.7)) !important;
+    line-height: 1.5 !important;
+    opacity: 0.8 !important;
+}
+
+/* RTL directional adjustments for Arabic and Hebrew locales */
+[dir="rtl"] html[data-layout-quirks="c26"] .episode-row-card {
+    text-align: right !important;
+}
+
+[dir="rtl"] html[data-layout-quirks="c26"] .episode-row-thumb {
+    border-radius: 0 var(--jf-border-radius, 12px) var(--jf-border-radius, 12px) 0 !important;
+}
+
+[dir="rtl"] html[data-layout-quirks="c26"] .episode-row-meta > * {
+    margin-right: 0 !important;
+    margin-left: 16px !important;
+}
+
+[dir="rtl"] html[data-layout-quirks="c26"] .episode-row-rating svg {
+    margin-right: 0 !important;
+    margin-left: 4px !important;
+}
+
+/*
+ * ============================================================================
+ * JELLYEMU GAMING & EMULATOR STYLES
+ * ============================================================================
+ * Clean, translucent, minimal typography with modern glassmorphism and spring
+ * animations. Designed for seamless readability on 10-foot TV displays.
+ * ============================================================================
+ */
+
+/* Game Platform & Time-To-Beat Meta Badges */
+.game-platform-pill {
+    background: rgba(0, 164, 220, 0.18) !important;
+    color: #4dc2f8 !important;
+    border: 1px solid rgba(77, 194, 248, 0.45) !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.5px !important;
+    text-transform: uppercase !important;
+}
+
+.game-ttb-pill {
+    background: rgba(255, 184, 0, 0.15) !important;
+    color: #ffc433 !important;
+    border: 1px solid rgba(255, 196, 51, 0.4) !important;
+    font-weight: 600 !important;
+}
+
+/* Standalone Emulator Page Canvas */
+.emulator-page {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: #000;
+    overflow: hidden;
+    z-index: 5000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/*
+ * Internal Rendering Resolution Downscaler:
+ * TV SoCs crawl when rendering WebAssembly canvas buffers at 1080p/4K.
+ * By sizing the iframe at 960x540 (or 640x480) and GPU-upscaling it with
+ * transform: scale() and pixelated image-rendering, the WebAssembly core
+ * only renders 1/4th of the pixels while the TV's hardware display processor
+ * handles the fullscreen upscale at 60 FPS.
+ */
+.emulator-iframe {
+    width: 960px;
+    height: 540px;
+    border: none;
+    outline: none;
+    display: block;
+    background: #000;
+    transform-origin: center center;
+    transform: scale(2);
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    will-change: transform;
+}
+
+/* Pause Overlay */
+.emulator-pause-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 6000;
+    opacity: 0;
+    transition: opacity 0.28s cubic-bezier(0.25, 1, 0.5, 1);
+    pointer-events: none;
+}
+
+.emulator-pause-overlay.visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.emulator-pause-card {
+    background: rgba(32, 33, 37, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 28px;
+    -webkit-border-radius: 28px;
+    padding: 44px 52px;
+    width: 90%;
+    max-width: 580px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6), 0 0 1px rgba(255, 255, 255, 0.3);
+    transform: scale(0.93) translateY(10px);
+    transition: transform 0.32s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.emulator-pause-overlay.visible .emulator-pause-card {
+    transform: scale(1) translateY(0);
+}
+
+.emulator-pause-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 0.95rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    margin-bottom: 20px;
+}
+
+.emulator-pause-title {
+    font-size: 2.2rem;
+    font-weight: 700;
+    color: #fff;
+    margin: 0 0 12px 0;
+    letter-spacing: -0.5px;
+}
+
+.emulator-pause-desc {
+    font-size: 1.15rem;
+    line-height: 1.5;
+    color: rgba(255, 255, 255, 0.7);
+    margin: 0 0 36px 0;
+    max-width: 440px;
+}
+
+.emulator-pause-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    width: 100%;
+}
+
+.emulator-hud-btn {
+    width: 100% !important;
+    height: 56px !important;
+    border-radius: 16px !important;
+    -webkit-border-radius: 16px !important;
+    font-size: 1.25rem !important;
+    font-weight: 600 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    cursor: pointer;
+    transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.18s ease, box-shadow 0.18s ease !important;
+}
+
+.emulator-hud-btn.btn-primary {
+    background: #ffffff !important;
+    color: #000000 !important;
+    border: none !important;
+}
+
+.emulator-hud-btn.btn-secondary {
+    background: rgba(255, 255, 255, 0.12) !important;
+    color: #ffffff !important;
+    border: 1px solid rgba(255, 255, 255, 0.15) !important;
+}
+
+.emulator-hud-btn:focus,
+.emulator-hud-btn.focused {
+    transform: scale(1.04) !important;
+    outline: none !important;
+    box-shadow: 0 0 0 4px rgba(0, 164, 220, 0.8), 0 12px 24px rgba(0, 0, 0, 0.5) !important;
+}
+
+
+
+/* Streaming availability is informational; playback retains its normal focus order. */
+.watch-providers {
+    margin: 1rem 0;
+    color: var(--jf-text-primary);
+}
+
+.watch-providers h2 {
+    font-size: 1.2rem;
+    margin: 0 0 0.6rem;
+}
+
+.watch-provider-group h3 {
+    font-size: 1rem;
+    font-weight: normal;
+    color: var(--jf-text-secondary);
+    margin: 0 0 0.4rem;
+}
+
+.watch-provider-list {
+    display: flex;
+    flex-wrap: wrap;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.watch-provider {
+    display: flex;
+    align-items: center;
+    margin: 0 1rem 0.5rem 0;
+    font-size: 1rem;
+}
+
+.watch-provider img {
+    width: 2.5rem;
+    height: 2.5rem;
+    margin-right: 0.5rem;
+    border-radius: var(--jf-border-radius);
+}
+
+.watch-providers-empty {
+    color: var(--jf-text-secondary);
+    font-size: 0.85rem;
+    margin: 0.3rem 0;
 }

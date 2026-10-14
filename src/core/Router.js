@@ -134,36 +134,82 @@ class Router {
             // Replace current hash without adding to browser history
             window.location.replace(`#${path}`);
         } else {
-            window.location.hash = path;
+            // Check if we are already sitting on this path
+            if (this.getCurrentPath() === path) {
+                // If already at target path, setting window.location.hash is a no-op in browsers.
+                // Trigger hash change listener directly to force route reload / instantiation.
+                this._onHashChange();
+            } else {
+                // Standard push navigation by updating URL hash
+                window.location.hash = path;
+            }
         }
     }
 
     /**
+     * =========================================================================
+     * Check if back navigation is possible
+     * =========================================================================
+     * Evaluates whether the user can navigate back in the application.
+     * Returns true when:
+     * 1. Navigation history contains prior routes (_history.length > 1), or
+     * 2. The current active route is not root / home (e.g. direct deep-link).
+     *
+     * @returns {boolean} True if back navigation can be initiated.
+     */
+    canGoBack() {
+        // Multi-level history entries indicate an ancestor route is present
+        if (this._history.length > 1) {
+            return true;
+        }
+
+        // Direct deep-link or browser refresh on a 2nd-level page: allow return to Home
+        const currentPath = this.getCurrentPath();
+        return currentPath !== '/home' && currentPath !== '/' && currentPath !== '';
+    }
+
+    /**
+     * =========================================================================
      * Go back to previous page
-     * @returns {boolean} True if back was possible
+     * =========================================================================
+     * Pops the current route from navigation history and transitions back
+     * to the previous page. If history is empty but the user is on a 2nd-level
+     * page (such as after refreshing or launching via deep link), safely
+     * falls back to the primary '/home' route.
+     *
+     * @returns {boolean} True if back navigation was successfully triggered.
      */
     back() {
+        // Multi-entry history stack: pop current entry and restore preceding route
         if (this._history.length > 1) {
-            // Remove current page from history
+            // Remove current page from active history stack
             this._history.pop();
 
-            // PEEK the previous entry (it stays in history)
+            // Peek at the target previous entry (which now sits at top of stack)
             const previousEntry = this._history[this._history.length - 1];
 
-            // Flag this as a back navigation so Page.js knows to restore state
+            // Flag as back navigation to tell Page lifecycle to restore previous scroll/focus
             this._isBackNavigation = true;
 
-            // Store pending state for restoration
+            // Preserve cached page state for restoration upon mount
             this._pendingRestoreState = previousEntry ? previousEntry.state : null;
 
-            // Navigate to previous path using REPLACE
-            const previousPath = previousEntry ? previousEntry.path : '/';
+            // Resolve target URL hash (defaults to '/home' if entry was corrupt)
+            const previousPath = previousEntry ? previousEntry.path : '/home';
 
-            // Track this navigation so _onHashChange knows it was expected
+            // Mark expected path so _onHashChange does not treat as unexpected jump
             this._lastNavigatePath = previousPath;
 
-            // Use window.location.replace to change hash without triggering push
+            // Replace hash in window location without creating a new forward history entry
             window.location.replace(`#${previousPath}`);
+            return true;
+        }
+
+        // Deep-link or refresh fallback: navigate cleanly to Home if on a sub-page
+        const currentPath = this.getCurrentPath();
+        if (currentPath !== '/home' && currentPath !== '/' && currentPath !== '') {
+            log.info(`No prior history entry available; falling back to /home from "${currentPath}"`);
+            this.navigate('/home');
             return true;
         }
 
@@ -234,7 +280,9 @@ class Router {
 
                 // Capture state from current page before destroying
                 // This saves focus, scroll, and page-specific state
-                if (this._currentPage) {
+                // Only capture state into history if this is forward navigation;
+                // during back navigation, currentEntry is the DESTINATION page entry!
+                if (this._currentPage && !this._isBackNavigation) {
                     const capturedState = navigationState.captureState(this._currentPage);
 
                     // Update the current history entry with captured state
@@ -317,11 +365,48 @@ class Router {
     }
 
     /**
-     * Check if can go back
-     * @returns {boolean} True if there's history to go back to
+     * Get a shallow copy of the current navigation history stack.
+     * Each entry contains the route path and optional captured state.
+     *
+     * @returns {Array<{path: string, state: any}>} Array of history entries
      */
-    canGoBack() {
-        return this._history.length > 1;
+    getHistory() {
+        // Return a shallow copy of the internal history array
+        return [...this._history];
+    }
+
+    /**
+     * Set or seed the navigation history stack with predetermined routes.
+     *
+     * Essential for deep-link scenarios (such as Samsung Smart Hub preview tiles)
+     * where launching directly into a detail or playback page requires preceding
+     * breadcrumbs (e.g., ['/home', '/details/seriesId']) in the back stack.
+     * This guarantees that pressing the Return / Back key walks back up the app's
+     * logical hierarchy to the homepage rather than abruptly exiting the app.
+     *
+     * @param {Array<string|{path: string, state?: any}>} entries - Ordered history entries (oldest first)
+     */
+    setHistory(entries) {
+        // Guard against non-array input
+        if (!Array.isArray(entries)) {
+            log.warn('setHistory called with non-array argument:', entries);
+            return;
+        }
+
+        // Normalize string paths into standard history entry objects
+        this._history = entries.map((entry) => {
+            if (typeof entry === 'string') {
+                return { path: entry, state: null };
+            }
+            return { path: entry.path, state: entry.state || null };
+        });
+
+        // Enforce maximum history capacity boundary
+        if (this._history.length > this._maxHistory) {
+            this._history = this._history.slice(-this._maxHistory);
+        }
+
+        log.info('Navigation history seeded:', this._history.map((e) => e.path));
     }
 
     /**

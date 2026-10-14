@@ -45,8 +45,7 @@ The framework consists of five core modules that work together:
 
 - **No virtual DOM** — Components use direct DOM manipulation with string-based HTML rendering. This keeps the bundle tiny and avoids framework churn.
 - **Singleton services** — `eventBus`, `state`, `router` are global singletons for decoupled communication.
-- **Lifecycle-driven** — Components follow a predictable lifecycle: `constructor → render → mount → [updates] → destroy`.
-- **Tizen-compatible** — No modern APIs that would break on Tizen 4's Chromium 56 engine.
+- **Cross-platform compatible** — Zero engine-specific assumptions. Engineered to run flawlessly on legacy TV browsers (Chromium 32+), Android WebViews, Desktop Tauri environments, and standard browsers.
 
 ---
 

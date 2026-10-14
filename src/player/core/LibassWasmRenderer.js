@@ -19,10 +19,20 @@ import FontLoader from '../../utils/FontLoader.js';
 import { logger } from '../../utils/Logger.js';
 import { PlayerSettings } from '../../utils/PlayerSettings.js';
 import SubtitleStyles from '../../utils/SubtitleStyles.js';
+import { platformInfo } from '../../utils/PlatformInfo.js';
 
 const log = logger.create('LibassWasmRenderer');
-
-const getAbsoluteUrl = (relPath) => new URL(relPath, window.location.href).href;
+/**
+ * Resolves relative asset paths to absolute HTTP URLs.
+ * Uses document.baseURI (which honors any active <base href> tag injected by host plugins)
+ * and falls back to window.location.href in headless or non-standard environments.
+ */
+const getAbsoluteUrl = (relPath) => {
+    // Determine effective base URI from document or window location
+    const base = (typeof document !== 'undefined' && document.baseURI) ? document.baseURI : window.location.href;
+    // Construct normalized absolute URL for worker font fetching
+    return new URL(relPath, base).href;
+};
 
 let _availableFonts = null;
 function getAvailableFonts() {
@@ -53,33 +63,27 @@ function getAvailableFonts() {
         'proxima nova': getAbsoluteUrl('assets/fonts/ProximaNova.woff2'),
         'baloo bhaijaan 2': getAbsoluteUrl('assets/fonts/BalooBhaijaan2.woff2'),
         'opendyslexic': getAbsoluteUrl('assets/fonts/OpenDyslexic.woff2'),
-        'atkinson hyperlegible': getAbsoluteUrl('assets/fonts/Atkinson-Hyperlegible.woff2')
+        'atkinson hyperlegible': getAbsoluteUrl('assets/fonts/Atkinson-Hyperlegible.woff2'),
+        'manrope': getAbsoluteUrl('assets/fonts/Manrope.woff2')
     };
     return _availableFonts;
 }
 
 export default class LibassWasmRenderer {
     /**
-     * Runtime capability check for WebAssembly support.
-     * Evaluates whether the current browser engine possesses WebAssembly support
-     * and is capable of compiling a basic WASM binary.
+     * =========================================================================
+     * WebAssembly Support Verification
+     * =========================================================================
+     * Runtime capability check for WebAssembly execution.
+     * Evaluates whether the underlying platform runtime has full WebAssembly
+     * execution support (present by default on Chromium 57+).
+     *
+     * Delegates to centralized platformInfo.hasWasmSupport detection.
      *
      * @returns {boolean} True if WebAssembly execution is supported.
      */
     static isSupported() {
-        try {
-            // Validate the presence of the global WebAssembly object and instantiate API
-            if (typeof WebAssembly === 'object' && typeof WebAssembly.instantiate === 'function') {
-                // Instantiate a minimal 8-byte WASM binary module to verify runtime compilation capability
-                const module = new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
-                if (module instanceof WebAssembly.Module) {
-                    return new WebAssembly.Instance(module) instanceof WebAssembly.Instance;
-                }
-            }
-        } catch (e) {
-            // Trapped execution or instantiation failure indicates lack of WebAssembly support
-        }
-        return false;
+        return platformInfo.hasWasmSupport;
     }
 
     /**
@@ -97,19 +101,29 @@ export default class LibassWasmRenderer {
         }
 
         this._container = container;
-        this._videoElement = video || null;
-        this._isVirtual = !video;
+        // Verify whether the passed element is an authentic HTMLVideoElement.
+        // Virtual backends (such as Android ExoPlayer proxy <div> or Tizen AVPlay)
+        // do not provide real media events or currentTime properties. They must operate
+        // in virtual/manual canvas mode with ticking driven by SubtitleManager.
+        const isRealVideo = Boolean(
+            video && (
+                video.tagName === 'VIDEO' ||
+                (typeof HTMLVideoElement !== 'undefined' && video instanceof HTMLVideoElement)
+            )
+        );
+        this._videoElement = isRealVideo ? video : null;
+        this._isVirtual = !isRealVideo;
         this._videoWidth = width || 1920;
         this._videoHeight = height || 1080;
         this._videoFrameRate = videoFrameRate || 24;
         this._getTime = typeof getTime === 'function' ? getTime : null;
         // AVPlay's getCurrentTime() leads the actual displayed frame by
-        // the hardware decode pipeline depth (~1-2 frames). Default 0.06s
-        // (60ms ~1.5 frames at 24fps) for AVPlay mode; override via
-        // constructor if tuning for a different device.
+        // the hardware decode pipeline depth (~1-2 frames). Only apply this 0.06s
+        // compensation when running specifically on Tizen AVPlay hardware.
+        const isAvplay = typeof window !== 'undefined' && Boolean(window.webapis?.avplay || window.tizen?.avplay);
         this._avplayLatency = typeof avplayLatency === 'number'
             ? Math.max(0, avplayLatency)
-            : (this._isVirtual ? 0.06 : 0);
+            : (isAvplay ? 0.06 : 0);
 
         this._fontFamily = null;
         this._fontClass = null;
@@ -128,11 +142,10 @@ export default class LibassWasmRenderer {
         this._octopus = null;
         this._wrapper = null;
         this._canvas = null;
+        this._videoObserver = null;
         this._delaySeconds = 0;
         this._lastTime = null;
         this._rawContent = null;
-        this._lastProcessedHash = null;
-        this._lastProcessedResult = null;
         this._lastProcessedHash = null;
         this._lastProcessedResult = null;
 
@@ -140,16 +153,10 @@ export default class LibassWasmRenderer {
         /* throttle: skip setCurrentTime if time moved < 20ms */
         this._MIN_TICK_DELTA = 0.020;
 
-        this._videoProxy = {
-            currentTime: 0,
-            paused: false,
-            playbackRate: 1.0
-        };
-
         this._onWindowResize = () => this._resizeRenderer();
 
         log.info('LibassWasmRenderer initialized' +
-            (this._isVirtual ? ' (AVPlay/Manual mode)' : ' (HTML5/Auto mode)'));
+            (this._isVirtual ? ' (Virtual/Manual Canvas mode)' : ' (HTML5/Auto mode)'));
     }
 
     /**
@@ -167,67 +174,119 @@ export default class LibassWasmRenderer {
     /**
      * Get the current playback time from the platform's native time source.
      * Priority: injected callback > AVPlay direct.
+     *
+     * AVPlay's getCurrentTime() reflects the hardware decode pipeline position,
+     * which leads the actual displayed frame by ~1-2 frames. We subtract the
+     * configured pipeline latency (default 60ms) so subtitles align with the
+     * on-screen image, clamping to 0 to prevent negative timestamps.
+     *
      * @returns {number} Current time in seconds, or -1 if unavailable.
      * @private
      */
     _getPlatformTime() {
+        // Evaluate injected time callback first if available
         if (typeof this._getTime === 'function') {
-            return this._getTime();
+            const injectedTime = this._getTime();
+            return typeof injectedTime === 'number' && !isNaN(injectedTime)
+                ? Math.max(0, injectedTime)
+                : -1;
         }
+
+        // Query native Tizen AVPlay API directly as fallback
         try {
             const avplay = window.webapis?.avplay || window.tizen?.avplay;
             if (avplay && typeof avplay.getCurrentTime === 'function') {
                 const timeMs = Number(avplay.getCurrentTime());
                 if (!isNaN(timeMs) && timeMs >= 0) {
-                    // AVPlay's getCurrentTime() reflects the decode pipeline
-                    // position, which is slightly ahead of the actual displayed
-                    // frame. Subtract the configured pipeline latency so
-                    // subtitles align with what's on screen.
-                    return (timeMs / 1000) - this._avplayLatency;
+                    // Compensate for hardware decode pipeline depth and prevent negative results
+                    return Math.max(0, (timeMs / 1000) - this._avplayLatency);
                 }
             }
-        } catch (e) {}
+        } catch (e) {
+            // AVPlay API query trapped; return unavailable sentinel
+        }
         return -1;
     }
 
     /**
-     * Replace the static proxy with a getter-based one so Octopus's internal
-     * oneshotRender() rAF loop reads the real AVPlay time on every frame.
+     * Drive subtitle rendering for the current timeline position.
+     * Invoked by SubtitleManager on each playback clock/timeupdate event.
      *
-     * This eliminates the need for a separate rAF loop — no duplicate frame
-     * work, no interpolation drift, and the time is always frame-accurate.
-     * @private
+     * @param {number} timeSeconds - Current media playback time in seconds
      */
-    _setupVirtualProxy() {
-        const self = this;
-        const oldCurrentTime = this._videoProxy.currentTime;
-        Object.defineProperty(this._videoProxy, 'currentTime', {
-            get() {
-                const t = self._getPlatformTime();
-                return t >= 0 ? t : oldCurrentTime;
-            },
-            configurable: true
-        });
-    }
-
     tick(timeSeconds) {
         this._lastTime = timeSeconds;
-        if (this._isVirtual && this._octopus) {
-            const offsetTime = timeSeconds - this._delaySeconds;
 
+        // Manual ticking only applies to virtual canvas mode (Tizen AVPlay)
+        if (this._isVirtual && this._octopus) {
+            // ================================================================
+            // Tizen 5.5 / Broken-WASM Safety Guard:
+            // SubtitlesOctopus's internal workerError handler calls dispose()
+            // which sets self.worker = null. If the worker crashed or was
+            // terminated while we still retain the instance reference, calling
+            // setCurrentTime() will throw "Cannot read property 'postMessage' of null".
+            // Detect this state early and null out our reference cleanly.
+            // ================================================================
+            if (this._octopus.worker === null) {
+                log.warn('SubtitlesOctopus worker appears terminated (worker=null); clearing stale reference');
+                this._octopus = null;
+                return;
+            }
+
+            // Apply subtitle delay offset and clamp to 0 (libass rejects negative timestamps)
+            const offsetTime = Math.max(0, timeSeconds - this._delaySeconds);
+
+            // Clear any pending seek flag on active tick
             if (this._seekPending) {
                 this._seekPending = false;
             }
 
-            // Gate: skip if the player tick time is close to the real AVPlay
-            // time already seen by Octopus's internal rAF loop. This avoids
-            // redundant setCurrentTime calls (the getter returns raw AVPlay
-            // time; delay is applied separately via offsetTime).
-            if (Math.abs(timeSeconds - this._videoProxy.currentTime) < this._MIN_TICK_DELTA) {
+            // ================================================================
+            // Deduplication Throttle Gate:
+            // Skip sending worker messages if playback time moved less than 20ms
+            // since the last render request. Eliminates redundant CPU/WASM paints
+            // when AVPlay dispatches rapid or bursty timeupdate events.
+            // ================================================================
+            if (this._lastSetTime !== undefined &&
+                Math.abs(offsetTime - this._lastSetTime) < this._MIN_TICK_DELTA) {
                 return;
             }
+            this._lastSetTime = offsetTime;
 
+            // Dispatch render timestamp directly to libass Web Worker
             this._octopus.setCurrentTime(offsetTime);
+        }
+    }
+
+    /**
+     * Resume subtitle rendering when playback begins or unpauses.
+     * Signals the SubtitlesOctopus WebAssembly worker to resume frame generation.
+     */
+    play() {
+        if (this._octopus && typeof this._octopus.setIsPaused === 'function') {
+            // Resolve the current media time to synchronize the worker's internal clock
+            const platformTime = this._getPlatformTime();
+            const rawTime = platformTime >= 0 ? platformTime : (this._lastTime || 0);
+            const syncTime = Math.max(0, rawTime - this._delaySeconds);
+
+            // Signal worker that media playback has resumed
+            this._octopus.setIsPaused(false, syncTime);
+        }
+    }
+
+    /**
+     * Pause subtitle rendering when video playback pauses.
+     * Stops background rendering cycles inside the worker to conserve TV CPU cycles.
+     */
+    pause() {
+        if (this._octopus && typeof this._octopus.setIsPaused === 'function') {
+            // Resolve the current media time for pause alignment
+            const platformTime = this._getPlatformTime();
+            const rawTime = platformTime >= 0 ? platformTime : (this._lastTime || 0);
+            const syncTime = Math.max(0, rawTime - this._delaySeconds);
+
+            // Signal worker that media playback is paused
+            this._octopus.setIsPaused(true, syncTime);
         }
     }
 
@@ -276,22 +335,78 @@ export default class LibassWasmRenderer {
 
             const fallbackFontUrl = availableFonts[targetFontFamily.toLowerCase()] || getAbsoluteUrl('assets/fonts/default.woff2');
 
-            const fonts = FontLoader.getContainerFontUrls();
+            // ================================================================
+            // Collect container-embedded fonts to pass to the SubtitlesOctopus worker.
+            //
+            // IMPORTANT: We use getContainerFontServerUrls() (HTTP URLs) rather than
+            // getContainerFontUrls() (blob: URLs). The worker fetches these files via
+            // XMLHttpRequest from inside the Web Worker thread. On Tizen 5.5 (Chrome 69),
+            // blob: URLs created in the main thread are NOT accessible from a Worker XHR
+            // — this was the cause of the "Worker error: {isTrusted:true}" crash.
+            // HTTP URLs (pointing to the Jellyfin server's font delivery endpoint) work
+            // correctly on all platforms including Tizen 5.5.
+            // ================================================================
+            const fonts = FontLoader.getContainerFontServerUrls();
             // Only add fallbackUrl to fonts if it is not already being used as the primary fallbackFont
             if (fallbackUrl && fallbackUrl !== fallbackFontUrl) {
                 fonts.push(fallbackUrl);
             }
-            log.info(`Initializing SubtitlesOctopus with ${fonts.length} font(s)`);
+            log.info(`Initializing SubtitlesOctopus with ${fonts.length} server font URL(s) (container fonts: ${fonts.length - (fallbackUrl && fallbackUrl !== fallbackFontUrl ? 1 : 0)})`);
+
 
             const dropAnimations = PlayerSettings.get('subtitleAssDropAnimations') === true;
             const prescaleFactor = parseFloat(PlayerSettings.get('subtitleAssPrescaleFactor')) || 0.8;
             const maxHeight = Math.min(2160, typeof screen !== 'undefined' ? (screen.height || 1080) : 1080);
 
+            // ================================================================
+            // onError callback: fired by SubtitlesOctopus's workerError handler
+            // when the web worker crashes internally (e.g. WASM init failure on
+            // Tizen 5.5). At that point octopus already calls dispose() which
+            // sets self.worker = null — but our _octopus reference stays alive.
+            // Hooking onError lets us proactively null it out so that the very
+            // next tick() call doesn't crash on worker.postMessage().
+            // ================================================================
+            const onOctopusError = (err) => {
+                log.error('SubtitlesOctopus worker error — renderer disabled for this track:', err);
+                // Null out our reference cleanly so subsequent ticks do not invoke dead worker
+                this._octopus = null;
+            };
+
+            // Callback fired once the SubtitlesOctopus worker thread is compiled and initialized
+            const onOctopusReady = () => {
+                log.info('SubtitlesOctopus WebAssembly worker is active and ready');
+
+                // Virtual canvas mode (Tizen AVPlay): render initial position immediately
+                if (this._isVirtual) {
+                    const currentTime = this._lastTime !== null ? this._lastTime : this._getPlatformTime();
+                    if (currentTime >= 0) {
+                        this.tick(currentTime);
+                    }
+                } else {
+                    if (this._octopus && typeof this._octopus.resetRenderAheadCache === 'function') {
+                        // ================================================================
+                        // HTML5 Video Mode (webOS / Desktop / Android):
+                        // When SubtitlesOctopus compiles with renderAhead > 0, the oneshot
+                        // prerender loop must be primed explicitly with resetRenderAheadCache(false).
+                        // This ensures the worker immediately pre-renders upcoming subtitle
+                        // events and oneshotRender begins tracking video.currentTime cleanly.
+                        // ================================================================
+                        this._octopus.resetRenderAheadCache(false);
+                    }
+                    // Recompute canvas position once worker and layout are primed
+                    this._repositionOctopusCanvas();
+                }
+            };
+
+            // Build SubtitlesOctopus initialization config matching official Jellyfin Smart-TV
             const options = {
-                video: this._videoElement,
+                // In virtual mode (Tizen AVPlay), omit video element so SubtitlesOctopus operates in pure canvas mode
+                video: this._isVirtual ? undefined : this._videoElement,
+                // In virtual mode, pass our pre-sized overlay canvas directly
                 canvas: this._isVirtual ? this._canvas : undefined,
                 subContent: processedContent,
-                timeOffset: -this._delaySeconds,
+                // Time offset is handled manually in tick() for virtual canvas mode
+                timeOffset: this._isVirtual ? 0 : -this._delaySeconds,
                 fonts: fonts,
                 workerUrl: getAbsoluteUrl('js/subtitles-octopus-worker.js'),
                 legacyWorkerUrl: getAbsoluteUrl('js/subtitles-octopus-worker-legacy.js'),
@@ -306,39 +421,84 @@ export default class LibassWasmRenderer {
                 prescaleHeightLimit: 1080,
                 maxRenderHeight: maxHeight,
                 resizeVariation: 0.2,
-                renderAhead: this._isVirtual ? 100 : 50
+                // Virtual: 0, tick() renders on demand. HTML5: 0 makes the worker clock snap back and flicker
+                renderAhead: this._isVirtual ? 0 : 50,
+                onReady: onOctopusReady,
+                onError: onOctopusError
             };
 
+            // Instantiate SubtitlesOctopus instance
             this._octopus = new SubtitlesOctopus(options);
 
-            if (this._isVirtual) {
-                this._setupVirtualProxy();
-                this._octopus.video = this._videoProxy;
-                log.info('Injected virtual video proxy into SubtitlesOctopus (AVPlay mode)');
-
-                // Start the oneshotRender rAF loop. Octopus only starts this
-                // loop inside resetRenderAheadCache(), which is called from
-                // setTrack()/setTrackByUrl(). Since we pass subContent in
-                // options instead of calling setTrack(), the loop never starts
-                // automatically — leaving subtitles jerky (~250ms updates from
-                // tick() only). This gives us 60fps per-frame time reads via
-                // the virtual proxy getter.
-                this._octopus.resetRenderAheadCache(false);
-            }
-
+            // Configure z-index and event pass-through if canvasParent was created (HTML5 video mode)
             if (!this._isVirtual && this._octopus.canvasParent) {
                 const isUltraLegacy = document.documentElement.getAttribute('data-layout-tier') === 'ultra-legacy';
-                this._octopus.canvasParent.style.zIndex = isUltraLegacy ? '50' : '1';
+                this._octopus.canvasParent.style.zIndex = isUltraLegacy ? '50' : '30';
                 this._octopus.canvasParent.style.pointerEvents = 'none';
+
+                // ================================================================
+                // Intercept SubtitlesOctopus resize() for Alignment Geometry:
+                // SubtitlesOctopus calculates canvas positioning relative to canvasParent:
+                //   top = videoSize.y - (canvasParent.top - video.top)
+                //   left = videoSize.x
+                //
+                // Notice that SubtitlesOctopus compensates for vertical offset
+                // between canvasParent and the video element, but completely
+                // omits horizontal offset: -(canvasParent.left - video.left).
+                //
+                // When WebOSPlayer._fitVideoBox() centers a 4:3 video inside a 16:9
+                // container via margin: auto; left: 0; right: 0; position: absolute,
+                // video.offsetWidth matches the 4:3 active picture, causing videoSize.x
+                // to equal 0. CanvasParent sits at container left (0px) while the video
+                // is horizontally centered (e.g. 168px). Without the horizontal offset,
+                // SubtitlesOctopus pins the canvas to left: 0px instead of 168px.
+                //
+                // Wrapping resize() guarantees our bounding rect correction runs
+                // synchronously whenever SubtitlesOctopus recalculates canvas bounds.
+                // ================================================================
+                const origResize = this._octopus.resize.bind(this._octopus);
+                this._octopus.resize = (width, height, top, left) => {
+                    origResize(width, height, top, left);
+                    this._repositionOctopusCanvas();
+                };
+
+                // Position canvas immediately
+                this._repositionOctopusCanvas();
+
+                // If metadata hasn't loaded yet, ensure canvas repositions once video dimensions arrive
+                if (this._videoElement) {
+                    if (this._videoElement.videoWidth === 0) {
+                        this._videoElement.addEventListener('loadedmetadata', () => {
+                            if (this._octopus) {
+                                this._repositionOctopusCanvas();
+                            }
+                        }, { once: true });
+                    }
+
+                    // Observe video element and player container for dynamic box fitting changes
+                    if (typeof ResizeObserver !== 'undefined' && !this._videoObserver) {
+                        this._videoObserver = new ResizeObserver(() => {
+                            this._repositionOctopusCanvas();
+                        });
+                        this._videoObserver.observe(this._videoElement);
+                        if (this._container) {
+                            this._videoObserver.observe(this._container);
+                        }
+                    }
+                }
             }
 
             this._updateWrapperStyles();
 
+            // Listen for window resize to maintain layout across screen/container changes
+            window.addEventListener('resize', this._onWindowResize);
+
             if (this._isVirtual) {
+                // Ensure canvas resolution and layout matches viewport
                 this._resizeRenderer();
-                window.addEventListener('resize', this._onWindowResize);
             }
 
+            // Immediately schedule initial subtitle paint if timestamp is known
             if (this._isVirtual && this._lastTime !== null) {
                 this.tick(this._lastTime);
             }
@@ -349,11 +509,20 @@ export default class LibassWasmRenderer {
         }
     }
 
+    /**
+     * Set playback subtitle delay offset in seconds.
+     * Positive delay shifts subtitles to display later in time.
+     *
+     * @param {number} seconds - Delay offset in seconds
+     */
     setDelay(seconds) {
         this._delaySeconds = seconds || 0;
-        if (this._octopus) {
+        // In HTML5 mode, Octopus handles timeOffset internally
+        if (this._octopus && !this._isVirtual) {
             this._octopus.timeOffset = -this._delaySeconds;
         }
+        // Invalidate tick deduplication cache so the next tick renders with updated delay
+        this._lastSetTime = undefined;
         log.debug(`SubtitlesOctopus delay set to ${seconds}s`);
     }
 
@@ -427,40 +596,57 @@ export default class LibassWasmRenderer {
         }
     }
 
+    /**
+     * Clear subtitle display from the canvas overlay immediately.
+     * Invoked during seek operations or when stopping playback.
+     */
     clear() {
-        if (!this._isVirtual) return;
-        // Immediately wipe the canvas so the user sees a blank frame
+        if (!this._isVirtual) {
+            // ================================================================
+            // HTML5 Video Mode Seek Clear:
+            // Flush prerender buffer queue and clear the canvas immediately so
+            // residual dialogue lines from the previous position do not flash on screen.
+            // ================================================================
+            if (this._octopus) {
+                if (typeof this._octopus.resetRenderAheadCache === 'function') {
+                    this._octopus.resetRenderAheadCache(false);
+                }
+                if (this._octopus.ctx && this._octopus.canvas) {
+                    this._octopus.ctx.clearRect(0, 0, this._octopus.canvas.width, this._octopus.canvas.height);
+                }
+            }
+            return;
+        }
+
+        // Wipe 2D canvas bitmap buffer so the user immediately sees a clean screen
         if (this._canvas) {
             const ctx = this._canvas.getContext('2d');
-            if (ctx) ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
-        }
-        // Flag the next tick() to reset the worker state cleanly instead of
-        // calling setCurrentTime(-1) which floods the worker and causes freezes.
-        this._seekPending = true;
-
-        // Break Octopus prerender deadlock: reset the render request flag and
-        // increment the iteration so stale in-flight worker responses are ignored.
-        // Without this, oneshotState.renderRequested stays true after seek and
-        // blocks all future prerender requests — subtitles never reappear.
-        if (this._octopus && this._octopus.oneshotState) {
-            this._octopus.oneshotState.renderRequested = false;
-            this._octopus.oneshotState.iteration++;
-            this._octopus.oneshotState.requestNextTimestamp = -1;
-            this._octopus.oneshotState.displayedEvent = null;
-            this._octopus.oneshotState.restart = true;
-            this._octopus.renderedItems = [];
-            this._octopus.lastRenderTime = -999999;
+            if (ctx) {
+                ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+            }
         }
 
-        log.info('SubtitlesOctopus canvas cleared (seek reset — prerender deadlock broken)');
+        // Invalidate tick deduplication cache so the post-seek tick renders immediately
+        this._lastSetTime = undefined;
+
+        log.info('SubtitlesOctopus canvas cleared');
     }
 
     destroy() {
         window.removeEventListener('resize', this._onWindowResize);
+        if (this._videoObserver) {
+            this._videoObserver.disconnect();
+            this._videoObserver = null;
+        }
         this._teardownOctopus();
         this._removeDOM();
     }
 
+    /**
+     * Set up DOM container wrapper and canvas element for virtual rendering mode.
+     * Creates a full-screen hardware-accelerated canvas overlay above the video plane.
+     * @private
+     */
     _setupDOM() {
         if (this._isVirtual) {
             if (!this._wrapper) {
@@ -474,20 +660,38 @@ export default class LibassWasmRenderer {
                 this._wrapper.style.height = '100%';
                 this._wrapper.style.pointerEvents = 'none';
 
+                // Ensure subtitle overlay sits above the AVPlay video plane and below OSD (50-100)
                 const isUltraLegacy = document.documentElement.getAttribute('data-layout-tier') === 'ultra-legacy';
-                this._wrapper.style.zIndex = isUltraLegacy ? '50' : '1';
+                this._wrapper.style.zIndex = isUltraLegacy ? '50' : '30';
 
                 this._container.appendChild(this._wrapper);
             }
+
+            // Restore display in case clearTrack() previously hid the wrapper
+            this._wrapper.style.display = '';
 
             if (this._canvas) {
                 log.info('Removing stale virtual canvas element before recreation');
                 this._canvas.remove();
             }
 
+            // Obtain target dimensions from container or viewport fallback upfront
+            const initialWidth = this._container.offsetWidth || window.innerWidth || this._videoWidth || 1920;
+            const initialHeight = this._container.offsetHeight || window.innerHeight || this._videoHeight || 1080;
+
             this._canvas = document.createElement('canvas');
+            this._canvas.className = 'libass-wasm-canvas';
+            // Explicitly set internal bitmap drawing dimensions before SubtitlesOctopus constructor reads them
+            this._canvas.width = initialWidth;
+            this._canvas.height = initialHeight;
+            // Layout styling: full coverage overlay
             this._canvas.style.position = 'absolute';
+            this._canvas.style.top = '0';
+            this._canvas.style.left = '0';
+            this._canvas.style.width = '100%';
+            this._canvas.style.height = '100%';
             this._canvas.style.pointerEvents = 'none';
+
             this._wrapper.appendChild(this._canvas);
         }
     }
@@ -502,58 +706,125 @@ export default class LibassWasmRenderer {
         }
     }
 
+    /**
+     * Terminate the SubtitlesOctopus Web Worker and release its memory.
+     * @private
+     */
     _teardownOctopus() {
+        if (this._videoObserver) {
+            this._videoObserver.disconnect();
+            this._videoObserver = null;
+        }
         if (this._octopus) {
             try {
-                if (this._isVirtual) {
-                    this._octopus.video = null;
+                // If the worker already self-disposed (e.g. internal workerError
+                // sets worker=null internally), skip dispose() to prevent an unhandled exception
+                if (this._octopus.worker !== null) {
+                    this._octopus.dispose();
                 }
-                this._octopus.dispose();
             } catch (err) {
                 log.warn('Error disposing SubtitlesOctopus instance:', err);
             }
             this._octopus = null;
         }
+        // Invalidate tick deduplication cache so the next track begins cleanly
+        this._lastSetTime = undefined;
     }
 
+    /**
+     * Synchronize canvas bitmap drawing buffer and notify SubtitlesOctopus
+     * worker of viewport or container resolution changes.
+     * @private
+     */
     _resizeRenderer() {
-        if (!this._canvas || !this._wrapper) return;
+        if (this._isVirtual) {
+            if (!this._canvas || !this._wrapper) return;
 
-        let videoWidth = this._videoWidth;
-        let videoHeight = this._videoHeight;
+            // Obtain target render dimensions from container or viewport
+            const containerWidth = this._container.offsetWidth || window.innerWidth || this._videoWidth || 1920;
+            const containerHeight = this._container.offsetHeight || window.innerHeight || this._videoHeight || 1080;
 
-        if (this._videoElement) {
-            videoWidth = this._videoElement.videoWidth || this._videoWidth;
-            videoHeight = this._videoElement.videoHeight || this._videoHeight;
+            // Keep bitmap buffer resolution synchronized
+            this._canvas.width = containerWidth;
+            this._canvas.height = containerHeight;
+            this._canvas.style.position = 'absolute';
+            this._canvas.style.top = '0';
+            this._canvas.style.left = '0';
+            this._canvas.style.width = '100%';
+            this._canvas.style.height = '100%';
+
+            // Notify SubtitlesOctopus worker of updated render target dimensions
+            if (this._octopus) {
+                log.info(`Resizing virtual worker canvas to ${containerWidth}x${containerHeight}`);
+                this._octopus.resize(containerWidth, containerHeight);
+            }
+        } else if (this._octopus) {
+            // In HTML5 video mode, trigger octopus resize and realign canvas overlay
+            this._octopus.resize();
+            this._repositionOctopusCanvas();
+        }
+    }
+
+    /**
+     * Correct SubtitlesOctopus canvas horizontal and vertical positioning.
+     *
+     * In HTML5 video mode, SubtitlesOctopus internally computes:
+     *   var offset = self.canvasParent.getBoundingClientRect().top - self.video.getBoundingClientRect().top;
+     *   top = videoSize.y - offset;
+     *   left = videoSize.x;
+     *
+     * SubtitlesOctopus compensates for the vertical offset between canvasParent
+     * and the <video> element, but completely omits the horizontal offset:
+     *   -(canvasParent.getBoundingClientRect().left - video.getBoundingClientRect().left).
+     *
+     * When WebOSPlayer (or letterbox styling) fits the <video> element to maintain
+     * aspect ratio (e.g. 4:3 content pillarboxed on a 16:9 screen via
+     * margin: auto; left: 0; right: 0; position: absolute;), video.offsetWidth
+     * already matches the active video width, causing videoSize.x to evaluate to 0.
+     *
+     * Because canvasParent is anchored at the left edge of the player container (0px)
+     * while the centered video starts at, e.g., 168px, SubtitlesOctopus places the
+     * canvas at left: 0px. This shifts all subtitle dialogue by the entire pillarbox
+     * width to the left side of the display.
+     *
+     * We calculate the true bounding box offset between the video and canvasParent,
+     * ensuring the subtitle canvas aligns pixel-perfect over the active video frame.
+     *
+     * @private
+     */
+    _repositionOctopusCanvas() {
+        if (this._isVirtual || !this._octopus || !this._octopus.canvas || !this._videoElement) {
+            return;
         }
 
-        if (!videoWidth || !videoHeight) {
-            videoWidth = 1280;
-            videoHeight = 720;
-        }
+        const canvas = this._octopus.canvas;
+        const canvasParent = this._octopus.canvasParent;
+        const video = this._videoElement;
 
-        const containerWidth = this._container.offsetWidth || videoWidth;
-        const containerHeight = this._container.offsetHeight || videoHeight;
+        if (!canvasParent) return;
 
-        const ratio = Math.min(
-            containerWidth / videoWidth,
-            containerHeight / videoHeight
-        );
+        // Skip repositioning if video dimensions are unavailable or element not in DOM
+        if (!video.videoWidth || !video.videoHeight) return;
 
-        const subsWidth = videoWidth * ratio;
-        const subsHeight = videoHeight * ratio;
-        const subsLeft = (containerWidth - subsWidth) / 2;
-        const subsTop = (containerHeight - subsHeight) / 2;
+        const videoRect = video.getBoundingClientRect();
+        const parentRect = canvasParent.getBoundingClientRect();
 
-        this._canvas.style.width = Math.round(subsWidth) + 'px';
-        this._canvas.style.height = Math.round(subsHeight) + 'px';
-        this._canvas.style.left = Math.round(subsLeft) + 'px';
-        this._canvas.style.top = Math.round(subsTop) + 'px';
+        // If either element hasn't been measured/rendered yet, skip
+        if (videoRect.width === 0 || videoRect.height === 0) return;
 
-        if (this._octopus) {
-            log.info(`Manual resize virtual worker canvas to ${Math.round(subsWidth)}x${Math.round(subsHeight)}`);
-            this._octopus.resize(Math.round(subsWidth), Math.round(subsHeight));
-        }
+        const videoSize = typeof this._octopus.getVideoPosition === 'function'
+            ? this._octopus.getVideoPosition()
+            : null;
+
+        const videoOffsetX = videoSize ? videoSize.x : 0;
+        const videoOffsetY = videoSize ? videoSize.y : 0;
+
+        // Compute exact coordinates of the active video frame relative to canvasParent
+        const targetLeft = Math.round(videoRect.left + videoOffsetX - parentRect.left);
+        const targetTop = Math.round(videoRect.top + videoOffsetY - parentRect.top);
+
+        canvas.style.left = `${targetLeft}px`;
+        canvas.style.top = `${targetTop}px`;
     }
 
     _updateWrapperStyles() {

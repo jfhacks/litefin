@@ -72,6 +72,8 @@ class LazyLoader {
             setTimeout(() => {
                 if (!this._isScrolling()) {
                     this._processPendingLoads();
+                    // Resume deferred BlurHash decoding once scrolling transitions settle
+                    this._processBlurHashQueue();
                 }
             }, 50);
         });
@@ -118,29 +120,41 @@ class LazyLoader {
                 // Calculates text overflow dynamically on card focus. If the inner
                 // span's scrollWidth exceeds the parent clientWidth, a scrolling
                 // keyframe animation is applied using HSL/CSS custom variables.
+                //
+                // PERFORMANCE NOTE:
+                // Reading scrollWidth and clientWidth immediately after focus class
+                // assignment forces an expensive synchronous layout reflow (50-100ms
+                // on TV hardware) right as the viewport needs to begin its smooth
+                // scroll. Deferring this check via requestAnimationFrame lets the layout
+                // settle cleanly without dropping animation frames.
                 // ----------------------------------------------------------------
                 if (storage.getItem('pref:loopOverflowingText') !== 'false') {
-                    const textElements = target.querySelectorAll('.card-title, .card-subtitle');
-                    textElements.forEach((el) => {
-                        const span = el.querySelector('span');
-                        if (!span) return;
+                    requestAnimationFrame(() => {
+                        // Guard against focus having already left the card
+                        if (!target || !target.classList.contains('focused')) return;
 
-                        const scrollW = span.scrollWidth;
-                        const clientW = el.clientWidth;
+                        const textElements = target.querySelectorAll('.card-title, .card-subtitle');
+                        textElements.forEach((el) => {
+                            const span = el.querySelector('span');
+                            if (!span) return;
 
-                        // Check if text exceeds horizontal boundaries of the card
-                        if (scrollW > clientW) {
-                            const scrollDist = scrollW - clientW;
-                            const extraSpacing = 30; // 30px visual buffer/margin before looping back
-                            const totalScroll = scrollDist + extraSpacing;
+                            const scrollW = span.scrollWidth;
+                            const clientW = el.clientWidth;
 
-                            // Adjust scrolling duration dynamically based on length (30px/sec speed)
-                            const duration = Math.max(3, totalScroll / 30);
+                            // Check if text exceeds horizontal boundaries of the card
+                            if (scrollW > clientW) {
+                                const scrollDist = scrollW - clientW;
+                                const extraSpacing = 30; // 30px visual buffer/margin before looping back
+                                const totalScroll = scrollDist + extraSpacing;
 
-                            el.style.setProperty('--scroll-dist', `-${totalScroll}px`);
-                            el.style.setProperty('--marquee-duration', `${duration}s`);
-                            el.classList.add('marquee-active');
-                        }
+                                // Adjust scrolling duration dynamically based on length (30px/sec speed)
+                                const duration = Math.max(3, totalScroll / 30);
+
+                                el.style.setProperty('--scroll-dist', `-${totalScroll}px`);
+                                el.style.setProperty('--marquee-duration', `${duration}s`);
+                                el.classList.add('marquee-active');
+                            }
+                        });
                     });
                 }
             }
@@ -302,6 +316,7 @@ class LazyLoader {
                 this._handleImageError(img);
             };
 
+            img.crossOrigin = 'anonymous';
             img.src = img.dataset.src;
         });
 
@@ -347,6 +362,7 @@ class LazyLoader {
             this._handleImageError(img);
         };
 
+        img.crossOrigin = 'anonymous';
         img.src = img.dataset.src;
 
         if (this.observer) {
@@ -364,6 +380,11 @@ class LazyLoader {
      * @private
      */
     _decodeAndDrawBlurhash(img) {
+        // Fast exit: if image is already cached or completed loading, skip BlurHash entirely
+        if (img.classList.contains('loaded') || (img.complete && img.naturalWidth > 0)) {
+            return;
+        }
+
         const parent = img.parentElement;
         if (!parent) return;
 
@@ -391,12 +412,33 @@ class LazyLoader {
         if (this._blurHashProcessing) return;
         if (this._blurHashQueue.length === 0) return;
 
+        // Defer BlurHash DCT computations while viewport scroll animations are active.
+        // This ensures full CPU budget is dedicated to 60fps compositor transitions.
+        if (this._isScrolling()) {
+            return;
+        }
+
         this._blurHashProcessing = true;
 
         const processBatch = () => {
+            // Re-check scrolling state before each animation frame batch
+            if (this._isScrolling()) {
+                this._blurHashProcessing = false;
+                return;
+            }
+
             const batch = this._blurHashQueue.splice(0, this._maxBlurhashPerFrame);
 
             for (const { canvas, blurHashStr } of batch) {
+                // Skip if canvas was detached or image has already arrived in the meantime
+                if (!canvas || !canvas.isConnected || canvas.classList.contains('fade-out')) {
+                    continue;
+                }
+                const parent = canvas.parentElement;
+                if (parent && parent.querySelector('img.loaded')) {
+                    continue;
+                }
+
                 // Decoded dimensions are kept extremely small (20x20)
                 const width = 20;
                 const height = 20;
@@ -439,14 +481,22 @@ class LazyLoader {
         img.style.display = 'none';
 
         const parent = img.parentElement;
+
+        // Hide chapter thumbnails completely if loading fails instead of injecting gradient fallback
+        if (parent && parent.classList.contains('chapter-row__thumb-wrap')) {
+            parent.classList.remove('skeleton-shimmer');
+            parent.style.display = 'none';
+            return;
+        }
+
         const isSupportedParent =
             parent &&
             (parent.classList.contains('card-image') ||
-                parent.classList.contains('chapter-row__thumb-wrap') ||
                 parent.classList.contains('queue-row__thumb-wrap'));
 
         if (isSupportedParent) {
-            const isModern = document.documentElement.getAttribute('data-layout-media-rows') === 'modern';
+            const mediaLayout = document.documentElement.getAttribute('data-layout-media-rows');
+            const isModernOrExpanded = mediaLayout === 'modern' || mediaLayout === 'expanded' || mediaLayout === 'modern-posters';
 
             parent.classList.remove('skeleton-shimmer');
 
@@ -459,12 +509,14 @@ class LazyLoader {
 
             if (gradNum && initials && name && !parent.querySelector('.media-fallback')) {
                 const hideInitials = img.dataset.fbHideInitials === 'true';
+                const isLibrary = parent.closest('.library-grid, .library-row, .library-content') !== null || parent.dataset?.contextType === 'library';
+                const showName = isLibrary || hideInitials || !isModernOrExpanded;
                 // dataset.* decodes the escaped attribute values back to raw
                 // strings — escape again before insertAdjacentHTML.
                 const fallbackHtml = `
                     <div class="media-fallback grad-${gradNum}">
                         ${!hideInitials ? `<div class="media-fallback-initials">${escapeHtml(initials)}</div>` : ''}
-                        ${!isModern ? `<div class="media-fallback-name">${escapeHtml(name)}</div>` : ''}
+                        ${showName ? `<div class="media-fallback-name">${escapeHtml(name)}</div>` : ''}
                     </div>
                 `;
                 parent.insertAdjacentHTML('afterbegin', fallbackHtml);
@@ -479,6 +531,16 @@ class LazyLoader {
      * @param {HTMLElement} img
      */
     forceLoad(img) {
+        if (!img) return;
+
+        // If scrolling or vertical navigation animation is active on screen,
+        // queue this load into pendingLoads to avoid competing with compositor frames,
+        // unless this card is currently focused (focus always gets instant image resolution).
+        if (this._isScrolling() && !img.closest('.media-card.focused')) {
+            this._pendingLoads.set(img, 'image');
+            return;
+        }
+
         this._loadImage(img);
     }
 
@@ -491,6 +553,25 @@ class LazyLoader {
      */
     _batchPreloadImages(startImg) {
         if (!startImg) return;
+
+        // If scrolling or vertical navigation animation is active on screen,
+        // defer batch preloading until motion settles cleanly to avoid competing
+        // with 60fps compositor animation frames on TV hardware.
+        if (this._isScrolling()) {
+            this._pendingPreloadTarget = startImg;
+            if (!this._scrollPreloadHandler) {
+                this._scrollPreloadHandler = () => {
+                    this._scrollPreloadHandler = null;
+                    const target = this._pendingPreloadTarget;
+                    this._pendingPreloadTarget = null;
+                    if (target && !this._isScrolling()) {
+                        this._batchPreloadImages(target);
+                    }
+                };
+                eventBus.once('scroll:finished', this._scrollPreloadHandler);
+            }
+            return;
+        }
 
         const currentCard = startImg.closest('.media-card');
         if (!currentCard) return;
@@ -513,7 +594,7 @@ class LazyLoader {
         //   columns forward — covers the row below for Down navigation.
         // ----------------------------------------------------------------
         const grid = currentCard.closest('#library-grid');
-        const columns = parseInt(grid?.dataset.gridColumns, 10) || 5;
+        const columns = parseInt(grid?.dataset.gridColumns, 10) || 7;
 
         // Phase 1: current row forward + 1 backward (immediate)
         let nextCard = currentCard.nextElementSibling;

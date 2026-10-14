@@ -20,6 +20,7 @@ import { cssVarsPolyfill } from '../utils/CssVarsPolyfill.js';
 import { themeUtils } from '../utils/ThemeUtils.js';
 
 import { debugOverlay } from './DebugOverlay.js';
+import CardRenderer from '../utils/CardRenderer.js';
 
 const log = logger.create('LayoutManager');
 
@@ -35,11 +36,12 @@ const THEME_MODES = {
     CLASSIC_LIGHT: 'classic-light',
     BLACK: 'black',
     TINTED: 'tinted',
+    TINTED_LIGHT: 'tinted-light',
     AMBIENT: 'ambient'
 };
 
-// Default Theme Color (Lavender)
-const DEFAULT_THEME_COLOR = '#af52de';
+// Default Theme Color (Litefin Purple Blue)
+const DEFAULT_THEME_COLOR = '#6b6ede';
 
 class LayoutManager {
     constructor() {
@@ -56,17 +58,32 @@ class LayoutManager {
         this._mediaRowsLayout = 'classic';
         this._loginPageLayout = 'classic';
         /*
-         * Active sidebar layout configuration (e.g., 'modern').
+         * Active sidebar layout configuration (e.g., 'modern-collapsed').
          * Controls structural presentation and styling of the primary navigation bar.
          */
-        this._sidebarLayout = 'modern';
+        this._sidebarLayout = 'modern-collapsed';
+
+        /*
+         * Active Alphabet Selector Position ('top' or 'right').
+         * Configures placement and orientation of the library alphabet quick-jump index:
+         * - 'top': Classic horizontal ribbon placed inside the library header row.
+         * - 'right': Sleek vertical floating pill docked to the right edge.
+         */
+        this._alphaPickerPosition = 'top';
 
         // Current theme mode
-        // Ambient Glow is now the default theme mode for a premium glassmorphic look.
-        this._themeMode = THEME_MODES.AMBIENT;
+        // Black (OLED) is the default — zero compositing, pure black pixels, maximum performance.
+        this._themeMode = THEME_MODES.BLACK;
 
         // Current theme color (HEX)
         this._themeColor = DEFAULT_THEME_COLOR;
+
+        /*
+         * Lighter background mode for Tinted and Classic themes.
+         * When enabled, swaps the primary canvas background with the alternate
+         * background shade for an elevated, higher-contrast luminous aesthetic.
+         */
+        this._lighterBackground = false;
 
         // Current font
         this._uiFont = 'default';
@@ -89,11 +106,22 @@ class LayoutManager {
         // Simple Loader: Lightweight rotating ring instead of pulsing dots
         this._simpleLoader = false;
 
+        /*
+         * Loading Indicator Visual Style
+         * Controls the visual presentation of loading spinners and activity indicators.
+         * Default: 'ring' (Rotating Ring) — lightest possible option for CPU/GPU overhead.
+         * Supported: 'dots', 'ring', 'dual-ring', 'orbit', 'satellite', etc.
+         */
+        this._loaderStyle = 'ring';
+
         // Disable BlurHash: Disables color-accurate blurred canvas rendering during image load
         this._disableBlurhash = false;
 
         // Only BlurHash Backdrop: Uses only decoded blurhash for details backdrop background without loading image
         this._onlyBlurHashBackdrop = false;
+
+        // Light Music Player: Removes blur and shadows from the music player for older TV performance
+        this._lightMusicPlayer = false;
 
         // Badge style: 'auto', 'tinted', 'dark'
         this._badgeStyle = 'auto';
@@ -116,6 +144,9 @@ class LayoutManager {
         // Sidebar selected icon color: 'grey', 'white', 'black', 'accent'
         this._sidebarSelectedColor = 'white';
 
+        // Sidebar logo icon color: 'icon-colors', 'follow-theme', 'white', 'black'
+        this._sidebarLogoColor = 'icon-colors';
+
         // OSD Custom Button & Focus Border styles (overrides global)
         this._osdButtonStyle = 'follow-global';
         this._osdFocusBorderStyle = 'follow-global';
@@ -134,9 +165,24 @@ class LayoutManager {
          */
         this._osdSeekBarProgressColor = 'theme-accent';
 
+        /*
+         * Customized contrast level for the hero carousel text vignette gradient.
+         * Controls dark shadow intensity behind titles from 'transparent' (0%) to '90%' (deep dark).
+         * Defaults to '50' (50% opacity) to provide optimal default text readability while revealing artwork.
+         */
+        this._heroVignette = '50';
+
         // Internal style element for dynamic variables
         this._dynamicStyleEl = null;
+
+        /*
+         * Global interface display scaling factor.
+         * Supports 'auto' (dynamically fits viewport to 1080p proportions) or manual float strings ('0.8', '0.9', etc.)
+         * Loaded eagerly from storage to be available immediately during early platform initialization.
+         */
+        this._displayScale = storage.getItem('pref:displayScale') || 'auto';
     }
+
 
     /**
      * Initialize layout manager
@@ -152,23 +198,34 @@ class LayoutManager {
         let savedLoginPageLayout = storage.getItem('pref:loginPageLayout');
         if (!savedLoginPageLayout) {
             const legacy = storage.getItem('pref:modernLoginPage') || storage.getItem('litefin:layout');
-            savedLoginPageLayout = legacy === 'true' || legacy === 'modern' ? 'modern' : 'classic';
+            // Hardware with c26 quirks (Chrome <32 / Tizen 2.4 ancient WebKit) defaults to classic login layout.
+            if (platformInfo.isAncientChrome) {
+                savedLoginPageLayout = 'classic';
+            } else {
+                savedLoginPageLayout = legacy === 'false' ? 'classic' : 'modern';
+            }
         }
 
         /*
-         * Load saved sidebar navigation layout preference.
-         * Ultra-legacy hardware (Chrome <47 / Tizen 2.x / c26 quirks) requires the classic sidebar layout.
-         * Modern/legacy tiers default cleanly to 'modern'.
+         * ---------------------------------------------------------------------
+         * SIDEBAR LAYOUT CONFIGURATION & DEFAULT SELECTION
+         * ---------------------------------------------------------------------
+         * Load saved sidebar navigation layout preference from persistent storage.
+         * Ultra-legacy hardware (Chrome <47 / Tizen 2.x / c26 quirks) defaults
+         * gracefully to the lightweight 'classic' sidebar layout for maximum
+         * performance and compatibility, but users can freely select other
+         * modern or floating layout modes in Settings.
+         * Modern and legacy tiers default to 'modern-collapsed'.
+         * ---------------------------------------------------------------------
          */
         const isUltraLegacy = platformInfo.layoutTier === 'ultra-legacy';
-        const savedSidebarLayout = isUltraLegacy
-            ? 'classic'
-            : storage.getItem('pref:sidebarLayoutMode') || 'modern';
+        const defaultSidebarLayout = isUltraLegacy ? 'classic' : 'modern-collapsed';
+        const savedSidebarLayout = storage.getItem('pref:sidebarLayoutMode') || defaultSidebarLayout;
 
         // Load saved theme mode
         const savedThemeMode = storage.getItem('litefin:themeMode');
-        // Default to Ambient theme mode if no user preference is stored.
-        let initialMode = THEME_MODES.AMBIENT;
+        // Default to Black (OLED) theme mode — zero compositing overhead, best for performance.
+        let initialMode = THEME_MODES.BLACK;
 
         if (savedThemeMode && Object.values(THEME_MODES).includes(savedThemeMode)) {
             initialMode = savedThemeMode;
@@ -177,6 +234,11 @@ class LayoutManager {
         log.info(`Loading theme: savedMode="${savedThemeMode}" -> initialMode="${initialMode}"`);
 
         const savedThemeColor = storage.getItem('litefin:themeColor') || this._themeColor;
+        /*
+         * Load saved lighter background preference (only applies to tinted and classic modes).
+         * Defaults to false (standard deep canvas background).
+         */
+        const savedLighterBackground = storage.getItem('litefin:lighterBackground') === 'true';
         const savedUiFont = storage.getItem('litefin:uiFont') || 'default';
         const savedRoundedCorners = storage.getItem('litefin:roundedCorners') !== 'false';
         const savedTextScale = parseFloat(storage.getItem('litefin:textScale') || '1.0');
@@ -184,10 +246,23 @@ class LayoutManager {
         const savedLowVram = storage.getItem('litefin:lowVramMode') === 'true';
         const savedDisableScaling = storage.getItem('litefin:disableCardScaling') === 'true';
         const savedSimpleLoader = storage.getItem('litefin:simpleLoader') === 'true';
+        /*
+         * Retrieve user preference for loading indicator animation aesthetic.
+         * If litefin:loaderStyle is not set, fallback seamlessly to legacy simpleLoader
+         * boolean preference ('ring' when true, otherwise 'dots').
+         * Default is 'ring' (Rotating Ring) — the most CPU/GPU-efficient option.
+         */
+        const savedLoaderStyle = storage.getItem('litefin:loaderStyle') || (savedSimpleLoader ? 'ring' : 'ring');
         const savedDisableBlurhash = storage.getItem('litefin:disableBlurhash') === 'true';
         const savedOnlyBlurHashBackdrop = storage.getItem('litefin:onlyBlurHashBackdrop') === 'true';
+        const savedLightMusicPlayer = storage.getItem('pref:lightMusicPlayer') === 'true';
         const savedBadgeStyle = storage.getItem('litefin:badgeStyle') || 'auto';
         const savedCardLabelScale = parseFloat(storage.getItem('pref:cardLabelScale') || '1.0');
+        /*
+         * Load saved interface display scale preference.
+         * Defaults to 'auto', which dynamically scales non-TV and browser viewports to 1080p canvas proportions.
+         */
+        const savedDisplayScale = storage.getItem('pref:displayScale') || 'auto';
 
         // Load user preferred button customization style
         const savedButtonStyle = storage.getItem('litefin:buttonStyle') || 'theme-default';
@@ -196,29 +271,43 @@ class LayoutManager {
         const savedHoverBorderStyle = storage.getItem('litefin:hoverBorderStyle') || 'white';
         const savedSidebarUnselectedColor = storage.getItem('litefin:sidebarUnselectedColor') || 'grey';
         const savedSidebarSelectedColor = storage.getItem('litefin:sidebarSelectedColor') || 'white';
+        const savedSidebarLogoColor = storage.getItem('litefin:sidebarLogoColor') || 'icon-colors';
         const savedOsdButtonStyle = storage.getItem('litefin:osdButtonStyle') || 'follow-global';
         const savedOsdFocusBorderStyle = storage.getItem('litefin:osdFocusBorderStyle') || 'follow-global';
         const savedOsdButtonShape = storage.getItem('litefin:osdButtonShape') || 'circle';
         const savedOsdUnfocusedButtonStyle = storage.getItem('litefin:osdUnfocusedButtonStyle') || 'icon-only';
         const savedOsdSeekBarThumbColor = storage.getItem('litefin:osdSeekBarThumbColor') || 'white';
         const savedOsdSeekBarProgressColor = storage.getItem('litefin:osdSeekBarProgressColor') || 'theme-accent';
+        const savedHeroVignette = storage.getItem('pref:heroCarouselVignette') || '70';
 
         this.setMediaRowsLayout(savedMediaRowsLayout, false);
         this.setLoginPageLayout(savedLoginPageLayout, false);
         // Initialize sidebar layout without triggering duplicate persistence
+        // Load user-selected alphabet quick-jump position ('top' or 'right')
+        const savedAlphaPickerPosition = storage.getItem('pref:alphaPickerPosition') || 'top';
+
         this.setSidebarLayout(savedSidebarLayout, false);
+        // Initialize alphabet selector position without re-persisting
+        this.setAlphaPickerPosition(savedAlphaPickerPosition, false);
         this.setThemeMode(initialMode, false);
         this.setThemeColor(savedThemeColor, false);
+        // Apply lighter background configuration without extra persistence cycle
+        this.setLighterBackground(savedLighterBackground, false);
         this.setUiFont(savedUiFont, false);
         this.setRoundedCorners(savedRoundedCorners, false);
         this.setTextScale(savedTextScale, false);
         this.setCardLabelScale(savedCardLabelScale, false);
+        // Apply saved display scale factor immediately without duplicate persistence write
+        this.setDisplayScale(savedDisplayScale, false);
 
         this.setLowVramMode(savedLowVram, false);
         this.setDisableCardScaling(savedDisableScaling, false);
-        this.setSimpleLoader(savedSimpleLoader, false);
+
+        // Apply loading indicator style and sync legacy simple loader flag
+        this.setLoaderStyle(savedLoaderStyle, false);
         this.setDisableBlurhash(savedDisableBlurhash, false);
         this.setOnlyBlurHashBackdrop(savedOnlyBlurHashBackdrop, false);
+        this.setLightMusicPlayer(savedLightMusicPlayer, false);
         this.setBadgeStyle(savedBadgeStyle, false);
 
         // Initial setup for the button styling scheme
@@ -228,12 +317,14 @@ class LayoutManager {
         this.setHoverBorderStyle(savedHoverBorderStyle, false);
         this.setSidebarUnselectedColor(savedSidebarUnselectedColor, false);
         this.setSidebarSelectedColor(savedSidebarSelectedColor, false);
+        this.setSidebarLogoColor(savedSidebarLogoColor, false);
         this.setOsdButtonStyle(savedOsdButtonStyle, false);
         this.setOsdFocusBorderStyle(savedOsdFocusBorderStyle, false);
         this.setOsdButtonShape(savedOsdButtonShape, false);
         this.setOsdUnfocusedButtonStyle(savedOsdUnfocusedButtonStyle, false);
         this.setOsdSeekBarThumbColor(savedOsdSeekBarThumbColor, false);
         this.setOsdSeekBarProgressColor(savedOsdSeekBarProgressColor, false);
+        this.setHeroVignette(savedHeroVignette, false);
 
         // Load saved card label style and stamp it on the root HTML element
         const savedCardLabelStyle = storage.getItem('pref:cardLabelStyle') || 'default';
@@ -248,8 +339,32 @@ class LayoutManager {
         document.documentElement.setAttribute('data-layout-tier', platformInfo.layoutTier);
         document.documentElement.setAttribute('data-platform', platformInfo.platformString);
 
+        // Apply dedicated rendering quirk class/attribute for devices on ancient layout engines
+        // (Chrome < 32) such as early LG WebOS 1.x and ancient Samsung Tizen 2.x firmware.
+        // This isolates structural layout workarounds (e.g. table-layout / floats / ancient display-box)
+        // from the standard ultra-legacy styling layers.
+        if (platformInfo.isAncientChrome) {
+            document.documentElement.setAttribute('data-layout-quirks', 'c26');
+        }
+
+        /*
+         * Setup dynamic resize & orientation change observers for display scaling.
+         * Recalculates viewport zoom factor whenever the window is resized or rotated
+         * to preserve layout proportions and responsive mobile UI across desktop, web, and mobile.
+         */
+        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+            const handleViewportChange = () => {
+                this._applyDisplayScale();
+            };
+            window.addEventListener('resize', handleViewportChange, { passive: true });
+            window.addEventListener('orientationchange', handleViewportChange, { passive: true });
+            if (window.screen?.orientation?.addEventListener) {
+                window.screen.orientation.addEventListener('change', handleViewportChange);
+            }
+        }
+
         log.info(
-            `Initialized: layout="${this._layout}", mode="${this._themeMode}", color="${this._themeColor}", font="${this._uiFont}", tier="${platformInfo.layoutTier}", platform="${platformInfo.platformString}"`
+            `Initialized: layout="${this._layout}", mode="${this._themeMode}", color="${this._themeColor}", font="${this._uiFont}", tier="${platformInfo.layoutTier}", platform="${platformInfo.platformString}", quirks="${platformInfo.isAncientChrome ? 'c26' : 'none'}"`
         );
     }
 
@@ -292,11 +407,14 @@ class LayoutManager {
         if (save) {
             storage.setItem('pref:mediaRowsLayout', layout);
         }
-        // Update badge style if it is auto
+        // Update badge style dynamically if set to auto
+        // Both 'modern' (expanding), 'expanded' (static widescreen), and 'modern-posters' media rows utilize
+        // dark translucent card backgrounds and bottom overlay labels, requiring the dark badge style.
         if (this._badgeStyle === 'auto') {
-            const resolvedStyle = layout === 'modern' ? 'dark' : 'tinted';
+            const resolvedStyle = (layout === 'modern' || layout === 'expanded' || layout === 'modern-posters' || layout === 'expanding') ? 'dark' : 'tinted';
             document.documentElement.setAttribute('data-badge-style', resolvedStyle);
         }
+        CardRenderer.clearCache();
         eventBus.emit('mediaRowsLayout:changed', { layout });
     }
 
@@ -314,6 +432,48 @@ class LayoutManager {
     }
 
     /**
+     * Get Alphabet Selector Position preference.
+     * Indicates whether the library quick-jump index renders horizontally
+     * in the header or vertically on the right edge.
+     *
+     * @returns {string} 'top' or 'right'
+     * @public
+     */
+    getAlphaPickerPosition() {
+        return this._alphaPickerPosition;
+    }
+
+    /**
+     * Set Alphabet Selector Position preference.
+     * Updates root HTML attribute and state to toggle between top horizontal
+     * and right vertical layouts.
+     *
+     * @param {string} position - 'top' or 'right'
+     * @param {boolean} [save=true] - Whether to persist to storage
+     * @public
+     */
+    setAlphaPickerPosition(position, save = true) {
+        // Enforce valid setting values with fallback to default 'top'
+        const validPosition = position === 'right' ? 'right' : 'top';
+        this._alphaPickerPosition = validPosition;
+
+        // Apply attribute on root html element for instant global CSS styling
+        document.documentElement.setAttribute('data-alpha-picker-position', validPosition);
+
+        // Update state manager for reactive components
+        state.set('pref:alphaPickerPosition', validPosition, true);
+
+        // Persist preference to local storage when requested
+        if (save) {
+            storage.setItem('pref:alphaPickerPosition', validPosition);
+        }
+
+        // Broadcast change event for active views like LibraryPage
+        log.info(`Alphabet Selector Position set to: ${validPosition}`);
+        eventBus.emit('alphaPickerPosition:changed', { position: validPosition });
+    }
+
+    /**
      * Returns the currently active sidebar navigation layout mode.
      * @returns {string} The active sidebar layout identifier (e.g. 'classic').
      */
@@ -324,17 +484,11 @@ class LayoutManager {
     /**
      * Sets and activates the sidebar layout mode across the entire UI.
      * Stamped onto <html> as data-layout-sidebar to power layout-scoped styling.
-     * Follows Apple HIG principles with clear visual hierarchy and instant feedback.
      *
-     * @param {string} layout - The target sidebar layout identifier ('classic', etc.)
+     * @param {string} layout - The target sidebar layout identifier ('classic', 'modern', etc.)
      * @param {boolean} [save=true] - Whether to persist this preference in storage
      */
     setSidebarLayout(layout, save = true) {
-        // Enforce classic layout on ultra-legacy tier to maintain c26 rendering quirks compatibility
-        if (platformInfo.layoutTier === 'ultra-legacy') {
-            layout = 'classic';
-        }
-
         // Record new layout state in memory
         this._sidebarLayout = layout;
 
@@ -352,13 +506,10 @@ class LayoutManager {
 
     /**
      * Checks if the sidebar is currently configured with the classic layout.
-     * Always returns true on ultra-legacy (Chrome <47 / Tizen 2.x / c26 quirks) hardware.
-     * @returns {boolean} True if sidebar layout is 'classic' or platform is ultra-legacy.
+     *
+     * @returns {boolean} True if sidebar layout is 'classic'.
      */
     isClassicSidebarLayout() {
-        if (platformInfo.layoutTier === 'ultra-legacy') {
-            return true;
-        }
         return this._sidebarLayout === 'classic';
     }
 
@@ -493,9 +644,21 @@ class LayoutManager {
             --jf-focus-border-color: ${accents.accent};`;
 
         // 1.5. Set Text Colors (Ensures ultra-legacy build always has stable text vars)
-        // Only inject base text colors if NOT tinted. Tinted mode handles its own
-        // transparent text colors in tinted.css, which we shouldn't override globally.
-        if (this._themeMode !== THEME_MODES.TINTED) {
+        if (this._themeMode === THEME_MODES.TINTED_LIGHT) {
+            /*
+             * Light Tinted mode applies warm cream / champagne typography tailored
+             * to harmonize with the elevated tinted background shade.
+             */
+            const tints = themeUtils.getTintedLightColors(this._themeColor);
+            dynamicCss += `
+            --jf-text-primary: ${tints.textPrimary};
+            --jf-text-secondary: ${tints.textSecondary};
+            --jf-text-tertiary: ${tints.textTertiary};
+            
+            --text-primary: var(--jf-text-primary);
+            --text-secondary: var(--jf-text-secondary);
+            --text-muted: var(--jf-text-secondary);`;
+        } else if (this._themeMode !== THEME_MODES.TINTED) {
             const isLight = this._themeMode === THEME_MODES.CLASSIC_LIGHT;
             dynamicCss += `
             --jf-text-primary: ${isLight ? '#101010' : '#ffffff'};
@@ -506,7 +669,7 @@ class LayoutManager {
             --text-secondary: var(--jf-text-secondary);
             --text-muted: var(--jf-text-secondary);`;
         } else {
-            // For tinted mode, just pass through the custom aliases
+            // For dark tinted mode, just pass through the custom aliases
             dynamicCss += `
             --text-primary: var(--jf-text-primary);
             --text-secondary: var(--jf-text-secondary);
@@ -514,20 +677,43 @@ class LayoutManager {
         }
 
         // 2. Apply background variables based on theme mode
-        if (this._themeMode === THEME_MODES.TINTED) {
-            const tints = themeUtils.getTintedColors(this._themeColor);
+        if (this._themeMode === THEME_MODES.TINTED_LIGHT) {
+            const tints = themeUtils.getTintedLightColors(this._themeColor);
+            /*
+             * Light Tinted theme provides an elevated, luminous background (~26% lightness)
+             * with crisp card elevation and rich tint characteristics (e.g., mocha/brown).
+             */
+            const bg = this._lighterBackground ? tints.backgroundAlt : tints.background;
+            const bgAlt = this._lighterBackground ? tints.background : tints.backgroundAlt;
             dynamicCss += `
-            --jf-background: ${tints.background};
-            --jf-background-alt: ${tints.backgroundAlt};
+            --jf-background: ${bg};
+            --jf-background-alt: ${bgAlt};
             --jf-surface: ${tints.surface};
             --jf-card-bg: ${tints.cardBg};
             --jf-card-bg-hover: ${tints.cardBgHover};
             --jf-divider: ${tints.divider};
-            --jf-navbar-bg: ${tints.background};`;
+            --jf-navbar-bg: ${bg};`;
+        } else if (this._themeMode === THEME_MODES.TINTED) {
+            const tints = themeUtils.getTintedColors(this._themeColor);
+            /*
+             * In Tinted mode, swapping background and background-alt provides
+             * a noticeably lighter canvas while keeping the deeper tint on complementary bars.
+             */
+            const bg = this._lighterBackground ? tints.backgroundAlt : tints.background;
+            const bgAlt = this._lighterBackground ? tints.background : tints.backgroundAlt;
+            dynamicCss += `
+            --jf-background: ${bg};
+            --jf-background-alt: ${bgAlt};
+            --jf-surface: ${tints.surface};
+            --jf-card-bg: ${tints.cardBg};
+            --jf-card-bg-hover: ${tints.cardBgHover};
+            --jf-divider: ${tints.divider};
+            --jf-navbar-bg: ${bg};`;
         } else if (this._themeMode === THEME_MODES.AMBIENT) {
             // Elegant, matte ultra-dark background.
             // A deeply saturated charcoal canvas serves as the foundation.
             // Translucent material cards absorb the dynamically-cast ambient gradients.
+            // Set sidebar background to transparent to ensure ambient glow bleeds through cleanly.
             dynamicCss += `
             --jf-background: #0a0b0c;
             --jf-background-alt: #070809;
@@ -546,17 +732,90 @@ class LayoutManager {
             --jf-divider: rgba(255, 255, 255, 0.05);
             --jf-navbar-bg: #000000;`;
         } else if (this._themeMode === THEME_MODES.CLASSIC_DARK) {
+            /*
+             * In Classic Dark mode, swaps #101010 and #151515 for a lighter charcoal base.
+             */
+            const bg = this._lighterBackground ? '#151515' : '#101010';
+            const bgAlt = this._lighterBackground ? '#101010' : '#151515';
             dynamicCss += `
-            --jf-background: #101010;
-            --jf-background-alt: #151515;
+            --jf-background: ${bg};
+            --jf-background-alt: ${bgAlt};
             --jf-surface: #1a1a1a;
             --jf-card-bg: #151515;
             --jf-card-bg-hover: #252525;
             --jf-divider: rgba(255, 255, 255, 0.08);
-            --jf-navbar-bg: #151515;`;
+            --jf-navbar-bg: ${this._lighterBackground ? '#101010' : '#151515'};`;
+        } else if (this._themeMode === THEME_MODES.CLASSIC_LIGHT) {
+            /*
+             * In Classic Light mode, swaps #fdfdfd and #f5f5f5 for softer contrast balance.
+             */
+            const bg = this._lighterBackground ? '#f5f5f5' : '#fdfdfd';
+            const bgAlt = this._lighterBackground ? '#fdfdfd' : '#f5f5f5';
+            dynamicCss += `
+            --jf-background: ${bg};
+            --jf-background-alt: ${bgAlt};
+            --jf-surface: #ffffff;
+            --jf-card-bg: #ffffff;
+            --jf-card-bg-hover: #fcfcfc;
+            --jf-divider: #eeeeee;
+            --jf-navbar-bg: ${this._lighterBackground ? '#fdfdfd' : 'rgba(255, 255, 255, 0.95)'};`;
         }
 
         dynamicCss += `\n        }`;
+
+        // ====================================================================
+        // ANCIENT WEBVIEW GRADIENT & COLOR OVERRIDES (CHROME < 32 / TIZEN 2.x)
+        // ====================================================================
+        // css-vars-ponyfill has severe performance and parsing limitations
+        // on ancient WebKit/Chromium engines when dealing with nested values,
+        // complex radial-gradients, and background-image assignments.
+        // We write static values and prefixed gradients directly to bypass it.
+        // ====================================================================
+        if (platformInfo.isAncientChrome) {
+            // Resolve the exact background color for the current theme mode
+            let resolvedBg = '#101010';
+            if (this._themeMode === THEME_MODES.TINTED_LIGHT) {
+                const tints = themeUtils.getTintedLightColors(this._themeColor);
+                resolvedBg = this._lighterBackground ? tints.backgroundAlt : tints.background;
+            } else if (this._themeMode === THEME_MODES.TINTED) {
+                const tints = themeUtils.getTintedColors(this._themeColor);
+                resolvedBg = this._lighterBackground ? tints.backgroundAlt : tints.background;
+            } else if (this._themeMode === THEME_MODES.AMBIENT) {
+                resolvedBg = '#0a0b0c';
+            } else if (this._themeMode === THEME_MODES.BLACK) {
+                resolvedBg = '#000000';
+            } else if (this._themeMode === THEME_MODES.CLASSIC_LIGHT) {
+                resolvedBg = this._lighterBackground ? '#f5f5f5' : '#fdfdfd';
+            } else if (this._themeMode === THEME_MODES.CLASSIC_DARK) {
+                resolvedBg = this._lighterBackground ? '#151515' : '#101010';
+            }
+
+            // Write static background-color rule directly to body
+            dynamicCss += `\n/* Direct theme overrides for Chrome < 32 */\n`;
+            dynamicCss += `html[data-layout-quirks="c26"] body {
+                background-color: ${resolvedBg} !important;
+            }\n`;
+
+            if (this._themeMode === THEME_MODES.AMBIENT) {
+                // Apply vendor-prefixed -webkit-radial-gradient using the calculated accent RGB values
+                // coordinates are mapped directly to match the modern CSS radial-gradient spots.
+                dynamicCss += `html[data-layout-quirks="c26"][data-theme-mode="ambient"] body {
+                    background-image: 
+                        -webkit-radial-gradient(85% 15%, circle, rgba(${accents.accentRgb}, 0.30) 0%, rgba(${accents.accentRgb}, 0.10) 35%, transparent 70%),
+                        -webkit-radial-gradient(15% 85%, circle, rgba(${accents.accentRgb}, 0.30) 0%, rgba(${accents.accentRgb}, 0.10) 35%, transparent 70%) !important;
+                    background-attachment: fixed !important;
+                    background-size: cover !important;
+                }
+                html[data-layout-quirks="c26"][data-theme-mode="ambient"] .page {
+                    background: transparent !important;
+                }\n`;
+            } else {
+                // Ensure dynamic gradients from other sessions are cleared
+                dynamicCss += `html[data-layout-quirks="c26"] body {
+                    background-image: none !important;
+                }\n`;
+            }
+        }
 
         // Create or update the dynamic style element
         if (!this._dynamicStyleEl) {
@@ -589,6 +848,42 @@ class LayoutManager {
         return this._themeColor;
     }
 
+    /**
+     * Returns whether the lighter background mode is active.
+     * @returns {boolean} True if lighter background swap is enabled.
+     */
+    getLighterBackground() {
+        return this._lighterBackground;
+    }
+
+    /**
+     * Sets and activates the lighter background mode across supported themes.
+     * Swaps the primary background with the alternate background and re-applies CSS vars.
+     *
+     * @param {boolean} enabled - Whether lighter background mode is active
+     * @param {boolean} [save=true] - Whether to persist this preference in storage
+     */
+    setLighterBackground(enabled, save = true) {
+        // Update in-memory state
+        this._lighterBackground = !!enabled;
+
+        // Stamp data attribute for optional CSS scoping
+        document.documentElement.setAttribute('data-lighter-background', this._lighterBackground ? 'true' : 'false');
+
+        // Persist preference to storage if requested
+        if (save) {
+            storage.setItem('litefin:lighterBackground', this._lighterBackground ? 'true' : 'false');
+        }
+
+        // Re-calculate and inject active theme stylesheet variables
+        this._applyDynamicTheme();
+
+        log.info(`Lighter background preference updated: ${this._lighterBackground}`);
+
+        // Notify UI listeners of state alteration
+        eventBus.emit('lighterBackground:changed', { enabled: this._lighterBackground });
+    }
+
     // Font and Rounded Corners helpers (Existing logic maintained)
     getUiFont() {
         return this._uiFont;
@@ -615,6 +910,10 @@ class LayoutManager {
         document.documentElement.setAttribute('data-rounded-corners', enabled ? 'true' : 'false');
         if (save) storage.setItem('litefin:roundedCorners', enabled ? 'true' : 'false');
         eventBus.emit('roundedCorners:changed', { enabled });
+        // Re-apply ponyfill so Chromium 47 legacy engines pick up updated border-radius variables
+        if (cssVarsPolyfill && typeof cssVarsPolyfill.update === 'function') {
+            cssVarsPolyfill.update();
+        }
     }
 
     getBadgeStyle() {
@@ -668,6 +967,241 @@ class LayoutManager {
 
     getCardLabelScale() {
         return this._cardLabelScale;
+    }
+
+    /**
+     * ========================================================================
+     * Display Scaling Engine
+     * ========================================================================
+     * Manages global viewport zoom scaling across web, desktop, and TV targets.
+     * Provides a hybrid mechanism:
+     * - 'auto': Dynamically fits canvas to standard 1080p (1920x1080) dimensions,
+     *   ensuring TV-grade proportions on smaller or desktop browser viewports.
+     * - manual: Explicit zoom factor (e.g. 0.75, 0.8, 0.9, 1.0, 1.1).
+     * ========================================================================
+     */
+
+    /**
+     * Retrieves the configured display scale mode ('auto', '0.75', '0.8', etc.)
+     * @returns {string} Configured display scale value
+     */
+    getDisplayScale() {
+        return this._displayScale;
+    }
+
+    /**
+     * Configures global interface display scaling and applies CSS zoom.
+     * @param {string|number} scale - Scale factor or 'auto' for responsive 1080p fit
+     * @param {boolean} [save=true] - Persist preference to persistent storage
+     */
+    setDisplayScale(scale, save = true) {
+        this._displayScale = String(scale);
+
+        if (save) {
+            storage.setItem('pref:displayScale', this._displayScale);
+        }
+
+        this._applyDisplayScale();
+        eventBus.emit('displayScale:changed', { scale: this._displayScale });
+    }
+
+    /**
+     * ========================================================================
+     * Display Scaling Engine (Unified Across Desktop, Mobile & TV)
+     * ========================================================================
+     * Computes and applies full-bleed CSS zoom scaling to the application canvas.
+     * Supports:
+     * 1. Mobile Portrait: 750px base design width scaled proportionally down to MIN_SCALE (0.15)
+     *    and multiplied by the user's Display Scale option. Stamping data-litefin-portrait
+     *    and data-litefin-scaled for mobile navigation and layout adaptations.
+     * 2. Mobile Landscape: 1600px base design width scaled proportionally and multiplied
+     *    by the user's Display Scale option.
+     * 3. Desktop / Web Wide: Fits 1080p canvas with auto scale or user manual scale factor.
+     * 4. Dedicated TV: 1:1 unscaled framebuffer by default or user manual scale factor.
+     *
+     * Counter-expands root and container bounds (--litefin-app-w and --litefin-app-h)
+     * so that fixed and backdrop elements span 100% of the viewport with zero letterboxing.
+     * @private
+     */
+    _applyDisplayScale() {
+        if (typeof document === 'undefined' || typeof window === 'undefined') return;
+
+        const root = document.documentElement;
+        const appEl = document.getElementById('app');
+        if (!root) return;
+
+        // Dedicated television environments run at fixed 1080p framebuffer
+        const isNativeTv =
+            platformInfo.isTizen ||
+            platformInfo.isWebOS ||
+            (platformInfo.isAndroid && Boolean(window.LitefinAndroid?.isTv?.()));
+
+        // Resolve user display scale multiplier from settings ('auto' => 1.0, '0.8' => 0.8, etc.)
+        const userMultiplier = this._displayScale === 'auto' ? 1.0 : (parseFloat(this._displayScale) || 1.0);
+
+        if (isNativeTv) {
+            // Television panels run natively at 1:1 scale unless user sets manual factor
+            const tvScale = userMultiplier;
+            if (Math.abs(tvScale - 1.0) < 0.02) {
+                root.style.removeProperty('zoom');
+                root.removeAttribute('data-display-scale');
+            } else {
+                root.style.setProperty('zoom', String(tvScale));
+                root.setAttribute('data-display-scale', '1');
+            }
+            root.removeAttribute('data-litefin-portrait');
+            root.removeAttribute('data-litefin-scaled');
+            root.style.removeProperty('--litefin-app-w');
+            root.style.removeProperty('--litefin-app-h');
+            if (appEl) {
+                appEl.style.removeProperty('width');
+                appEl.style.removeProperty('height');
+            }
+            return;
+        }
+
+        // Detect touch capability to stamp touch indicators across platforms
+        const hasTouch =
+            platformInfo.isAndroid ||
+            'ontouchstart' in window ||
+            (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
+        if (hasTouch) {
+            root.setAttribute('data-litefin-touch', '1');
+        }
+
+        const winW = window.innerWidth || 1920;
+        const winH = window.innerHeight || 1080;
+        const isPortrait = winH > winW;
+        const isAndroidMobile = platformInfo.isAndroid && !platformInfo.isAndroidTv;
+        const isNarrowViewport = winW <= 1000;
+        const isMobileMode = isAndroidMobile || isPortrait || isNarrowViewport;
+
+        const MIN_SCALE = 0.15;
+        const MAX_SCALE = 2.0;
+
+        if (isPortrait) {
+            // ================================================================
+            // 1. Mobile Portrait UI Scaling Mode
+            // ================================================================
+            // Stamp portrait marker attributes for mobile nav and vertical CSS layouts
+            const hadPortrait = root.hasAttribute('data-litefin-portrait');
+            root.setAttribute('data-litefin-portrait', '1');
+            root.setAttribute('data-litefin-scaled', '1');
+            if (!hadPortrait) {
+                eventBus.emit('viewport:orientationChange', { isPortrait: true });
+            }
+
+            const PORTRAIT_DESIGN_WIDTH = 750;
+            // Proportional base scale to fit 750px portrait layout into current window width
+            const baseScale = Math.min(1.0, Math.max(MIN_SCALE, winW / PORTRAIT_DESIGN_WIDTH));
+            // Apply user display scale multiplier from settings
+            const finalScale = Math.min(
+                MAX_SCALE,
+                Math.max(MIN_SCALE, Math.round(baseScale * userMultiplier * 1000) / 1000)
+            );
+
+            // Compute counter-expanded virtual bounds for full-bleed mobile display
+            const designW = `${Math.round(winW / finalScale)}px`;
+            const designH = `${Math.round(winH / finalScale)}px`;
+
+            root.style.setProperty('zoom', String(finalScale));
+            root.setAttribute('data-display-scale', '1');
+            root.style.setProperty('--litefin-app-w', designW);
+            root.style.setProperty('--litefin-app-h', designH);
+
+            if (appEl) {
+                appEl.style.width = designW;
+                appEl.style.height = designH;
+            }
+
+            log.debug(
+                `Portrait scale applied: final=${finalScale.toFixed(3)} (base=${baseScale.toFixed(3)} x user=${userMultiplier}) [${winW}x${winH}]`
+            );
+            return;
+        }
+
+        // Viewport is landscape: remove portrait marker if previously set
+        if (root.hasAttribute('data-litefin-portrait')) {
+            root.removeAttribute('data-litefin-portrait');
+            eventBus.emit('viewport:orientationChange', { isPortrait: false });
+        }
+
+        if (isMobileMode) {
+            // ================================================================
+            // 2. Mobile / Tablet Landscape UI Scaling Mode
+            // ================================================================
+            const LANDSCAPE_DESIGN_WIDTH = 1600;
+            // Base scale to fit landscape mobile canvas into physical width
+            const baseScale = Math.min(1.0, Math.max(MIN_SCALE, winW / LANDSCAPE_DESIGN_WIDTH));
+            // Multiply by user display scale preference
+            const finalScale = Math.min(
+                MAX_SCALE,
+                Math.max(MIN_SCALE, Math.round(baseScale * userMultiplier * 1000) / 1000)
+            );
+
+            if (finalScale >= 1.0 && this._displayScale === 'auto' && !isAndroidMobile) {
+                // Wide landscape screen at 100% scale
+                root.style.removeProperty('zoom');
+                root.removeAttribute('data-litefin-scaled');
+                root.removeAttribute('data-display-scale');
+                root.style.removeProperty('--litefin-app-w');
+                root.style.removeProperty('--litefin-app-h');
+                if (appEl) {
+                    appEl.style.removeProperty('width');
+                    appEl.style.removeProperty('height');
+                }
+            } else {
+                const designW = `${Math.round(winW / finalScale)}px`;
+                const designH = `${Math.round(winH / finalScale)}px`;
+
+                root.style.setProperty('zoom', String(finalScale));
+                root.setAttribute('data-litefin-scaled', '1');
+                root.setAttribute('data-display-scale', '1');
+                root.style.setProperty('--litefin-app-w', designW);
+                root.style.setProperty('--litefin-app-h', designH);
+
+                if (appEl) {
+                    appEl.style.width = designW;
+                    appEl.style.height = designH;
+                }
+            }
+
+            log.debug(
+                `Landscape mobile scale applied: final=${finalScale.toFixed(3)} (base=${baseScale.toFixed(3)} x user=${userMultiplier}) [${winW}x${winH}]`
+            );
+            return;
+        }
+
+        // ====================================================================
+        // 3. Desktop / Web Wide Layout Scaling Mode
+        // ====================================================================
+        root.removeAttribute('data-litefin-scaled');
+        root.style.removeProperty('--litefin-app-w');
+        root.style.removeProperty('--litefin-app-h');
+        if (appEl) {
+            appEl.style.removeProperty('width');
+            appEl.style.removeProperty('height');
+        }
+
+        let desktopEffectiveScale = 1.0;
+        if (this._displayScale === 'auto') {
+            const widthScale = winW / 1920;
+            const heightScale = winH / 1080;
+            const autoScale = Math.min(widthScale, heightScale);
+            desktopEffectiveScale = Math.min(1.0, Math.max(0.6, Math.round(autoScale * 100) / 100));
+        } else {
+            desktopEffectiveScale = userMultiplier;
+        }
+
+        if (Math.abs(desktopEffectiveScale - 1.0) < 0.02) {
+            root.style.removeProperty('zoom');
+            root.removeAttribute('data-display-scale');
+        } else {
+            root.style.setProperty('zoom', String(desktopEffectiveScale));
+            root.setAttribute('data-display-scale', '1');
+        }
+
+        log.info(`Desktop display scale applied: mode=${this._displayScale}, effective=${desktopEffectiveScale}`);
     }
 
     /**
@@ -801,6 +1335,24 @@ class LayoutManager {
         }
         log.info(`Sidebar selected color updated: ${color}`);
         eventBus.emit('sidebarSelectedColor:changed', { color });
+    }
+
+    getSidebarLogoColor() {
+        return this._sidebarLogoColor;
+    }
+
+    setSidebarLogoColor(color, save = true) {
+        if (!['icon-colors', 'follow-theme', 'white', 'black'].includes(color)) {
+            log.warn(`Invalid sidebar logo color specified: "${color}"`);
+            return;
+        }
+        this._sidebarLogoColor = color;
+        document.documentElement.setAttribute('data-sidebar-logo-color', color);
+        if (save) {
+            storage.setItem('litefin:sidebarLogoColor', color);
+        }
+        log.info(`Sidebar logo color updated: ${color}`);
+        eventBus.emit('sidebarLogoColor:changed', { color });
     }
 
     getOsdButtonStyle() {
@@ -992,29 +1544,93 @@ class LayoutManager {
     }
 
     /**
-     * Enable or disable Simple Loader
+     * Enable or disable Simple Loader (Legacy compatibility wrapper).
+     * Maps boolean state to loader visual style ('ring' vs 'dots').
+     *
      * @param {boolean} enabled
      * @param {boolean} [save=true]
      */
     setSimpleLoader(enabled, save = true) {
-        this._simpleLoader = enabled;
+        // Delegate directly to setLoaderStyle to preserve single source of truth
+        this.setLoaderStyle(enabled ? 'ring' : 'dots', save);
+    }
 
-        if (enabled) {
+    /**
+     * Retrieve simple loader boolean status for legacy consumers.
+     * @returns {boolean}
+     */
+    getSimpleLoader() {
+        return this._loaderStyle === 'ring';
+    }
+
+    /**
+     * Set loading indicator visual presentation style.
+     *
+     * @param {string} style - The identifier of the loader style ('dots' | 'ring')
+     * @param {boolean} [save=true] - Whether to persist choice to storage
+     */
+    setLoaderStyle(style, save = true) {
+        // Validate input against supported styles list with safe fallback to 'dots'
+        // Supported styles:
+        // - 'dots': Original dual pulsing dots
+        // - 'ring': Minimal rotating circular track
+        // - 'dual-ring': Concentric ring with accent outer arc
+        // - 'orbit': Translucent ring with traveling accent satellite bead
+        // - 'satellite': Inner accent ring with orbiting secondary ring
+        // - 'triple-ring': Multi-tiered concentric counter-rotating ring arcs
+        // - 'dotted-ring': Dual-tone alternating dashed/dotted spinning ring
+        // - 'eclipse-sweep': Inset crescent shadow sweep animation
+        // - 'sonar-ring': Rotating framed disc with opposing aperture arcs
+        // - 'push-pulse': Concentric dual-phase pulsing spheres
+        // - 'horizontal-dots': Trio of fading inline dots with wave progression
+        // - 'pulsing-grid': Dynamic 4-point rotating and morphing quadrant grid
+        const validStyle = [
+            'dots',
+            'ring',
+            'dual-ring',
+            'orbit',
+            'satellite',
+            'triple-ring',
+            'dotted-ring',
+            'eclipse-sweep',
+            'sonar-ring',
+            'push-pulse',
+            'horizontal-dots',
+            'pulsing-grid'
+        ].includes(style) ? style : 'dots';
+        this._loaderStyle = validStyle;
+
+        // Stamp active loader style attribute onto root element for scoped CSS targeting
+        document.documentElement.setAttribute('data-loader-style', validStyle);
+
+        // Keep backwards compatibility with legacy simpleLoader attribute & internal state
+        const isLegacyRing = validStyle === 'ring';
+        this._simpleLoader = isLegacyRing;
+        if (isLegacyRing) {
             document.documentElement.setAttribute('data-simple-loader', 'true');
         } else {
             document.documentElement.removeAttribute('data-simple-loader');
         }
 
+        // Persist preferences if save is requested
         if (save) {
-            storage.setItem('litefin:simpleLoader', enabled ? 'true' : 'false');
+            storage.setItem('litefin:loaderStyle', validStyle);
+            storage.setItem('litefin:simpleLoader', isLegacyRing ? 'true' : 'false');
         }
 
-        log.info(`Simple Loader set to: ${enabled}`);
-        eventBus.emit('simpleLoader:changed', { enabled });
+        log.info(`Loading indicator style set to: ${validStyle}`);
+
+        // Broadcast change events to subscribers
+        eventBus.emit('loaderStyle:changed', { style: validStyle });
+        eventBus.emit('simpleLoader:changed', { enabled: isLegacyRing });
     }
 
-    getSimpleLoader() {
-        return this._simpleLoader;
+    /**
+     * Retrieve the current loading indicator visual style.
+     * @returns {string}
+     */
+    getLoaderStyle() {
+        return this._loaderStyle;
     }
 
     /**
@@ -1089,6 +1705,161 @@ class LayoutManager {
      */
     getOnlyBlurHashBackdrop() {
         return this._onlyBlurHashBackdrop;
+    }
+
+    /**
+     * Set lightMusicPlayer setting.
+     * When enabled, disables blur and shadows in the music player for enhanced performance on older TVs.
+     *
+     * @param {boolean} enabled - True to disable blur and shadows in music player; false for full visuals.
+     * @param {boolean} [save=true] - Persist the preference locally.
+     * @public
+     */
+    setLightMusicPlayer(enabled, save = true) {
+        this._lightMusicPlayer = !!enabled;
+
+        // Apply attribute on root html element for instant global CSS styling
+        if (this._lightMusicPlayer) {
+            document.documentElement.setAttribute('data-light-music-player', 'true');
+        } else {
+            document.documentElement.removeAttribute('data-light-music-player');
+        }
+
+        // Persist preference in storage
+        if (save) {
+            storage.setItem('pref:lightMusicPlayer', this._lightMusicPlayer ? 'true' : 'false');
+        }
+
+        log.info(`Light Music Player set to: ${this._lightMusicPlayer}`);
+        eventBus.emit('lightMusicPlayer:changed', { enabled: this._lightMusicPlayer });
+    }
+
+    /**
+     * Get lightMusicPlayer setting value
+     *
+     * @returns {boolean}
+     * @public
+     */
+    getLightMusicPlayer() {
+        return this._lightMusicPlayer;
+    }
+
+    /**
+     * Get the current hero carousel text vignette contrast level
+     *
+     * @returns {string} e.g. 'transparent', '10', '20', ... '90'
+     * @public
+     */
+    getHeroVignette() {
+        return this._heroVignette;
+    }
+
+    /**
+     * Set and apply the hero carousel text vignette contrast level
+     *
+     * @param {string} value - 'transparent' or opacity percentage string ('10' - '90')
+     * @param {boolean} [save=true] - Persist the preference locally
+     * @public
+     */
+    setHeroVignette(value, save = true) {
+        /*
+         * Fallback to default '70' if value is missing or invalid.
+         * Default level 70 provides clean text contrast without overly dimming backdrop artwork.
+         */
+        this._heroVignette = value || '70';
+        document.documentElement.setAttribute('data-hero-vignette', this._heroVignette);
+
+        /*
+         * Trigger calculation of actual CSS variables on root style sheet
+         * so both standard and immersive theme variants receive immediate visual updates.
+         */
+        this._applyHeroVignetteVariables();
+
+        /*
+         * Persist preference locally if save flag is enabled
+         */
+        if (save) {
+            storage.setItem('pref:heroCarouselVignette', this._heroVignette);
+        }
+
+        /*
+         * Log state change and emit global event to notify active listeners
+         */
+        log.info(`Hero Carousel Vignette set to: ${this._heroVignette}`);
+        eventBus.emit('heroVignette:changed', { value: this._heroVignette });
+    }
+
+    /**
+     * Calculates and updates the CSS custom properties for the hero vignette gradient
+     * on the root element style sheet.
+     * @private
+     */
+    _applyHeroVignetteVariables() {
+        /*
+         * Default alpha values for level 70 
+         * Produces a clean ~0.72 start alpha and 0.40 mid-curve.
+         */
+        let startAlpha = 0.72;
+        let midAlpha = 0.40;
+        let endAlpha = 0.0;
+
+        /*
+         * Handle transparent / 0% explicit override case
+         */
+        if (this._heroVignette === 'transparent' || this._heroVignette === '0') {
+            startAlpha = 0;
+            midAlpha = 0;
+            endAlpha = 0;
+        } else {
+            /*
+             * Parse user configured percentage string (e.g. '10' through '90')
+             */
+            const parsed = parseFloat(this._heroVignette);
+            if (!isNaN(parsed)) {
+                /*
+                 * Calibrated perceptual curve:
+                 * On TV screens with bright HDR backdrops, linear 0.90 often looks washed out (like ~70%).
+                 * When set to 90%, we scale up to 0.96 for a rich, deep cinematic dark shadow behind titles.
+                 * When set to 70% (default), we map to 0.72 for clean text contrast without overpowering artwork.
+                 */
+                if (parsed >= 90) {
+                    startAlpha = 0.96;
+                    midAlpha = 0.65;
+                } else if (parsed >= 80) {
+                    startAlpha = 0.84;
+                    midAlpha = 0.52;
+                } else if (parsed >= 70) {
+                    startAlpha = 0.72;
+                    midAlpha = 0.40;
+                } else {
+                    /*
+                     * Proportional linear scaling for lower ranges (10% - 60%)
+                     */
+                    startAlpha = Math.min(Math.max(parsed / 100, 0), 0.70);
+                    midAlpha = parseFloat((startAlpha * 0.50).toFixed(3));
+                }
+                endAlpha = 0.0;
+            }
+        }
+
+        /*
+         * Format RGBA color values for CSS gradient custom properties
+         */
+        const startRgba = `rgba(0, 0, 0, ${startAlpha})`;
+        const midRgba = `rgba(0, 0, 0, ${midAlpha})`;
+        const endRgba = `rgba(0, 0, 0, ${endAlpha})`;
+
+        /*
+         * Apply custom properties directly on document element for immediate cascade
+         */
+        document.documentElement.style.setProperty('--hero-vignette-start', startRgba);
+        document.documentElement.style.setProperty('--hero-vignette-mid', midRgba);
+        document.documentElement.style.setProperty('--hero-vignette-end', endRgba);
+
+        // Notify polyfill for ultra-legacy webviews
+        if (cssVarsPolyfill && typeof cssVarsPolyfill.update === 'function') {
+            cssVarsPolyfill.update();
+        }
     }
 
     // Component registration (Existing logic maintained)

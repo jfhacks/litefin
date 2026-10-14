@@ -4,6 +4,104 @@
  * ============================================================================
  */
 
+/* ============================================================================
+ * Display Scale Viewport Normalization (Full-Bleed Desktop & Web Scaling)
+ * ============================================================================
+ * When display zoom scaling is active, ensures html, body, #app, and .page
+ * fill 100% of the screen width and height, replacing static 100vw/100vh
+ * viewport units so the layout stays 100% full-bleed with zero black borders.
+ * ============================================================================
+ */
+html[data-display-scale],
+html[data-display-scale] body {
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 100% !important;
+    max-height: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+}
+
+html[data-display-scale] #app {
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 100% !important;
+    max-height: 100% !important;
+    position: relative !important;
+    overflow: hidden !important;
+}
+
+html[data-display-scale] .page {
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 0 !important;
+}
+
+html[data-display-scale] .page-loading,
+html[data-display-scale] .splash-content,
+html[data-display-scale] .details-backdrop,
+html[data-display-scale] .trailer-player-overlay {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+/*
+ * Standardize Hero Carousel in scaled viewports.
+ * Uses 1080p canvas proportions so that global CSS zoom scales
+ * the carousel, row overlap, content padding, and indicators
+ * completely in lockstep with the card rows.
+ */
+html[data-display-scale] .hero-carousel-container.immersive .hero-carousel,
+html[data-display-scale] .hero-carousel-container.immersive.compact .hero-carousel {
+    height: var(--hero-carousel-height-immersive, 972px) !important;
+    min-height: 0 !important;
+}
+
+html[data-display-scale] .hero-carousel-container:not(.immersive):not(.banner) .hero-carousel {
+    height: var(--hero-carousel-height-semi, 756px) !important;
+    min-height: 0 !important;
+}
+
+html[data-display-scale] .hero-carousel-container:not(.immersive):not(.banner).compact .hero-carousel {
+    height: var(--hero-carousel-height-semi-compact, 540px) !important;
+    min-height: 0 !important;
+}
+
+html[data-display-scale] .hero-carousel-container.banner .hero-carousel {
+    height: var(--hero-carousel-height-banner, 648px) !important;
+    min-height: 0 !important;
+}
+
+html[data-display-scale] .hero-carousel-container.banner.compact .hero-carousel {
+    height: var(--hero-carousel-height-banner-compact, 432px) !important;
+    min-height: 0 !important;
+}
+
+html[data-display-scale] #home-hero-placeholder.style-immersive + .home-rows {
+    margin-top: var(--hero-carousel-overlap-immersive, -450px) !important;
+}
+
+html[data-display-scale] #home-hero-placeholder.style-immersive.style-compact + .home-rows {
+    margin-top: var(--hero-carousel-overlap-compact, -550px) !important;
+}
+
+html[data-display-scale] .hero-carousel-container.immersive .hero-item {
+    padding-bottom: var(--hero-carousel-padding-immersive, 470px) !important;
+}
+
+html[data-display-scale] .hero-carousel-container.immersive.compact .hero-item {
+    padding-bottom: var(--hero-carousel-padding-compact, 570px) !important;
+}
+
+html[data-display-scale] .hero-carousel-container.immersive .hero-indicators {
+    bottom: var(--hero-carousel-indicators-immersive, 430px) !important;
+}
+
+html[data-display-scale] .hero-carousel-container.immersive.compact .hero-indicators {
+    bottom: var(--hero-carousel-indicators-compact, 530px) !important;
+}
+
 .page {
     width: 100%;
     height: 100vh;
@@ -211,8 +309,8 @@ html[data-layout-tier="ultra-legacy"] .header-nav > *:last-child {
     display: block; 
     overflow: hidden; /* Hide scrollbars, disable native scrolling */
     
-    /* CRITICAL: Vertical padding prevents scaled focus cards from clipping */
-    padding: 32px 0 calc(32px * var(--card-title-font-scale, 1)); 
+    /* CRITICAL: Vertical padding prevents scaled focus cards and subtitles from clipping */
+    padding: 32px 0 calc(52px * var(--card-title-font-scale, 1)); 
     
     /* PERFORMANCE: Isolate horizontal rows */
     contain: layout paint style;
@@ -362,4 +460,27 @@ body.sidebar-mode-hidden #sidebar-container {
 
 body.sidebar-mode-hidden #page-container {
     left: 0;
+}
+
+
+/*
+ * ── Chrome 26 Quirks Overrides: Global Page Scroll Constraints ───────────────
+ * Forces the base .page container into a vertical 2009 box model, and sets 
+ * .page-content to box-flex: 1 with height: 0. This forces the browser to 
+ * subtract header heights and constrain the content panel's vertical height, 
+ * enabling standard internal scrolling (overflow-y: auto) on Chrome 26.
+ */
+html[data-layout-quirks="c26"] .page {
+    display: -webkit-box !important;
+    -webkit-box-orient: vertical !important;
+    width: 100% !important;
+    height: 100vh !important;
+    overflow: hidden !important;
+}
+
+html[data-layout-quirks="c26"] .page-content {
+    display: block !important;
+    -webkit-box-flex: 1 !important;
+    height: 0 !important; /* Constrains height to force overflow triggers */
+    overflow-y: auto !important;
 }

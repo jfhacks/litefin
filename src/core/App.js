@@ -15,6 +15,9 @@ import { auth } from '../api/index.js';
 import { webSocketHandler } from '../api/WebSocketHandler.js';
 import { tizenAdapter } from '../tizen/TizenAdapter.js';
 import { webosAdapter } from '../webos/WebOSAdapter.js';
+import { androidAdapter } from '../android/AndroidAdapter.js';
+import { desktopAdapter } from '../desktop/DesktopAdapter.js';
+import { webAdapter } from '../web/WebAdapter.js';
 import { platformInfo } from '../utils/PlatformInfo.js';
 import { layoutManager } from '../ui/LayoutManager.js';
 import { i18n } from '../utils/i18n.js';
@@ -40,7 +43,9 @@ import PlayerPage from '../pages/PlayerPage.js';
 import ProfilesPage from '../pages/ProfilesPage.js';
 import LiveTvPage from '../pages/LiveTvPage.js';
 import SlideshowPage from '../pages/SlideshowPage.js';
+import EmulatorPage from '../pages/EmulatorPage.js';
 import Sidebar from '../components/Sidebar.js';
+import MobileNav from '../components/MobileNav.js';
 
 import { logger } from '../utils/Logger.js';
 import { storage } from '../utils/StorageService.js';
@@ -53,6 +58,7 @@ import { cssVarsPolyfill } from '../utils/CssVarsPolyfill.js';
 import { versionChecker } from '../utils/VersionChecker.js';
 import { globalClock } from '../ui/GlobalClock.js';
 import { smartHubManager } from '../tizen/SmartHubManager.js';
+import { androidLauncherManager } from '../android/AndroidLauncherManager.js';
 import { remoteButtonManager } from './RemoteButtonManager.js';
 import { screensaverManager } from './ScreensaverManager.js';
 
@@ -92,11 +98,23 @@ class App {
         // 1.5. Initialize Platform Detection — saves OS type (Web, Tizen, WebOS)
         platformInfo.init();
 
-        // 1.6. Initialize platform adapters (hardware/keys)
-        if (platformInfo.isWebOS) {
-            webosAdapter.init();
-        } else {
+        // 1.6. Initialize platform adapters (hardware/keys/lifecycle)
+        // Dispatches to the strictly targeted adapter based on runtime environment:
+        // - Samsung Tizen Smart TVs -> TizenAdapter
+        // - LG WebOS Smart TVs -> WebOSAdapter
+        // - Android TV / Google TV / Android -> AndroidAdapter
+        // - Packaged Desktop App Shells (Tauri) -> DesktopAdapter
+        // - Standard Web Browsers -> WebAdapter
+        if (platformInfo.isTizen) {
             tizenAdapter.init();
+        } else if (platformInfo.isWebOS) {
+            webosAdapter.init();
+        } else if (platformInfo.isAndroid) {
+            androidAdapter.init();
+        } else if (platformInfo.isDesktop) {
+            desktopAdapter.init();
+        } else {
+            webAdapter.init();
         }
 
         // 1.7. Initialize Image Cache — opens IndexedDB for homepage blob caching
@@ -166,22 +184,28 @@ class App {
             });
         }
 
-        // 4.5. Initialize Smart Hub Preview (Tizen 4+ only — gracefully no-ops on older
-        //      hardware or other platforms. Must run after auth.init() so the manager can
-        //      read the restored auth state and start the refresh cycle immediately.)
+        // 4.5. Initialize Smart Hub Preview (Tizen 4+ only) and Android Launcher Integration
+        //      (Android TV Play Next / Channels & Mobile Launcher Shortcuts).
+        //      Must run after auth.init() so the managers can read the restored auth
+        //      state and start their refresh cycles immediately.
         if (platformInfo.isTizen) {
             smartHubManager.init();
+        } else if (platformInfo.isAndroid) {
+            androidLauncherManager.init();
         }
 
         // ====================================================================
         // 4.6. Plugin Manager Initialization
         // ====================================================================
         // Initialize Plugin Manager if a user session was successfully restored.
-        // However, if we have multiple cached user profiles or the active profile
-        // is protected by a PIN, the app will route the user to the "Who's Watching"
-        // selection screen. In that scenario, we must defer initialization until
+        // On TV platforms (Tizen, WebOS), if multiple cached profiles exist or
+        // the active profile is PIN-locked, startup routes to the "Who's Watching"
+        // selection screen. In that scenario, we defer initialization until
         // a profile is explicitly selected and unlocked, preventing unauthorized
         // background API requests from firing on the selection screen.
+        // On Web browsers, we smartly re-initialize immediately on refresh/boot
+        // (unless actively sitting on the profiles selector) so plugins like MDBList,
+        // SyncPlay, and SkipIntro remain fully operational across page reloads.
         if (state.get('user:authenticated')) {
             // Count of saved user profiles on the server
             const sessionCount = state.get('user:sessionCount', 0);
@@ -192,11 +216,30 @@ class App {
             // Verify if the active user profile has a local PIN lock enabled
             const activeHasPin = activeUserId ? pinManager.hasPin(activeUserId) : false;
 
-            // Defer if user needs to go through profiles selection or PIN verification
-            if (sessionCount > 1 || activeHasPin) {
+            // Check if "Remember Last Active User" preference is enabled
+            const rememberLastUser = storage.getItem('pref:rememberLastActiveUser') === 'true';
+
+            // Check if a one-time profile skip is armed (e.g., after user switch reload)
+            const skipProfilesOnce = storage.getItem('litefin:skip_profiles_once') === 'true';
+
+            // Check if running on standard web browser or desktop app vs smart TV environment
+            const isWeb = platformInfo.isWeb || platformInfo.isDesktop;
+
+            // Inspect the initial hash route to determine target page
+            const initialPath = window.location.hash.slice(1) || '/';
+            const isProfilesRoute = initialPath === '/profiles';
+
+            // Defer plugin initialization on TVs if we are routing to the profiles screen or PIN gate.
+            // On Web browsers, re-initialize immediately on refresh/boot (unless explicitly on the /profiles screen
+            // with multiple users or PIN) so plugins remain active across web page reloads.
+            const shouldDefer = isWeb
+                ? (isProfilesRoute && (sessionCount > 1 || activeHasPin))
+                : (((sessionCount > 1 && !rememberLastUser) || activeHasPin) && !skipProfilesOnce);
+
+            if (shouldDefer) {
                 log.info('Deferring plugin manager initialization: profiles screen or PIN gate is active');
             } else {
-                log.info('No profile switcher active: initializing plugin manager immediately');
+                log.info('No profile switcher active or running on web: initializing plugin manager immediately');
                 pluginManager
                     .init({
                         api,
@@ -269,6 +312,14 @@ class App {
         this.sidebar = new Sidebar();
         this.sidebar.mount(document.getElementById('sidebar-container'));
 
+        /*
+         * Initialize Mobile Portrait Navigation Bar & Top Bar.
+         * Mounts the responsive mobile navigation components into the application container.
+         * Activates specifically for mobile phones and tablets in portrait orientation.
+         */
+        this.mobileNav = new MobileNav();
+        this.mobileNav.mount(this.container);
+
         // Append trigger AFTER sidebar so we can use sibling selectors in CSS
         document
             .getElementById('sidebar-container')
@@ -296,6 +347,11 @@ class App {
             if (sidebar) {
                 sidebar.style.opacity = '';
                 sidebar.style.pointerEvents = '';
+            }
+
+            // Notify mobile navigation that splash screen has dropped
+            if (this.mobileNav) {
+                this.mobileNav.onSplashHidden();
             }
 
             // Remove the body class that blocks duplicate page-level spinners
@@ -342,11 +398,19 @@ class App {
         // showing the sidebar (which contains the active user's name) would be inconsistent.
         const fullScreenRoutes = ['/login', '/offline', '/profiles'];
         const isFullScreen =
-            fullScreenRoutes.includes(path) || path.startsWith('/player') || path.startsWith('/slideshow');
+            fullScreenRoutes.includes(path) || path.startsWith('/player') || path.startsWith('/slideshow') || path.startsWith('/emulator');
 
         if (isFullScreen) {
             document.body.classList.add('no-sidebar');
             this.sidebar.setMode('hidden');
+            /*
+             * Synchronize mobile navigation:
+             * On full-screen routes (such as video playback or user switcher),
+             * suppress both the top bar and the bottom navbar completely.
+             */
+            if (this.mobileNav) {
+                this.mobileNav.updateVisibility(path, true);
+            }
         } else {
             document.body.classList.remove('no-sidebar');
 
@@ -365,7 +429,19 @@ class App {
             }
 
             this.sidebar.setMode('visible');
+
+            /*
+             * Synchronize mobile navigation on standard routes:
+             * Shows the bottom navbar while evaluating top bar rules
+             * (hidden on Settings and Details pages).
+             */
+            if (this.mobileNav) {
+                this.mobileNav.updateVisibility(path, false);
+            }
         }
+
+        // Invalidate sidebar cache so FocusManager recognizes newly revealed/hidden items
+        focusManager.invalidateCache('sidebar');
     }
 
     /**
@@ -477,12 +553,45 @@ class App {
                     api.openWebSocket();
                 }
 
-                // Force a reload of the current view to fetch fresh data
-                // e.g., when the Tizen TV turns on from suspended sleep state.
-                // We skip reloading if the user is in the player to avoid interrupting playback.
+                // When returning from the background with multiple saved profiles,
+                // optionally show "Who's Watching" instead of restoring the previous user.
+                // This preference is independent of cold-start auto-login.
                 const currentPath = router.getCurrentPath?.() || '';
-                if (!currentPath.startsWith('/player')) {
-                    router.reload();
+                const sessionCount = state.get('user:sessionCount', 0);
+                const showProfilesOnResume = storage.getItem('pref:showProfilesOnResume') === 'true';
+
+                if (
+                    showProfilesOnResume &&
+                    state.get('user:authenticated') &&
+                    sessionCount > 1 &&
+                    currentPath !== '/profiles'
+                ) {
+                    log.info(`App resumed with ${sessionCount} profiles - showing profile selector`);
+                    if (currentPath.startsWith('/player')) {
+                        router.getCurrentPage()?.showResumeProfileSelector?.();
+                    } else {
+                        pluginManager.destroy();
+                        router.reset('/profiles');
+                    }
+                } else {
+                    /* =========================================================================
+                     * Optional Route Reload on Resume (Performance Preference)
+                     * =========================================================================
+                     * Enabled by default on TV platforms (Tizen and webOS) where backgrounding
+                     * or screen suspend can desynchronize WebSocket connections and stale DOM
+                     * data, but disabled by default on web/desktop to preserve in-memory
+                     * DOM elements, lazy-loaded datasets, and scroll positions without resets.
+                     * If the user manually toggles the setting, their stored preference is respected.
+                     * Media playback views (/player) are always spared to avoid interruptions.
+                     * ========================================================================= */
+                    const isTv = typeof platformInfo !== 'undefined' ? (platformInfo.isTizen || platformInfo.isWebOS) : true;
+                    const savedReload = storage.getItem('pref:reloadOnResume');
+                    const reloadOnResume = savedReload !== null ? savedReload === 'true' : isTv;
+
+                    if (reloadOnResume && !currentPath.startsWith('/player')) {
+                        log.info(`Reloading active route on resume per performance preference (platform TV: ${isTv})`);
+                        router.reload();
+                    }
                 }
             }
         });
@@ -565,10 +674,16 @@ class App {
                 // We DO NOT end the session on the server here.
                 // Calling /Sessions/Logout actively revokes the authentication token.
                 // The dashboard Offline status is handled automatically by the WebSocket dropping.
-                if (platformInfo.isWebOS) {
-                    webosAdapter.exit();
-                } else {
+                if (platformInfo.isTizen) {
                     tizenAdapter.exit();
+                } else if (platformInfo.isWebOS) {
+                    webosAdapter.exit();
+                } else if (platformInfo.isAndroid) {
+                    androidAdapter.exit();
+                } else if (platformInfo.isDesktop) {
+                    desktopAdapter.exit();
+                } else {
+                    webAdapter.exit();
                 }
             }
         });
@@ -594,19 +709,122 @@ class App {
 
                 let itemToPlay = item;
 
-                // If the requested item is a Folder/Container for audio (e.g., MusicAlbum, BoxSet without movies/episodes),
-                // the API cannot play it directly. We must resolve it to the first playable audio track.
-                if (item && ['MusicAlbum', 'MusicArtist', 'MusicGenre', 'Artist', 'Person'].includes(item.Type)) {
+                // ================================================================
+                // Audio Container Resolution (Albums, Artists, Genres, Playlists)
+                // ================================================================
+                // Containers cannot be played directly by the video/audio engine; they
+                // must resolve to their first constituent track. In Jellyfin:
+                // - MusicAlbum tracks are linked by AlbumId (not necessarily ParentId)
+                // - MusicArtist tracks are linked by ArtistIds
+                // - MusicGenre tracks are linked by GenreIds
+                // - Person tracks are linked by PersonIds/ArtistIds
+                // - Folders are linked by physical ParentId
+                if (item && ['MusicAlbum', 'MusicArtist', 'MusicGenre', 'Artist', 'Person', 'Folder'].includes(item.Type)) {
                     try {
-                        const tracks = await api.getItems({
-                            ParentId: item.Id,
-                            Recursive: true,
-                            IncludeItemTypes: 'Audio',
-                            Limit: 1,
-                            SortBy: 'SortName',
-                            SortOrder: 'Ascending'
-                        });
-                        if (tracks.Items && tracks.Items.length > 0) {
+                        let tracks = null;
+                        // For music albums and collections, sort by disc and track number first
+                        const albumTrackSort = 'ParentIndexNumber,IndexNumber,SortName';
+
+                        // Case 1: MusicAlbum container — primary query via AlbumIds
+                        if (item.Type === 'MusicAlbum') {
+                            tracks = await api.getItems({
+                                AlbumIds: item.Id,
+                                IncludeItemTypes: 'Audio',
+                                Limit: 1,
+                                SortBy: albumTrackSort,
+                                SortOrder: 'Ascending'
+                            });
+
+                            // Fallback to ParentId if virtual album mapping is empty
+                            if (!tracks?.Items?.length) {
+                                tracks = await api.getItems({
+                                    ParentId: item.Id,
+                                    Recursive: true,
+                                    IncludeItemTypes: 'Audio',
+                                    Limit: 1,
+                                    SortBy: albumTrackSort,
+                                    SortOrder: 'Ascending'
+                                });
+                            }
+                        }
+                        // Case 2: MusicArtist or Artist container — query via ArtistIds
+                        else if (item.Type === 'MusicArtist' || item.Type === 'Artist') {
+                            tracks = await api.getItems({
+                                ArtistIds: item.Id,
+                                IncludeItemTypes: 'Audio',
+                                Limit: 1,
+                                SortBy: albumTrackSort,
+                                SortOrder: 'Ascending'
+                            });
+
+                            // Fallback to ParentId if artist is folder-based
+                            if (!tracks?.Items?.length) {
+                                tracks = await api.getItems({
+                                    ParentId: item.Id,
+                                    Recursive: true,
+                                    IncludeItemTypes: 'Audio',
+                                    Limit: 1,
+                                    SortBy: 'SortName',
+                                    SortOrder: 'Ascending'
+                                });
+                            }
+                        }
+                        // Case 3: MusicGenre container — query via GenreIds
+                        else if (item.Type === 'MusicGenre') {
+                            tracks = await api.getItems({
+                                GenreIds: item.Id,
+                                IncludeItemTypes: 'Audio',
+                                Limit: 1,
+                                SortBy: albumTrackSort,
+                                SortOrder: 'Ascending'
+                            });
+
+                            // Fallback to ParentId
+                            if (!tracks?.Items?.length) {
+                                tracks = await api.getItems({
+                                    ParentId: item.Id,
+                                    Recursive: true,
+                                    IncludeItemTypes: 'Audio',
+                                    Limit: 1,
+                                    SortBy: 'SortName',
+                                    SortOrder: 'Ascending'
+                                });
+                            }
+                        }
+                        // Case 4: Person (contributor/performer) container — query via PersonIds or ArtistIds
+                        else if (item.Type === 'Person') {
+                            tracks = await api.getItems({
+                                PersonIds: item.Id,
+                                IncludeItemTypes: 'Audio',
+                                Limit: 1,
+                                SortBy: albumTrackSort,
+                                SortOrder: 'Ascending'
+                            });
+
+                            if (!tracks?.Items?.length) {
+                                tracks = await api.getItems({
+                                    ArtistIds: item.Id,
+                                    IncludeItemTypes: 'Audio',
+                                    Limit: 1,
+                                    SortBy: albumTrackSort,
+                                    SortOrder: 'Ascending'
+                                });
+                            }
+                        }
+                        // Case 5: Folder or generic directory container
+                        else {
+                            tracks = await api.getItems({
+                                ParentId: item.Id,
+                                Recursive: true,
+                                IncludeItemTypes: 'Audio',
+                                Limit: 1,
+                                SortBy: albumTrackSort,
+                                SortOrder: 'Ascending'
+                            });
+                        }
+
+                        // Verify that at least one playable audio track was resolved
+                        if (tracks?.Items && tracks.Items.length > 0) {
                             itemToPlay = tracks.Items[0];
                             itemToPlay.contextType = 'music';
                             itemToPlay.contextId = item.Id;
@@ -714,7 +932,13 @@ class App {
                     try {
                         let startPosition = 0;
                         if (resume && itemToPlay.UserData?.PlaybackPositionTicks) {
-                            startPosition = itemToPlay.UserData.PlaybackPositionTicks;
+                            /*
+                             * Apply configured resume rewind offset so that all group participants
+                             * start with the same contextual scene rewind when resuming.
+                             */
+                            startPosition = PlayerSettings.getAdjustedResumePositionTicks(
+                                itemToPlay.UserData.PlaybackPositionTicks
+                            );
                         }
                         await api.post('/SyncPlay/SetNewQueue', {
                             PlayingQueue: [itemToPlay.Id],
@@ -736,11 +960,16 @@ class App {
                 //
                 // For DetailsPage launches we still REPLACE to prevent history bloat.
                 //
-                // Standard web exception:
-                // We disable this optimization on standard web browsers to prevent breaking
-                // the browser's native back button behavior and page reload flow.
+                // Web and Android Mobile exception:
+                // On standard web browsers and Android mobile devices, we do NOT replace
+                // the Details page so that the system / browser back stack remains intact.
+                //
+                // Desktop and TV platforms (Tizen, webOS, Android TV):
+                // We REPLACE the Details page when entering the player to prevent
+                // navigation history stack bloat and avoid redundant detail page instances.
+                const isWebOrMobile = platformInfo.isWeb || (platformInfo.isAndroid && !platformInfo.isAndroidTv);
                 const isFromLiveTv = currentPath.startsWith('/livetv');
-                const shouldReplace = !fromSlideshow && !fromBrowse && !isFromLiveTv && !platformInfo.isWeb;
+                const shouldReplace = !fromSlideshow && !fromBrowse && !isFromLiveTv && !isWebOrMobile;
 
                 router.navigate(`/player/${itemToPlay.Id}/${resumeParam}${queryParam}`, {
                     replace: shouldReplace
@@ -872,6 +1101,7 @@ class App {
         router.register('/offline', OfflinePage);
         router.register('/slideshow/:photoId', SlideshowPage);
         router.register('/player/:id/:resume', PlayerPage); // Video player page
+        router.register('/emulator/:id', EmulatorPage); // JellyEmu game player page
 
         // Season redirect (for backward compatibility or deep links)
         router.register('/series/:id/season/:seasonId', {

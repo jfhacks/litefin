@@ -1,0 +1,296 @@
+# ==============================================================================
+# Litefin Multi-Platform Tauri Release Workflow
+# ==============================================================================
+# Builds and publishes native Desktop (Windows, Linux, macOS) and Mobile (Android)
+# binaries utilizing Tauri v2, Cargo, and Gradle toolchains.
+#
+# Platforms & Packages Built:
+# - Android: Lean ABI-split APKs (arm64, arm, x86, x86_64) and Universal APK
+# - Windows: Standalone portable executable (.exe), NSIS installer, and MSI package
+# - Linux:   Standalone executable, Debian package (.deb), and portable AppImage
+# - macOS:   Standalone executable and Apple Disk Image (.dmg)
+#
+# Triggers:
+# - release:           Runs when a new release is published in GitHub.
+# - push (tags):       Runs whenever a version tag starting with 'v*' is pushed.
+# - workflow_dispatch: Allows on-demand manual packaging with an optional target tag.
+# ==============================================================================
+
+name: Tauri Release (Desktop & Android)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Target release tag to attach binaries to (leave empty for current ref/tag)'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  # ============================================================================
+  # Job 1: Desktop Compilation Matrix (Windows, Linux, macOS)
+  # ============================================================================
+  build-desktop:
+    name: Desktop (${{ matrix.platform.name }})
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: Windows
+            os: windows-latest
+            script: npm run package:windows
+            artifacts: |
+              Litefin-*.exe
+              Litefin_*_setup.exe
+              Litefin_*.msi
+
+          - name: Linux
+            os: ubuntu-latest
+            script: npm run package:linux
+            artifacts: |
+              *.deb
+              *.AppImage
+              *.rpm
+
+          - name: macOS
+            os: macos-latest
+            script: npm run package:macos
+            artifacts: |
+              *.dmg
+
+    steps:
+      # ------------------------------------------------------------------------
+      # Step 1: Check out the repository source code at the target ref
+      # ------------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag_name || github.ref }}
+          fetch-depth: 0
+
+      # ------------------------------------------------------------------------
+      # Step 2: Configure Node.js runtime and cache npm dependencies
+      # ------------------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ------------------------------------------------------------------------
+      # Step 3: Configure stable Rust toolchain for Tauri compilation
+      # ------------------------------------------------------------------------
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # ------------------------------------------------------------------------
+      # Step 4: Cache Rust dependencies and target directory for faster builds
+      # ------------------------------------------------------------------------
+      - name: Cache Rust Build Artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # ------------------------------------------------------------------------
+      # Step 5: Install native Linux WebKit and GUI dependencies
+      # ------------------------------------------------------------------------
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            build-essential \
+            curl
+          # Accommodate package name differences across Ubuntu releases
+          sudo apt-get install -y libayatana-appindicator3-dev || sudo apt-get install -y libappindicator3-dev
+
+      # ------------------------------------------------------------------------
+      # Step 6: Install workspace npm dependencies
+      # ------------------------------------------------------------------------
+      - name: Install project dependencies
+        run: npm install
+
+      # ------------------------------------------------------------------------
+      # Step 7: Build bundle and package desktop binary
+      # (move-tauri-artifacts automatically brings outputs up to the root folder)
+      # ------------------------------------------------------------------------
+      - name: Compile and Package Desktop Binary
+        run: ${{ matrix.platform.script }}
+
+      # ------------------------------------------------------------------------
+      # Step 8: Attach compiled desktop binaries to GitHub Release
+      # ------------------------------------------------------------------------
+      - name: Upload Binaries to GitHub Release
+        if: (github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || inputs.tag_name != '') && !cancelled()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || inputs.tag_name || github.ref_name }}
+          files: ${{ matrix.platform.artifacts }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ------------------------------------------------------------------------
+      # Step 9: Save workflow artifacts for manual branch / pull-request runs
+      # ------------------------------------------------------------------------
+      - name: Upload Artifacts (Manual / Non-Release Run)
+        if: github.event_name == 'workflow_dispatch' && inputs.tag_name == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: litefin-${{ matrix.platform.name }}
+          path: ${{ matrix.platform.artifacts }}
+
+  # ============================================================================
+  # Job 2: Android Multi-Architecture Build (Split ABIs & Universal)
+  # ============================================================================
+  build-android:
+    name: Android (Split & Universal APKs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      # ------------------------------------------------------------------------
+      # Step 1: Check out the repository source code at the target ref
+      # ------------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag_name || github.ref }}
+          fetch-depth: 0
+
+      # ------------------------------------------------------------------------
+      # Step 2: Configure Node.js runtime and cache npm dependencies
+      # ------------------------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ------------------------------------------------------------------------
+      # Step 3: Setup Java JDK 17 (required for Gradle and Android build tools)
+      # ------------------------------------------------------------------------
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # ------------------------------------------------------------------------
+      # Step 4: Configure Android SDK and NDK environment variables
+      # ------------------------------------------------------------------------
+      # GitHub ubuntu-latest runners come with the Android SDK pre-installed at
+      # /usr/local/lib/android/sdk with build-tools, platforms, and NDKs.
+      # We automatically configure environment paths and locate the NDK.
+      # ------------------------------------------------------------------------
+      - name: Setup Android SDK and NDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          
+          # Detect the highest installed NDK version in the pre-installed SDK
+          if [ -d "$ANDROID_HOME/ndk" ]; then
+            ANDROID_NDK_ROOT=$(find "$ANDROID_HOME/ndk" -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)
+          fi
+          
+          # If no NDK exists, install modern LTS NDK via cmdline-tools sdkmanager
+          if [ -z "$ANDROID_NDK_ROOT" ] || [ ! -d "$ANDROID_NDK_ROOT" ]; then
+            echo "Installing NDK via sdkmanager..."
+            yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;26.3.11579264"
+            ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/26.3.11579264"
+          fi
+          
+          echo "Using Android NDK: $ANDROID_NDK_ROOT"
+          echo "NDK_HOME=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
+          
+          # Accept Android SDK licenses
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+
+      # ------------------------------------------------------------------------
+      # Step 6: Setup Rust toolchain with all Android target cross-compilers
+      # ------------------------------------------------------------------------
+      - name: Setup Rust with Android Targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      # ------------------------------------------------------------------------
+      # Step 7: Cache Rust target directories for fast incremental cross-builds
+      # ------------------------------------------------------------------------
+      - name: Cache Rust Build Artifacts
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # ------------------------------------------------------------------------
+      # Step 8: Install workspace npm dependencies
+      # ------------------------------------------------------------------------
+      - name: Install project dependencies
+        run: npm install
+
+      # ------------------------------------------------------------------------
+      # Step 9: Release Keystore Configuration (if secrets provided)
+      # ------------------------------------------------------------------------
+      - name: Configure Android Signing Keystore
+        if: env.KEYSTORE_BASE64 != ''
+        run: |
+          echo "Decoding release signing keystore..."
+          echo "$KEYSTORE_BASE64" | base64 -d > src-tauri/gen/android/New_Keystore.jks
+          cat <<EOF > src-tauri/gen/android/keystore.properties
+          storePassword=${{ secrets.ANDROID_STORE_PASSWORD }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          storeFile=New_Keystore.jks
+          EOF
+          echo "Signing configuration generated successfully."
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
+      # ------------------------------------------------------------------------
+      # Step 10: Build Android Split-Per-ABI APKs (arm, arm64, x86, x86_64)
+      # ------------------------------------------------------------------------
+      - name: Build Android Split APKs
+        run: npm run package:android
+
+      # ------------------------------------------------------------------------
+      # Step 11: Build Android Universal All-in-One APK
+      # ------------------------------------------------------------------------
+      - name: Build Android Universal APK
+        run: npm run package:android-universal
+
+      # ------------------------------------------------------------------------
+      # Step 12: Attach compiled Android APK packages to GitHub Release
+      # ------------------------------------------------------------------------
+      - name: Upload Android APKs to GitHub Release
+        if: (github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || inputs.tag_name != '') && !cancelled()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || inputs.tag_name || github.ref_name }}
+          files: Litefin-*-Android-*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ------------------------------------------------------------------------
+      # Step 13: Save workflow artifacts for manual branch / pull-request runs
+      # ------------------------------------------------------------------------
+      - name: Upload Android Artifacts (Manual / Non-Release Run)
+        if: github.event_name == 'workflow_dispatch' && inputs.tag_name == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: litefin-android-apks
+          path: Litefin-*-Android-*.apk

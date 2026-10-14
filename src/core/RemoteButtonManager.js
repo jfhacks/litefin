@@ -172,6 +172,25 @@ class RemoteButtonManager {
                 this._handlePlayerAction('nextChapter');
                 break;
 
+            case 'playerShowOsd':
+                /*
+                 * ====================================================================
+                 * ACTION: REVEAL PLAYER CONTROLS / OSD
+                 * ====================================================================
+                 * If video playback is currently active, this reveals the player OSD
+                 * and brings focus to the Play/Pause button immediately.
+                 * ====================================================================
+                 */
+                log.info('Player Show OSD Mapped: Revealing player controls.');
+                if (this._isPlayerActive()) {
+                    const osd = this._getPlayerOsd();
+                    if (osd) {
+                        osd.show();
+                        osd.showAndFocusPlayPause();
+                    }
+                }
+                break;
+
             case 'sendWol':
                 /*
                  * ====================================================================

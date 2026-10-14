@@ -2,6 +2,9 @@ import { focusManager } from './FocusManager.js';
 import { i18n } from '../utils/i18n.js';
 import { tizenAdapter } from '../tizen/TizenAdapter.js';
 import { webosAdapter } from '../webos/WebOSAdapter.js';
+import { androidAdapter } from '../android/AndroidAdapter.js';
+import { desktopAdapter } from '../desktop/DesktopAdapter.js';
+import { webAdapter } from '../web/WebAdapter.js';
 import { platformInfo } from '../utils/PlatformInfo.js';
 import { logger } from '../utils/Logger.js';
 
@@ -11,16 +14,11 @@ class ExitDialog {
     constructor() {
         this.isVisible = false;
         this.overlay = null;
-        this.prevFocus = null;
-        this.prevSection = null;
     }
 
     show() {
         if (this.isVisible) return;
         this.isVisible = true;
-
-        this.prevFocus = focusManager.getFocused();
-        this.prevSection = focusManager.getActiveSection();
 
         this.overlay = document.createElement('div');
         this.overlay.id = 'exit-dialog';
@@ -32,7 +30,7 @@ class ExitDialog {
                 <div class="modal-header">
                     <h2>${i18n.t('ConfirmAppExitTitle') || 'Exit Application?'}</h2>
                 </div>
-                <div class="modal-content" style="padding: 0 24px 24px; color: var(--text-color); font-size: 1.1rem; text-align: center;">
+                <div class="modal-content" style="padding: 24px 24px; color: var(--text-color); font-size: 1.1rem; text-align: center;">
                     ${i18n.t('ConfirmAppExitMessage') || 'Are you sure you want to exit Litefin?'}
                 </div>
                 <div class="modal-actions" id="exit-dialog-actions" style="margin-top: 0; justify-content: center; gap: 16px;">
@@ -46,12 +44,24 @@ class ExitDialog {
             </div>
         `;
 
-        focusManager.register('exit-dialog-actions', this.overlay.querySelector('#exit-dialog-actions'), {
+        /*
+         * Focus Trap Enforcement
+         * ------------------------------------------------------------------------
+         * Use pushTrap() to capture previous focus/section and lock navigation into
+         * the modal dialog. Crucially, FocusManager's focusElement() ignores external
+         * focus requests (such as asynchronous HomePage row render callbacks) while
+         * a trap is active. This prevents the HomePage render pipeline from stealing
+         * focus away from the exit dialog when the user rapidly presses Back.
+         *
+         * Initial Focus:
+         * We set defaultFocusSelector to '#exit-dialog-yes' so the user lands on the
+         * Exit ("Yes") button by default for quick app exit.
+         * ------------------------------------------------------------------------
+         */
+        focusManager.pushTrap(this.overlay.querySelector('#exit-dialog-actions'), {
             orientation: 'horizontal',
-            enterTo: 'first' // Focus Cancel safely
+            defaultFocusSelector: '#exit-dialog-yes' // Focus Exit ("Yes") by default
         });
-
-        focusManager.setActiveSection('exit-dialog-actions');
 
         this.overlay.querySelector('#exit-dialog-no').onclick = (e) => {
             e.stopPropagation();
@@ -61,10 +71,16 @@ class ExitDialog {
         this.overlay.querySelector('#exit-dialog-yes').onclick = (e) => {
             e.stopPropagation();
             log.info('User confirmed exit via dialog.');
-            if (platformInfo.isWebOS) {
-                webosAdapter.exit();
-            } else {
+            if (platformInfo.isTizen) {
                 tizenAdapter.exit();
+            } else if (platformInfo.isWebOS) {
+                webosAdapter.exit();
+            } else if (platformInfo.isAndroid) {
+                androidAdapter.exit();
+            } else if (platformInfo.isDesktop) {
+                desktopAdapter.exit();
+            } else {
+                webAdapter.exit();
             }
         };
 
@@ -77,18 +93,43 @@ class ExitDialog {
         if (!this.isVisible) return;
         this.isVisible = false;
 
-        this.overlay.classList.remove('visible');
+        // Immediately disarm and blur all modal action buttons.
+        // During the 300ms CSS fadeout, the overlay remains in the DOM;
+        // if buttons retain tabindex="0", native browser focus or synthetic
+        // focusin events can latch onto them right before DOM removal,
+        // which would leave FocusManager stranded on a detached element.
+        if (this.overlay) {
+            this.overlay.classList.remove('visible');
+            this.overlay.style.pointerEvents = 'none';
+            this.overlay.setAttribute('aria-hidden', 'true');
+
+            // Find all buttons or focusables inside the modal
+            const actionButtons = this.overlay.querySelectorAll('button, [tabindex]');
+            actionButtons.forEach((btn) => {
+                btn.setAttribute('tabindex', '-1');
+                btn.setAttribute('disabled', 'true');
+                if (typeof btn.blur === 'function') {
+                    btn.blur();
+                }
+            });
+        }
+
+        // Clean up DOM node after transition finishes
+        const closingOverlay = this.overlay;
         setTimeout(() => {
-            if (this.overlay && this.overlay.parentNode) {
-                this.overlay.parentNode.removeChild(this.overlay);
+            if (closingOverlay && closingOverlay.parentNode) {
+                closingOverlay.parentNode.removeChild(closingOverlay);
             }
-            this.overlay = null;
+            if (this.overlay === closingOverlay) {
+                this.overlay = null;
+            }
         }, 300);
 
-        focusManager.unregister('exit-dialog-actions');
-
-        if (this.prevSection) focusManager.setActiveSection(this.prevSection, false);
-        if (this.prevFocus) focusManager.focusElement(this.prevFocus);
+        /*
+         * Release the focus trap and restore focus/section back to what was active
+         * prior to showing the exit dialog.
+         */
+        focusManager.popTrap();
     }
 }
 

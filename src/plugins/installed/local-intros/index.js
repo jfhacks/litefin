@@ -73,8 +73,7 @@ export default {
 
                 // Jellyfin sometimes returns multiple intros (or duplicates).
                 // To avoid repeating intros excessively, we only pick the first one.
-                const introToPlay = introsResult.Items[0];
-                const introItems = [await api.getItem(introToPlay.Id)];
+                const introItems = await Promise.all(introsResult.Items.map((intro) => api.getItem(intro.Id)));
 
                 // Mark them as intros so we don't report progress to server
                 introItems.forEach((i) => {

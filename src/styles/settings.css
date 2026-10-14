@@ -25,7 +25,8 @@
 /* Sidebar */
 .settings-sidebar {
     width: 350px;
-    background: var(--jf-background-alt, rgba(0, 0, 0, 0.3));
+    background: var(--sidebar-bg, var(--jf-background-alt, #101010));
+    background-color: var(--sidebar-bg, var(--jf-background-alt, #101010));
     border-right: 1px solid var(--jf-divider, rgba(255, 255, 255, 0.1));
     border-left: 1px solid var(--jf-divider, rgba(255, 255, 255, 0.1));
     padding: 40px 0;
@@ -48,9 +49,42 @@
     letter-spacing: -0.5px;
 }
 
+/*
+ * Baseline Hidden Elements (Desktop / TV / Landscape Viewports)
+ * In landscape and large screen layouts, the settings interface retains its classic
+ * 2-column split-view presentation. Subtitles, category card descriptions, chevrons,
+ * and mobile navigation headers are strictly suppressed outside portrait mode.
+ */
+.settings-sidebar-subtitle,
+.settings-menu-btn .menu-desc,
+.settings-menu-btn .menu-chevron,
+.settings-bottom-spacer {
+    display: none !important;
+}
+
+.settings-menu-btn .menu-text-wrap {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+}
+
+.settings-tab-body {
+    width: 100%;
+}
+
+/* Category list container spanning full sidebar width */
+.settings-menu-list {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+}
+
 .settings-menu-btn {
     display: flex;
     align-items: center;
+    width: calc(100% - 40px);
+    box-sizing: border-box;
     padding: 16px 24px;
     background: transparent;
     border: none;
@@ -227,6 +261,38 @@ html[data-layout-tier="ultra-legacy"] .settings-menu-btn .menu-icon {
     line-height: 1.4;
 }
 
+/* Audio language fallback slots — ordered list under a single group heading */
+.audio-fallback-slot .setting-label {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+/*
+ * Fallback priority index badge (1, 2, 3...)
+ * Uses the solid theme accent background paired with the dynamic contrast
+ * content variable (--jf-accent-content-color) to ensure guaranteed legibility
+ * across all light and dark theme configurations.
+ */
+.fallback-priority-index {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    flex-shrink: 0;
+    border-radius: var(--jf-border-radius);
+    background-color: var(--jf-accent);
+    color: var(--jf-accent-content-color, #ffffff);
+    font-size: 1.3rem;
+    font-weight: 700;
+}
+
+.fallback-slot-name {
+    display: inline-block;
+    margin-bottom: 0;
+}
+
 .setting-control {
     display: flex;
     flex-wrap: wrap;
@@ -299,7 +365,9 @@ html[data-layout-tier="ultra-legacy"] .settings-menu-btn .menu-icon {
 /* Select Inputs */
 /* Select Buttons (Modal Triggers) */
 .select-btn,
-.theme-color-select-btn {
+.theme-color-select-btn,
+.loader-style-select-btn,
+.audio-fallback-select-btn {
     padding: 12px 24px;
     font-size: 1.1rem;
     background: var(--jf-action-btn-bg, rgba(40, 40, 40, 0.8));
@@ -327,7 +395,11 @@ html[data-layout-tier="ultra-legacy"] .settings-menu-btn .menu-icon {
 .select-btn:focus,
 .select-btn.focused,
 .theme-color-select-btn:focus,
-.theme-color-select-btn.focused {
+.theme-color-select-btn.focused,
+.loader-style-select-btn:focus,
+.loader-style-select-btn.focused,
+.audio-fallback-select-btn:focus,
+.audio-fallback-select-btn.focused {
     background: var(--jf-btn-primary-focus-bg) !important;
     color: var(--jf-btn-primary-focus-color) !important;
     border: 2px solid var(--jf-btn-primary-focus-border) !important;
@@ -336,13 +408,16 @@ html[data-layout-tier="ultra-legacy"] .settings-menu-btn .menu-icon {
 }
 
 .select-btn:hover,
-.theme-color-select-btn:hover {
+.theme-color-select-btn:hover,
+.loader-style-select-btn:hover,
+.audio-fallback-select-btn:hover {
     border: 2px solid var(--jf-btn-primary-hover-border)!important;
     transform: scale(1.02);
     will-change: transform;
 }
 
-.select-btn .btn-label {
+.select-btn .btn-label,
+.audio-fallback-select-btn .btn-label {
     font-weight: 500;
 }
 
@@ -531,7 +606,7 @@ html[data-layout-tier="ultra-legacy"] .settings-menu-btn .menu-icon {
 .switch-user-btn.focused,
 .switch-user-btn:hover {
     background: var(--jf-error, #ff3b30);
-    /* Apple Red / Theme Error */
+    /* Theme Error Red */
     border-color: var(--jf-button-border-focus) !important;
     will-change: transform;
 }
@@ -642,6 +717,474 @@ html[data-layout-tier="ultra-legacy"] .identity-grid .identity-item:nth-child(ev
     font-size: 1.25rem;
     color: var(--jf-text-primary);
     font-weight: 500;
+}
+
+/* ==========================================================================
+   About Page - Quick Action Cards Grid & Dialog Modals
+   ========================================================================== */
+
+/* Container for the 2-column interactive resource cards */
+.about-actions-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 18px;
+    margin-top: 16px;
+    margin-bottom: 48px;
+}
+
+/* Fallback for legacy Tizen / webOS browsers where CSS Grid is unsupported */
+html[data-layout-tier="legacy"] .about-actions-grid,
+html[data-layout-tier="ultra-legacy"] .about-actions-grid {
+    display: flex;
+    flex-wrap: wrap;
+}
+
+html[data-layout-tier="legacy"] .about-actions-grid .about-action-card,
+html[data-layout-tier="ultra-legacy"] .about-actions-grid .about-action-card {
+    width: calc(50% - 10px);
+    margin-right: 20px;
+    margin-bottom: 18px;
+}
+
+html[data-layout-tier="legacy"] .about-actions-grid .about-action-card:nth-child(even),
+html[data-layout-tier="ultra-legacy"] .about-actions-grid .about-action-card:nth-child(even) {
+    margin-right: 0;
+}
+
+/* Individual interactive resource action card */
+.about-action-card {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 20px 22px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1.5px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--jf-border-radius-lg, 16px);
+    cursor: pointer;
+    text-align: left;
+    position: relative;
+    overflow: hidden;
+    outline: none;
+    transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.22s ease;
+    -webkit-transition: -webkit-transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.22s ease;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+}
+
+/* Hover and remote D-Pad focus state */
+.about-action-card:focus,
+.about-action-card.focused,
+.about-action-card:hover {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: var(--jf-accent, #00a4dc) !important;
+    transform: scale(1.025);
+    -webkit-transform: scale(1.025);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4), 0 0 0 2px var(--jf-accent, #00a4dc);
+    z-index: 2;
+}
+
+/* Icon bubble on the left of each card */
+.about-card-icon-wrap {
+    width: 48px;
+    height: 48px;
+    flex-shrink: 0;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.07);
+    color: var(--jf-accent, #00a4dc);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 0.2s ease, color 0.2s ease, transform 0.22s ease;
+    -webkit-transition: background-color 0.2s ease, color 0.2s ease, -webkit-transform 0.22s ease;
+}
+
+.about-action-card:focus .about-card-icon-wrap,
+.about-action-card.focused .about-card-icon-wrap,
+.about-action-card:hover .about-card-icon-wrap {
+    background: var(--jf-accent, #00a4dc);
+    color: #ffffff;
+    transform: scale(1.06);
+    -webkit-transform: scale(1.06);
+}
+
+/* Card typography structure */
+.about-card-info {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+}
+
+.about-card-title {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--jf-text-primary, #ffffff);
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.about-card-desc {
+    font-size: 0.88rem;
+    color: var(--jf-text-secondary, rgba(255, 255, 255, 0.65));
+    line-height: 1.35;
+    white-space: normal;
+}
+
+/* Chevron indicator on the card right edge */
+.about-card-chevron {
+    flex-shrink: 0;
+    color: var(--jf-text-tertiary, rgba(255, 255, 255, 0.4));
+    transition: transform 0.2s ease, color 0.2s ease;
+    -webkit-transition: -webkit-transform 0.2s ease, color 0.2s ease;
+}
+
+.about-action-card:focus .about-card-chevron,
+.about-action-card.focused .about-card-chevron,
+.about-action-card:hover .about-card-chevron {
+    color: var(--jf-text-primary, #ffffff);
+    transform: translateX(4px);
+    -webkit-transform: translateX(4px);
+}
+
+/* ==========================================================================
+   About Dialog Modals - Modal Styling, QR Codes & Hardware Identity
+   ========================================================================== */
+
+/* Enhanced modal container for QR codes and detailed device specifications */
+.settings-modal.about-dialog-modal {
+    width: 840px;
+    max-width: 92vw;
+    max-height: 85vh;
+    border-radius: 20px;
+    -webkit-border-radius: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(22, 22, 26, 0.96);
+    backdrop-filter: blur(28px);
+    -webkit-backdrop-filter: blur(28px);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* Compact variant for single-QR dialogs */
+.settings-modal.about-dialog-modal.compact-modal {
+    width: 540px;
+}
+
+/* Dialog header with subtitle */
+.about-dialog-header {
+    padding: 24px 30px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.about-dialog-header h2 {
+    font-size: 1.45rem;
+    font-weight: 700;
+    color: var(--jf-text-primary, #ffffff);
+    margin: 0 0 6px 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.about-dialog-subtitle {
+    font-size: 0.92rem;
+    color: var(--jf-text-secondary, rgba(255, 255, 255, 0.65));
+    line-height: 1.4;
+    margin: 0;
+}
+
+/* Dialog content container */
+.about-dialog-content {
+    padding: 24px 30px;
+    overflow-y: auto;
+    flex: 1 1 auto;
+}
+
+/* Horizontal grid for 1 or 2 QR code cards */
+.about-qr-grid {
+    display: flex;
+    justify-content: center;
+    align-items: stretch;
+    gap: 24px;
+    width: 100%;
+}
+
+/* Single QR card wrapper */
+.about-qr-card {
+    flex: 1;
+    min-width: 240px;
+    max-width: 360px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    padding: 22px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+/* High-contrast solid white plate ensuring QR readability */
+.about-qr-image-wrap {
+    background: #ffffff;
+    padding: 12px;
+    border-radius: 14px;
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    margin-bottom: 16px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+/* QR code PNG image */
+.about-qr-img {
+    width: 170px;
+    height: 170px;
+    display: block;
+    object-fit: contain;
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
+}
+
+/* Single QR dialog displays a larger QR image */
+.compact-modal .about-qr-img {
+    width: 190px;
+    height: 190px;
+}
+
+/* Card titles and descriptions */
+.about-qr-title {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--jf-text-primary, #ffffff);
+    margin-bottom: 6px;
+}
+
+.about-qr-desc {
+    font-size: 0.86rem;
+    color: var(--jf-text-secondary, rgba(255, 255, 255, 0.65));
+    line-height: 1.35;
+    margin-bottom: 12px;
+}
+
+/* Monospace chip for displayed URL */
+.about-qr-url-chip {
+    font-family: monospace;
+    font-size: 0.78rem;
+    color: var(--jf-text-tertiary, rgba(255, 255, 255, 0.7));
+    background: rgba(255, 255, 255, 0.06);
+    padding: 5px 10px;
+    border-radius: 6px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-bottom: 14px;
+}
+
+/* Action button inside QR card */
+.about-qr-btn {
+    /* Push button to card base */
+    margin-top: auto;
+    width: 100%;
+    margin-left: 0;
+    margin-right: 0;
+    margin-bottom: 0;
+    padding: 10px 18px !important;
+    font-size: 0.95rem !important;
+    border-radius: 10px !important;
+    min-width: 0 !important;
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+    -webkit-transition: -webkit-transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* Focused state for QR card action buttons */
+.about-qr-btn:focus,
+.about-qr-btn.focused,
+.about-qr-btn:hover {
+    /* Glowing focus indicator */
+    background: var(--jf-accent, #00a4dc) !important;
+    color: #ffffff !important;
+    border-color: #ffffff !important;
+    transform: scale(1.03) !important;
+    -webkit-transform: scale(1.03) !important;
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25), 0 0 16px var(--jf-accent, #00a4dc) !important;
+    outline: none !important;
+}
+
+/* Device Specifications modal grid layout */
+.about-device-specs-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+}
+
+/* Legacy fallback for device specs grid */
+html[data-layout-tier="legacy"] .about-device-specs-grid,
+html[data-layout-tier="ultra-legacy"] .about-device-specs-grid {
+    display: flex;
+    flex-wrap: wrap;
+}
+
+html[data-layout-tier="legacy"] .about-device-specs-grid .about-device-tile,
+html[data-layout-tier="ultra-legacy"] .about-device-specs-grid .about-device-tile {
+    width: calc(50% - 10px);
+    margin-right: 20px;
+    margin-bottom: 16px;
+}
+
+html[data-layout-tier="legacy"] .about-device-specs-grid .about-device-tile:nth-child(even),
+html[data-layout-tier="ultra-legacy"] .about-device-specs-grid .about-device-tile:nth-child(even) {
+    margin-right: 0;
+}
+
+/* Individual spec tile */
+.about-device-tile {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+}
+
+.about-device-tile.span-2 {
+    grid-column: span 2;
+    width: 100% !important;
+    margin-right: 0 !important;
+}
+
+.about-device-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--jf-text-tertiary, rgba(255, 255, 255, 0.45));
+    margin-bottom: 6px;
+}
+
+.about-device-val {
+    font-size: 1.05rem;
+    font-weight: 500;
+    color: var(--jf-text-primary, #ffffff);
+    line-height: 1.4;
+}
+
+/* Pill badge cloud for media codecs */
+.about-badge-cloud {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
+}
+
+.about-codec-badge {
+    display: inline-block;
+    padding: 4px 9px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    background: rgba(255, 255, 255, 0.08);
+    color: #ffffff;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.about-codec-badge.supported {
+    background: rgba(52, 199, 89, 0.15);
+    color: #4cd964;
+    border-color: rgba(52, 199, 89, 0.3);
+}
+
+.about-codec-badge.unsupported {
+    background: rgba(255, 59, 48, 0.12);
+    color: rgba(255, 255, 255, 0.4);
+    border-color: rgba(255, 59, 48, 0.2);
+}
+
+.about-codec-badge.disabled {
+    background: rgba(255, 149, 0, 0.15);
+    color: #ff9500;
+    border-color: rgba(255, 149, 0, 0.3);
+}
+
+/* Modal action footer */
+.about-dialog-actions {
+    /* Anchored bottom bar */
+    padding: 16px 30px 22px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    justify-content: flex-end;
+    gap: 14px;
+    background: rgba(255, 255, 255, 0.015);
+}
+
+/* Compact dismiss button positioned in dialog action bar */
+.about-dialog-close-btn {
+    /* Proportionate padding for balanced footer layout */
+    padding: 8px 24px !important;
+    font-size: 0.95rem !important;
+    font-weight: 600 !important;
+    border-radius: 10px !important;
+    min-width: 90px !important;
+    margin: 0 !important;
+    /* Frosted glass idle appearance */
+    background: rgba(255, 255, 255, 0.08) !important;
+    border: 1.5px solid rgba(255, 255, 255, 0.16) !important;
+    color: var(--jf-text-primary, #ffffff) !important;
+    cursor: pointer !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    /* Smooth transition for focus entry and exit */
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
+    -webkit-transition: -webkit-transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
+}
+
+/* Focused and hover state for modal dismiss button */
+.about-dialog-close-btn:focus,
+.about-dialog-close-btn.focused,
+.about-dialog-close-btn:hover {
+    /* High contrast luminous accent background */
+    background: var(--jf-accent, #00a4dc) !important;
+    color: #ffffff !important;
+    border-color: #ffffff !important;
+    /* Dynamic spring scale on focus */
+    transform: scale(1.05) !important;
+    -webkit-transform: scale(1.05) !important;
+    /* Double-ring glow halo for distant viewing */
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.28), 0 0 18px var(--jf-accent, #00a4dc), 0 4px 14px rgba(0, 0, 0, 0.5) !important;
+    outline: none !important;
+    z-index: 5 !important;
+}
+
+/* Responsive adjustments for mobile and narrow viewports */
+@media (max-width: 768px) {
+    .about-actions-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .about-qr-grid {
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    .about-qr-card {
+        width: 100%;
+        max-width: 100%;
+    }
+    
+    .about-device-specs-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .about-device-tile.span-2 {
+        grid-column: span 1;
+    }
 }
 
 /* Toggle Switch */
@@ -1050,7 +1593,6 @@ html[data-layout-tier="ultra-legacy"] .toggle-switch.active::after {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 12px;
 }
 
 .theme-color-swatch-badge {
@@ -1060,6 +1602,8 @@ html[data-layout-tier="ultra-legacy"] .toggle-switch.active::after {
     border: 2px solid rgba(255, 255, 255, 0.4);
     box-shadow: 0 0 8px rgba(0, 0, 0, 0.3);
     flex-shrink: 0;
+    /* Physical margin provides bulletproof spacing across both modern and legacy/ultra-legacy tiers */
+    margin-right: 12px;
     -webkit-transition: -webkit-transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.2s ease, box-shadow 0.2s ease;
     transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.2s ease, box-shadow 0.2s ease;
 }
@@ -1086,7 +1630,6 @@ html[data-layout-tier="ultra-legacy"] .toggle-switch.active::after {
 .theme-color-modal-header-preview {
     display: inline-flex;
     align-items: center;
-    gap: 10px;
     padding: 6px 16px;
     background: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(255, 255, 255, 0.12);
@@ -1104,6 +1647,9 @@ html[data-layout-tier="ultra-legacy"] .toggle-switch.active::after {
     border: 2px solid rgba(255, 255, 255, 0.6);
     box-shadow: 0 0 6px rgba(0, 0, 0, 0.4);
     display: inline-block;
+    flex-shrink: 0;
+    /* Explicit margin ensures reliable spacing on engines lacking flexbox gap support */
+    margin-right: 10px;
 }
 
 .theme-color-modal-grid-container {
@@ -1182,15 +1728,49 @@ html[data-layout-tier="ultra-legacy"] .toggle-switch.active::after {
     pointer-events: none;
 }
 
-/* Legacy / ultra-legacy layout support (Tizen 3.0/4.0 and Tizen 2.x) */
+/* 
+ * ============================================================================
+ * Legacy & Ultra-Legacy Layout Tier: Theme Color Selection Grid Engine
+ * ============================================================================
+ * Targets Tizen 3.0 / 4.0 (legacy: Chrome 47-56) and Tizen 2.x (ultra-legacy: Chrome <47).
+ * When CSS Grid (display: grid) is unavailable or disabled, this fallback relies
+ * on centered inline-block geometry with strict dimensional bounding.
+ *
+ * Mathematical Geometry Alignment:
+ * The palette contains 50 colors organized into 5 tonal categories of 10 items each.
+ * FocusManager registers 'modal-color-grid' with { orientation: 'grid', columns: 10 }.
+ * To prevent directional desynchronization, the visual rendering must produce
+ * exactly 10 columns per line:
+ *
+ * - Each circular swatch (.color-option) has a fixed footprint of 44px (border-box).
+ * - Margin is set to 8px on all sides (16px spacing between buttons and between rows,
+ *   matching the modern gap: 16px specification).
+ * - Total per-item horizontal space: 44px + (8px * 2) = 60px.
+ * - 10 items on a row require: 10 * 60px = 600px.
+ * - An 11th item requires: 11 * 60px = 660px.
+ * - By clamping container width to 616px:
+ *     1. 10 items fit comfortably with 16px buffer to absorb subpixel jitter/rounding.
+ *     2. An 11th item can never fit (660px > 616px), strictly forcing a line break.
+ *     3. font-size: 0 eliminates inter-element whitespace gaps between button tags.
+ *     4. text-align: center aligns the row symmetrically with 8px residual margin.
+ *     5. margin: 0 auto centers the entire 10-column block within the modal.
+ * ============================================================================
+ */
 html[data-layout-tier="legacy"] .theme-color-modal-grid,
 html[data-layout-tier="ultra-legacy"] .theme-color-modal-grid {
     display: block;
+    /* Strict dimensional width bounding to enforce 10-column wrapping */
+    width: 616px;
+    max-width: 100%;
     text-align: center;
+    /* Collapse whitespace gaps between inline-block child elements */
     font-size: 0;
     margin: 0 auto;
+    padding: 10px 0;
+    box-sizing: border-box;
 }
 
+/* Centering indicator tick / dot for active color option in ultra-legacy */
 html[data-layout-tier="ultra-legacy"] .color-option.active::after {
     top: 50%;
     left: 50%;
@@ -1200,10 +1780,933 @@ html[data-layout-tier="ultra-legacy"] .color-option.active::after {
     -webkit-transform: none;
 }
 
+/* Swatch buttons formatted as inline-blocks with 16px effective spacing */
 html[data-layout-tier="legacy"] .color-option,
 html[data-layout-tier="ultra-legacy"] .color-option {
     display: inline-block;
     vertical-align: top;
-    margin: 6px;
+    /* 8px margin produces 16px horizontal and vertical inter-item clearance */
+    margin: 8px;
+    /* Restore standard text scaling context within individual buttons */
     font-size: 1rem;
 }
+
+
+
+/*
+ * ── Chrome 26 Quirks Overrides: Settings Split View & Sidebar ────────────────
+ * Forces the settings split-view sidebar and content panels to layout horizontally 
+ * using the 2009 webkit-box model. Also fixes menu button alignment and spacing.
+ */
+html[data-layout-quirks="c26"] .settings-page {
+    display: -webkit-box !important;
+    -webkit-box-orient: vertical !important;
+    width: 100% !important;
+    height: 100vh !important;
+}
+
+html[data-layout-quirks="c26"] .settings-split-view {
+    display: -webkit-box !important;
+    -webkit-box-orient: horizontal !important;
+    width: 100% !important;
+    height: 100vh !important;
+}
+
+html[data-layout-quirks="c26"] .settings-sidebar {
+    display: block !important;
+    width: 350px !important;
+    height: 100vh !important;
+    overflow-y: auto !important;
+}
+
+html[data-layout-quirks="c26"] .settings-content-panel.page-content {
+    display: block !important;
+    -webkit-box-flex: 1 !important;
+    width: 0 !important;
+    height: 100vh !important; /* Forces 100vh constraint to allow overflow-y scrolling */
+    overflow-y: auto !important;
+}
+
+html[data-layout-quirks="c26"] .settings-menu-btn {
+    display: block !important;
+    text-align: left !important;
+    width: 310px !important; /* Forces full width of the sidebar (350px minus 40px margin) */
+    height: 60px !important;
+    padding: 16px 24px !important; /* Center content vertically (60px - 32px padding = 28px content height) */
+    margin: 4px 20px !important;
+    box-sizing: border-box !important;
+    -webkit-box-sizing: border-box !important;
+    overflow: hidden !important; /* Contain floated children */
+}
+
+html[data-layout-quirks="c26"] .settings-menu-btn .menu-icon svg {
+    width: auto;
+}
+
+html[data-layout-quirks="c26"] .settings-menu-btn .menu-icon {
+    display: block !important;
+    float: left !important;
+    width: 28px !important;
+    height: 28px !important;
+    margin-right: 16px !important;
+    margin-left: 0 !important;
+}
+
+html[data-layout-quirks="c26"] .settings-menu-btn .menu-label {
+    display: block !important;
+    float: left !important;
+    height: 28px !important;
+    line-height: 28px !important;
+}
+
+/* Align setting label and controls on opposite sides using horizontal box model */
+html[data-layout-quirks="c26"] .setting-item {
+    display: -webkit-box !important;
+    -webkit-box-orient: horizontal !important;
+    -webkit-box-align: center !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+html[data-layout-quirks="c26"] .setting-label {
+    -webkit-box-flex: 1 !important;
+}
+
+html[data-layout-quirks="c26"] .setting-control {
+    display: -webkit-box !important;
+    -webkit-box-orient: horizontal !important;
+    -webkit-box-align: center !important;
+    -webkit-box-pack: end !important;
+    margin-left: 20px !important;
+}
+
+html[data-layout-quirks="c26"] .setting-control > * {
+    display: inline-block !important;
+    vertical-align: middle !important;
+}
+
+/* ============================================================================
+ * LOADING INDICATOR STYLE MODAL & INTERACTIVE PREVIEW STAGE
+ * ============================================================================
+
+/* Dialog Container — Lightweight High-Performance Window (No blur/shadow overhead) */
+.settings-modal.loader-style-modal {
+    width: 840px;
+    max-width: 92%;
+    max-height: 85vh;
+    border-radius: 24px;
+    background: #16181e;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Header with Title and Current Mode Indicator */
+.loader-style-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 24px 32px 18px 32px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    flex-shrink: 0;
+}
+
+.loader-modal-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 14px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 9999px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--jf-accent, #00a4dc);
+}
+
+/* Master-Detail Split Grid Layout */
+.loader-style-modal-split {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    max-height: calc(85vh - 145px);
+    padding: 20px 32px;
+    gap: 28px;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+/* Left Column: Interactive Option Buttons Scrollable List */
+.loader-style-options-column {
+    flex: 1.15;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
+    padding: 12px 14px 16px 10px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+.loader-style-options-column::-webkit-scrollbar {
+    width: 6px;
+}
+
+.loader-style-options-column::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 6px;
+}
+
+/* Individual Style Choice Button */
+.loader-style-option-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 18px 24px;
+    margin: 2px 4px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1.5px solid rgba(255, 255, 255, 0.08);
+    border-radius: 18px;
+    cursor: pointer;
+    text-align: left;
+    outline: none;
+    box-sizing: border-box;
+    color: #ffffff;
+    position: relative;
+    /* Fluid Spring Scale Animation */
+    transition: transform 0.24s cubic-bezier(0.34, 1.56, 0.64, 1),
+                background 0.2s ease,
+                border-color 0.2s ease;
+    -webkit-transition: -webkit-transform 0.24s cubic-bezier(0.34, 1.56, 0.64, 1),
+                        background 0.2s ease,
+                        border-color 0.2s ease;
+}
+
+/* Mouse Hover State */
+.loader-style-option-btn:hover,
+.loader-style-option-btn.hovered {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.22);
+}
+
+/* TV Remote D-Pad / Keyboard Focus State with Fluid Spring Scale */
+.loader-style-option-btn:focus,
+.loader-style-option-btn.focused {
+    transform: scale(1.02);
+    -webkit-transform: scale(1.02);
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(255, 255, 255, 0.95);
+    z-index: 2;
+}
+
+/* Currently Active Setting State */
+.loader-style-option-btn.selected {
+    background: rgba(255, 255, 255, 0.09);
+    border-color: var(--jf-accent, #00a4dc);
+}
+
+.loader-style-option-btn.selected:focus,
+.loader-style-option-btn.selected.focused {
+    border-color: #ffffff;
+}
+
+/* Title & Description Stack */
+.loader-style-option-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
+}
+
+.loader-style-option-title {
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: #ffffff;
+}
+
+.loader-style-option-desc {
+    font-size: 0.84rem;
+    line-height: 1.35;
+    color: rgba(255, 255, 255, 0.65);
+}
+
+/* Category Badge Capsule */
+.loader-style-option-pill {
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    font-size: 0.74rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.75);
+    flex-shrink: 0;
+}
+
+/* Checkmark Indicator */
+.loader-style-check-icon {
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--jf-accent, #00a4dc);
+    opacity: 0;
+    transform: scale(0.6);
+    -webkit-transform: scale(0.6);
+    transition: opacity 0.2s ease, transform 0.24s cubic-bezier(0.34, 1.56, 0.64, 1);
+    -webkit-transition: opacity 0.2s ease, -webkit-transform 0.24s cubic-bezier(0.34, 1.56, 0.64, 1);
+    flex-shrink: 0;
+}
+
+.loader-style-option-btn.selected .loader-style-check-icon {
+    opacity: 1;
+    transform: scale(1);
+    -webkit-transform: scale(1);
+}
+
+/* ============================================================================
+ * RIGHT COLUMN: LIVE ANIMATED PREVIEW STAGE
+ * ============================================================================ */
+.loader-style-preview-stage {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Presentation Display Card */
+.loader-preview-card {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    box-sizing: border-box;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 20px;
+    position: relative;
+    overflow: hidden;
+}
+
+/* Central Pedestal Holding the Animated Spinner */
+.loader-preview-pedestal {
+    width: 110px;
+    height: 110px;
+    border-radius: 24px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 18px;
+    position: relative;
+    z-index: 1;
+}
+
+.loader-preview-spinner-mount {
+    width: 64px;
+    height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Descriptive Metadata Below the Pedestal */
+.loader-preview-meta {
+    text-align: center;
+    z-index: 1;
+    max-width: 240px;
+}
+
+.loader-preview-title {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: #ffffff;
+    margin-bottom: 4px;
+    letter-spacing: -0.01em;
+}
+
+.loader-preview-subtitle {
+    font-size: 0.8rem;
+    line-height: 1.35;
+    color: rgba(255, 255, 255, 0.6);
+}
+
+/* ============================================================================
+ * ISOLATED PREVIEW SPINNERS
+ * Completely decoupled from page-level data-loader-style attributes.
+ * ============================================================================ */
+.loader-preview-sample {
+    position: relative;
+    width: 48px;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* 1. Pulsing Dots Preview */
+.preview-spinner-dots {
+    width: 48px;
+    height: 48px;
+    position: relative;
+    animation: rotation 1s linear infinite;
+    -webkit-animation: rotation 1s linear infinite;
+    will-change: transform;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+}
+
+.preview-spinner-dots::before,
+.preview-spinner-dots::after {
+    content: '';
+    box-sizing: border-box;
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    animation: animloader-gpu 1s infinite ease-in-out;
+    -webkit-animation: animloader-gpu 1s infinite ease-in-out;
+    will-change: transform;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+}
+
+.preview-spinner-dots::after {
+    top: 0;
+    left: 0;
+    background-color: #ffffff;
+}
+
+.preview-spinner-dots::before {
+    bottom: 0;
+    right: 0;
+    background-color: var(--jf-accent, #00a4dc);
+}
+
+/* 2. Rotating Ring Preview */
+.preview-spinner-ring {
+    width: 44px;
+    height: 44px;
+    border: 3.5px solid rgba(255, 255, 255, 0.16);
+    border-top-color: var(--jf-accent, #00a4dc);
+    border-radius: 50%;
+    box-sizing: border-box;
+    animation: rotation 1s linear infinite;
+    -webkit-animation: rotation 1s linear infinite;
+    will-change: transform;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+}
+
+/* 3. Dual Ring Preview */
+.preview-spinner-dual-ring {
+    width: 44px;
+    height: 44px;
+    border: 3px solid rgba(255, 255, 255, 0.25);
+    border-radius: 50%;
+    position: relative;
+    box-sizing: border-box;
+    animation: rotation 1s linear infinite;
+    -webkit-animation: rotation 1s linear infinite;
+    will-change: transform;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+}
+
+.preview-spinner-dual-ring::after {
+    content: '';
+    box-sizing: border-box;
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    -webkit-transform: translate(-50%, -50%);
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    border: 3px solid transparent;
+    border-bottom-color: var(--jf-accent, #00a4dc);
+}
+
+/* 4. Orbital Bead Preview */
+.preview-spinner-orbit {
+    width: 44px;
+    height: 44px;
+    border: 3px solid rgba(255, 255, 255, 0.25);
+    border-radius: 50%;
+    display: inline-block;
+    position: relative;
+    box-sizing: border-box;
+    animation: rotation 1s linear infinite;
+    -webkit-animation: rotation 1s linear infinite;
+    will-change: transform;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+}
+
+.preview-spinner-orbit::after {
+    content: '';
+    box-sizing: border-box;
+    position: absolute;
+    left: 0;
+    top: 0;
+    background: var(--jf-accent, #00a4dc);
+    width: 15px;
+    height: 15px;
+    transform: translate(-50%, 50%);
+    -webkit-transform: translate(-50%, 50%);
+    border-radius: 50%;
+}
+
+/* 5. Satellite Ring Preview */
+.preview-spinner-satellite {
+    width: 44px;
+    height: 44px;
+    border: 2.5px solid var(--jf-accent, #00a4dc);
+    border-radius: 50%;
+    display: inline-block;
+    position: relative;
+    box-sizing: border-box;
+    animation: rotation 1s linear infinite;
+    -webkit-animation: rotation 1s linear infinite;
+    will-change: transform;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+}
+
+.preview-spinner-satellite::after {
+    content: '';
+    box-sizing: border-box;
+    position: absolute;
+    left: 4px;
+    top: 4px;
+    border: 2px solid rgba(255, 255, 255, 0.9);
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+}
+
+/* 6. Triple Gyro Preview */
+.preview-spinner-triple-ring {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    display: inline-block;
+    position: relative;
+    border: 3px solid transparent;
+    border-color: rgba(255, 255, 255, 0.9) rgba(255, 255, 255, 0.9) transparent transparent;
+    box-sizing: border-box;
+    animation: rotation 1s linear infinite;
+    -webkit-animation: rotation 1s linear infinite;
+    will-change: transform;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+}
+
+.preview-spinner-triple-ring::after,
+.preview-spinner-triple-ring::before {
+    content: '';
+    box-sizing: border-box;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    margin: auto;
+    border-radius: 50%;
+    border: 3px solid transparent;
+    transform-origin: center center;
+    -webkit-transform-origin: center center;
+}
+
+.preview-spinner-triple-ring::after {
+    border-color: transparent transparent var(--jf-accent, #00a4dc) var(--jf-accent, #00a4dc);
+    width: 36px;
+    height: 36px;
+    animation: rotationBack 0.5s linear infinite;
+    -webkit-animation: rotationBack 0.5s linear infinite;
+}
+
+.preview-spinner-triple-ring::before {
+    border-color: rgba(255, 255, 255, 0.9) rgba(255, 255, 255, 0.9) transparent transparent;
+    width: 28px;
+    height: 28px;
+    animation: rotation 1.5s linear infinite;
+    -webkit-animation: rotation 1.5s linear infinite;
+}
+
+/* 7. Dotted Eclipse Preview */
+.preview-spinner-dotted-ring {
+    width: 44px;
+    height: 44px;
+    border: 3px dotted rgba(255, 255, 255, 0.9);
+    border-style: solid solid dotted dotted;
+    border-radius: 50%;
+    display: inline-block;
+    position: relative;
+    box-sizing: border-box;
+    animation: rotation 2s linear infinite;
+    -webkit-animation: rotation 2s linear infinite;
+    will-change: transform;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+}
+
+.preview-spinner-dotted-ring::after {
+    content: '';
+    box-sizing: border-box;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    margin: auto;
+    border: 3px dotted var(--jf-accent, #00a4dc);
+    border-style: solid solid dotted;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    animation: rotationBack 1s linear infinite;
+    -webkit-animation: rotationBack 1s linear infinite;
+    transform-origin: center center;
+    -webkit-transform-origin: center center;
+}
+
+/* 8. Crescent Sweep Preview */
+.preview-spinner-eclipse-sweep {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    display: inline-block;
+    box-sizing: border-box;
+    animation: eclipse-sweep-anim 1s linear infinite;
+    -webkit-animation: eclipse-sweep-anim 1s linear infinite;
+}
+
+/* 9. Sonar Aperture Preview */
+.preview-spinner-sonar-ring {
+    width: 44px;
+    height: 44px;
+    border: 2px solid rgba(255, 255, 255, 0.85);
+    background: var(--jf-accent, #00a4dc);
+    border-radius: 50%;
+    display: inline-block;
+    position: relative;
+    box-sizing: border-box;
+    animation: rotation 2s linear infinite;
+    -webkit-animation: rotation 2s linear infinite;
+    will-change: transform;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+}
+
+.preview-spinner-sonar-ring::after {
+    content: '';
+    box-sizing: border-box;
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    border: 22px solid;
+    border-color: transparent rgba(255, 255, 255, 0.95);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    -webkit-transform: translate(-50%, -50%);
+}
+
+/* 10. Push Pulse Preview */
+.preview-spinner-push-pulse {
+    width: 48px;
+    height: 48px;
+    position: relative;
+    display: inline-block;
+}
+
+.preview-spinner-push-pulse::before,
+.preview-spinner-push-pulse::after {
+    content: '';
+    position: absolute;
+    border-radius: 50%;
+    box-sizing: border-box;
+    animation: push-pulse-anim 1s infinite linear alternate;
+    -webkit-animation: push-pulse-anim 1s infinite linear alternate;
+}
+
+.preview-spinner-push-pulse::before {
+    right: 0;
+    top: 0;
+    background: var(--jf-accent, #00a4dc);
+}
+
+.preview-spinner-push-pulse::after {
+    bottom: 0;
+    left: 0;
+    background: rgba(255, 255, 255, 0.9);
+    animation-direction: alternate-reverse;
+    -webkit-animation-direction: alternate-reverse;
+}
+
+/* 11. Fading Trio Preview */
+.preview-spinner-horizontal-dots {
+    font-size: 7px;
+    width: 2.5em;
+    height: 2.5em;
+    border-radius: 50%;
+    position: relative;
+    display: block;
+    color: var(--jf-accent, #00a4dc);
+    text-indent: -9999em;
+    /* Offset by -2.5em to account for the vertical 0 2.5em shadow drop in bblFadInOut */
+    margin-top: -2.5em;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+    animation: bblFadInOut 1.8s infinite ease-in-out both;
+    -webkit-animation: bblFadInOut 1.8s infinite ease-in-out both;
+    animation-delay: -0.16s;
+    -webkit-animation-delay: -0.16s;
+}
+
+.preview-spinner-horizontal-dots::before,
+.preview-spinner-horizontal-dots::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    width: 2.5em;
+    height: 2.5em;
+    border-radius: 50%;
+    animation: bblFadInOut 1.8s infinite ease-in-out both;
+    -webkit-animation: bblFadInOut 1.8s infinite ease-in-out both;
+}
+
+.preview-spinner-horizontal-dots::before {
+    left: -3.5em;
+    animation-delay: -0.32s;
+    -webkit-animation-delay: -0.32s;
+}
+
+.preview-spinner-horizontal-dots::after {
+    left: 3.5em;
+}
+
+/* 12. Morphing Grid Preview */
+.preview-spinner-pulsing-grid {
+    width: 48px;
+    height: 48px;
+    position: relative;
+    display: block;
+    background-image:
+        linear-gradient(rgba(255, 255, 255, 0.9) 12px, transparent 0),
+        linear-gradient(var(--jf-accent, #00a4dc) 12px, transparent 0),
+        linear-gradient(var(--jf-accent, #00a4dc) 12px, transparent 0),
+        linear-gradient(rgba(255, 255, 255, 0.9) 12px, transparent 0);
+    background-repeat: no-repeat;
+    background-size: 12px 12px;
+    background-position:
+        left top,
+        left bottom,
+        right top,
+        right bottom;
+    animation: preview-pulsing-grid-anim 1s linear infinite;
+    -webkit-animation: preview-pulsing-grid-anim 1s linear infinite;
+}
+
+@keyframes preview-pulsing-grid-anim {
+    0% {
+        width: 48px;
+        height: 48px;
+        transform: translateZ(0) rotate(0deg);
+    }
+    50% {
+        width: 24px;
+        height: 24px;
+        transform: translateZ(0) rotate(180deg);
+    }
+    100% {
+        width: 48px;
+        height: 48px;
+        transform: translateZ(0) rotate(360deg);
+    }
+}
+
+@-webkit-keyframes preview-pulsing-grid-anim {
+    0% {
+        width: 48px;
+        height: 48px;
+        -webkit-transform: translateZ(0) rotate(0deg);
+    }
+    50% {
+        width: 24px;
+        height: 24px;
+        -webkit-transform: translateZ(0) rotate(180deg);
+    }
+    100% {
+        width: 48px;
+        height: 48px;
+        -webkit-transform: translateZ(0) rotate(360deg);
+    }
+}
+
+/* Ultra-Legacy Platform Fallback (Samsung Tizen 2.x & Chrome 26 quirks) */
+html[data-layout-quirks="c26"] .loader-style-modal-split {
+    display: -webkit-box !important;
+    -webkit-box-orient: horizontal !important;
+}
+
+/* ==========================================================================
+   Admin Libraries Management Tab (Standard Settings Button & Focus Styling)
+   ========================================================================== */
+
+/* Overall container for the libraries tab content */
+.libraries-tab-container {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    width: 100%;
+}
+
+/* Button styling for admin libraries tab matching settings controls */
+.btn-scan-all-libraries,
+.btn-library-refresh-options {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 8px;
+    width: auto !important;
+    min-width: 140px;
+    margin: 0 !important;
+    padding: 12px 24px;
+    font-size: 1.1rem;
+    background: var(--jf-action-btn-bg, rgba(40, 40, 40, 0.8));
+    border: 2px solid var(--jf-action-btn-border) !important;
+    border-radius: var(--jf-border-radius-lg);
+    -webkit-border-radius: var(--jf-border-radius-lg);
+    overflow: hidden;
+    background-clip: padding-box;
+    text-align: center;
+    color: var(--jf-text-primary, rgb(229, 231, 235));
+    cursor: pointer;
+    outline: none;
+    box-shadow: none !important;
+    text-shadow: none !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    -webkit-transition: -webkit-transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+    transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+
+.btn-scan-all-libraries .btn-icon-svg,
+.btn-library-refresh-options .btn-icon-svg {
+    width: 20px;
+    height: 20px;
+    margin: 0;
+    vertical-align: middle;
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+/* Focused and hover state matching standard settings button focus */
+.btn-scan-all-libraries:focus,
+.btn-scan-all-libraries.focused,
+.btn-library-refresh-options:focus,
+.btn-library-refresh-options.focused {
+    background: var(--jf-btn-primary-focus-bg) !important;
+    color: var(--jf-btn-primary-focus-color) !important;
+    border: 2px solid var(--jf-btn-primary-focus-border) !important;
+    transform: scale(1.05);
+    outline: none !important;
+    box-shadow: none !important;
+    will-change: transform;
+}
+
+.btn-scan-all-libraries:hover,
+.btn-library-refresh-options:hover {
+    border: 2px solid var(--jf-btn-primary-hover-border) !important;
+    transform: scale(1.05);
+    will-change: transform;
+}
+
+/* Section Header for individual libraries */
+.library-list-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 14px;
+    padding: 0 4px;
+}
+
+.library-list-section-title {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--jf-text-primary, rgba(255, 255, 255, 0.9));
+    letter-spacing: -0.01em;
+}
+
+.library-list-count-badge {
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.5);
+    background: rgba(255, 255, 255, 0.08);
+    padding: 3px 10px;
+    border-radius: 12px;
+}
+
+.library-admin-type {
+    text-transform: capitalize;
+}
+
+/* Outline / Filled Dynamic Icon Visibility:
+   Button icons remain outlined by default, and seamlessly switch to filled when focused, active, or hovered */
+.btn-scan-all-libraries .icon-filled,
+.btn-library-refresh-options .icon-filled {
+    display: none !important;
+}
+
+.btn-scan-all-libraries .icon-outline,
+.btn-library-refresh-options .icon-outline {
+    display: inline-block !important;
+}
+
+/* Switch to filled variant when button is focused, active, or hovered */
+.btn-scan-all-libraries:focus .icon-outline,
+.btn-scan-all-libraries.focused .icon-outline,
+.btn-scan-all-libraries:hover .icon-outline,
+.btn-scan-all-libraries:active .icon-outline,
+.btn-library-refresh-options:focus .icon-outline,
+.btn-library-refresh-options.focused .icon-outline,
+.btn-library-refresh-options:hover .icon-outline,
+.btn-library-refresh-options:active .icon-outline {
+    display: none !important;
+}
+
+.btn-scan-all-libraries:focus .icon-filled,
+.btn-scan-all-libraries.focused .icon-filled,
+.btn-scan-all-libraries:hover .icon-filled,
+.btn-scan-all-libraries:active .icon-filled,
+.btn-library-refresh-options:focus .icon-filled,
+.btn-library-refresh-options.focused .icon-filled,
+.btn-library-refresh-options:hover .icon-filled,
+.btn-library-refresh-options:active .icon-filled {
+    display: inline-block !important;
+}
+
+/* Empty or Loading State placeholder */
+.library-admin-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.95rem;
+}
+
+

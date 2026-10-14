@@ -26,6 +26,14 @@ export class TrailerPlayer extends Component {
 
         this._isOsdVisible = false;
         this._isPlaying = true;
+        // Tracking flag to lock OSD visibility during trailer buffering phases
+        this._isLoading = true;
+
+        // Queue modal state tracking
+        this._isQueueModalOpen = false;
+        this._queueFocusIndex = 0;
+        this._queueModalOverlay = null;
+        this._queueOpenedAt = 0;
 
         // Focus state restoration
         this._previousFocusTarget = focusManager.getFocused();
@@ -39,8 +47,14 @@ export class TrailerPlayer extends Component {
         this._onMouseMove = this._onMouseMove.bind(this);
         this._onOverlayClick = this._onOverlayClick.bind(this);
         this._onThrottledMouseMove = this._onThrottledMouseMove.bind(this);
+        this._toggleQueueModal = this._toggleQueueModal.bind(this);
+        this._openQueueModal = this._openQueueModal.bind(this);
+        this._closeQueueModal = this._closeQueueModal.bind(this);
+        this._selectQueueItem = this._selectQueueItem.bind(this);
 
         this._mouseMoveThrottle = null;
+        // Timestamp marker to debounce synthetic activation clicks on mount
+        this._mountTime = Date.now();
     }
 
     static showLegacy(trailers, parentPage) {
@@ -105,7 +119,7 @@ export class TrailerPlayer extends Component {
         this._overlay.innerHTML = `
             <div class="trailer-iframe-container" id="trailerIframeContainer" style="opacity: 0; transition: opacity 0.5s ease; position: absolute; top:0; left:0; width: 100%; height: 100%; z-index: 1;"></div>
             
-            <div class="player-osd trailer-osd osd-is-hidden" id="trailerOsd" style="z-index: 2;">
+            <div class="player-osd trailer-osd osd-is-hidden" id="trailerOsd" style="z-index: 10;">
                 <div class="osd-main">
                     <!-- Header -->
                     <div class="osd-header">
@@ -120,8 +134,8 @@ export class TrailerPlayer extends Component {
 
                     <!-- Bottom Area -->
                     <div class="osd-bottom">
-                        <div class="osd-controls-row" style="justify-content: center;">
-                            <div class="osd-controls-left" style="margin: 0 auto;">
+                        <div class="osd-controls-row" style="position: relative; display: flex; align-items: center; justify-content: space-between;">
+                            <div class="osd-controls-left" style="position: absolute; left: 50%; transform: translateX(-50%); display: flex; align-items: center;">
                                 <!-- Standard player control buttons utilizing unified SVG definitions.
                                      CSS handles outline/filled states dynamically based on hover/focus/active. -->
                                 <button class="osd-btn focusable" data-action="prev" tabindex="0" id="trailerPrevBtn">${osdIcons.skipPrevious}</button>
@@ -129,6 +143,11 @@ export class TrailerPlayer extends Component {
                                 <button class="osd-btn osd-btn-play focusable" id="trailerPlayPauseBtn" data-action="togglePlay" tabindex="0">${osdIcons.pause}</button>
                                 <button class="osd-btn focusable" data-action="fastForward" tabindex="0">${osdIcons.fastForward}</button>
                                 <button class="osd-btn focusable" data-action="next" tabindex="0" id="trailerNextBtn">${osdIcons.skipNext}</button>
+                            </div>
+                            <div class="osd-spacer"></div>
+                            <div class="osd-controls-right" style="display: flex; align-items: center; margin-left: auto;">
+                                <!-- Queue modal button matching native player OSD controls -->
+                                <button class="osd-btn focusable" data-action="queue" id="trailerQueueBtn" tabindex="0" aria-label="${i18n.t('Queue') || 'Queue'}">${osdIcons.queue}</button>
                             </div>
                         </div>
 
@@ -145,8 +164,14 @@ export class TrailerPlayer extends Component {
                         </div>
                     </div>
                 </div>
+
+                <!-- Overlays container for modal side panels (matches native player .osd-overlays structure) -->
+                <div class="osd-overlays" id="trailerOsdOverlays"></div>
             </div>
 
+            <!-- Loading Backdrop & Spinner Layer
+                 Configured with z-index 100 so it sits cleanly above the OSD (z-index 10),
+                 guaranteeing all transport controls and titles remain hidden beneath the loading screen. -->
             <div class="trailer-backdrop" id="trailerBackdrop" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; ${backdropStyle} z-index: 100; display: flex; align-items: center; justify-content: center; overflow: hidden;">
                 <div style="position: absolute; top:0; left:0; width:100%; height:100%; background: rgba(0,0,0,0.6); z-index: 1;"></div>
                 <div class="loading-spinner" style="z-index: 2;"></div>
@@ -159,6 +184,8 @@ export class TrailerPlayer extends Component {
         this._playPauseBtn = this._overlay.querySelector('#trailerPlayPauseBtn');
         this._prevBtn = this._overlay.querySelector('#trailerPrevBtn');
         this._nextBtn = this._overlay.querySelector('#trailerNextBtn');
+        this._queueBtn = this._overlay.querySelector('#trailerQueueBtn');
+        this._overlaysContainer = this._overlay.querySelector('#trailerOsdOverlays');
         this._currentTimeEl = this._overlay.querySelector('#trailerCurrentTime');
         this._totalTimeEl = this._overlay.querySelector('#trailerTotalTime');
         this._positionFillEl = this._overlay.querySelector('#trailerPositionFill');
@@ -210,11 +237,16 @@ export class TrailerPlayer extends Component {
         // Steal global keydown
         document.addEventListener('keydown', this._handleKeyDown, true);
 
-        // Register focus trap with grid orientation to allow up/down
+        // Register focus trap with grid orientation to allow two-dimensional traversal
+        // Filter out elements marked disabled or with negative tab index so the
+        // directional focus calculator only evaluates actively selectable targets.
         focusManager.register('trailer-player', this._osdEl, {
-            selector: '.focusable',
+            selector: '.focusable:not([tabindex="-1"]):not(.osd-btn-disabled):not([disabled])',
             orientation: 'grid'
         });
+
+        // Refresh mount timestamp right when DOM element is committed
+        this._mountTime = Date.now();
 
         // Start player hidden natively and let user interactions trigger the OSD
         this._hideOsd();
@@ -253,6 +285,13 @@ export class TrailerPlayer extends Component {
             } catch (e) {}
         }
 
+        // Clean up queue modal DOM instance
+        if (this._queueModalOverlay) {
+            this._queueModalOverlay.remove();
+            this._queueModalOverlay = null;
+        }
+        this._isQueueModalOpen = false;
+
         focusManager.unregister('trailer-player');
 
         // Restore focus
@@ -264,14 +303,66 @@ export class TrailerPlayer extends Component {
     }
 
     _onOverlayClick(e) {
+        // While the loading screen is displayed, ignore general clicks to prevent
+        // toggling playback or OSD visibility behind the backdrop, but allow direct exit if clicking back.
+        if (this._isLoading) {
+            const closeBtn = e.target.closest?.('[data-action="close"], [data-action="exit"]');
+            if (closeBtn) {
+                e.stopPropagation();
+                this._executeAction('close');
+            }
+            return;
+        }
+
+        // --------------------------------------------------------------------
+        // Queue Modal Click Routing
+        // When the queue modal panel is currently presented, handle clicks
+        // on queue rows, the backdrop dismiss zone, or prevent background play toggling.
+        // --------------------------------------------------------------------
+        if (this._isQueueModalOpen) {
+            // Check if user clicked on a specific queue row item
+            const row = e.target.closest?.('.queue-row[data-index]');
+            if (row) {
+                e.stopPropagation();
+                const idx = parseInt(row.dataset.index, 10);
+                if (!isNaN(idx)) {
+                    this._selectQueueItem(idx);
+                }
+                return;
+            }
+
+            // Check if user clicked outside the side panel on the backdrop overlay
+            if (e.target.classList.contains('queue-modal-overlay') || !e.target.closest?.('.queue-modal')) {
+                e.stopPropagation();
+                this._closeQueueModal();
+                return;
+            }
+
+            // Click occurred inside panel header or non-interactive padding - consume event without toggling playback
+            e.stopPropagation();
+            return;
+        }
+
+        // Direct action button clicks (play/pause, rewind, fast forward, next, prev, close/back, queue)
         const btn = e.target.closest('[data-action]');
         if (btn) {
             e.stopPropagation();
             this._executeAction(btn.dataset.action);
-        } else {
-            // Click anywhere else toggles OSD
-            this._toggleOsd();
+            return;
         }
+
+        // Ignore clicks inside the seekbar slider container so scrubbing is not interrupted
+        if (e.target.closest('.osd-slider-container')) {
+            return;
+        }
+
+        // --------------------------------------------------------------------
+        // Background Click: Toggle Play / Pause
+        // Standard media player UX: clicking anywhere on the video area toggles
+        // playback state directly rather than toggling OSD visibility.
+        // --------------------------------------------------------------------
+        this._showOsd(false);
+        this._executeAction('togglePlay');
     }
 
     _onThrottledMouseMove(e) {
@@ -283,6 +374,10 @@ export class TrailerPlayer extends Component {
     }
 
     _showLoading() {
+        this._isLoading = true;
+        // Suppress OSD so transport controls remain tucked cleanly below the loading view
+        this._hideOsd();
+
         if (!this._overlay) return;
         const iframe = this._overlay.querySelector('#trailerIframeContainer');
         const backdrop = this._overlay.querySelector('#trailerBackdrop');
@@ -290,6 +385,7 @@ export class TrailerPlayer extends Component {
 
         if (iframe) iframe.style.opacity = '0';
         if (backdrop) {
+            // Present loading screen on layer 100, firmly above the hidden OSD layer
             backdrop.style.display = 'flex';
             backdrop.style.opacity = '1';
             backdrop.style.visibility = 'visible';
@@ -302,6 +398,8 @@ export class TrailerPlayer extends Component {
     }
 
     _hideLoading() {
+        this._isLoading = false;
+
         if (!this._overlay) return;
         const iframe = this._overlay.querySelector('#trailerIframeContainer');
         const backdrop = this._overlay.querySelector('#trailerBackdrop');
@@ -336,21 +434,69 @@ export class TrailerPlayer extends Component {
         const trailer = this._trailers[this._currentIndex];
         this._titleEl.textContent = trailer.Name || 'Trailer';
 
-        // Update nav buttons
+        // --------------------------------------------------------------------
+        // Reset playback telemetry & scrubbing state for incoming video stream
+        // Prevents ghost timestamps from the previous trailer persisting on UI.
+        // --------------------------------------------------------------------
+        this._currentTimeEl.textContent = '00:00';
+        this._totalTimeEl.textContent = '00:00';
+        this._positionFillEl.style.width = '0%';
+        this._positionSliderEl.value = 0;
+        this._proxyCurrentTime = 0;
+        this._proxyDuration = 0;
+        this._isSeeking = false;
+
+        // Visual play state initial toggle
+        this._isPlaying = true;
+        this._playPauseBtn.innerHTML = osdIcons.pause;
+
+        // --------------------------------------------------------------------
+        // Configure previous trailer button state based on current playlist index
+        // --------------------------------------------------------------------
         if (this._currentIndex === 0) {
             this._prevBtn.classList.add('osd-btn-disabled');
             this._prevBtn.setAttribute('tabindex', '-1');
+            // If the element losing availability currently holds active focus,
+            // fall back immediately to central play/pause control.
+            if (focusManager.getFocused() === this._prevBtn) {
+                focusManager.focusElement(this._playPauseBtn);
+            }
         } else {
             this._prevBtn.classList.remove('osd-btn-disabled');
             this._prevBtn.setAttribute('tabindex', '0');
         }
 
+        // --------------------------------------------------------------------
+        // Configure next trailer button state based on remaining items in playlist
+        // --------------------------------------------------------------------
         if (this._currentIndex === this._trailers.length - 1) {
             this._nextBtn.classList.add('osd-btn-disabled');
             this._nextBtn.setAttribute('tabindex', '-1');
+            // Graceful handover to avoid lingering focus on disabled targets
+            if (focusManager.getFocused() === this._nextBtn) {
+                focusManager.focusElement(this._playPauseBtn);
+            }
         } else {
             this._nextBtn.classList.remove('osd-btn-disabled');
             this._nextBtn.setAttribute('tabindex', '0');
+        }
+
+        // Clear any cursor hover markers that might be stuck on newly disabled buttons
+        this._clearMagicHover();
+
+        // Invalidate spatial navigation cache so the FocusManager rebuilds the
+        // valid target matrix reflecting the latest button availability.
+        focusManager.invalidateCache('trailer-player');
+
+        // If the queue modal overlay is currently rendered, rebuild rows to reflect current trailer
+        if (this._queueModalOverlay) {
+            this._renderQueueModal();
+            if (this._isQueueModalOpen) {
+                this._queueModalOverlay.classList.add('visible');
+                this._queueFocusIndex = this._currentIndex;
+                this._updateQueueFocus();
+                this._scrollActiveQueueItemIntoView();
+            }
         }
 
         if (trailer.IsProxyFallback) {
@@ -417,7 +563,39 @@ export class TrailerPlayer extends Component {
 
     _initYouTubePlayer(videoId) {
         const container = this._overlay.querySelector('#trailerIframeContainer');
-        container.innerHTML = '<div id="yt-player-host"></div>';
+        // Ensure fallback override styles are cleared for programmatic API playback
+        if (container) {
+            container.classList.remove('trailer-fallback-mode');
+        }
+
+        // --------------------------------------------------------------------
+        // Existing YouTube Player Reuse Optimization
+        // If player instance is already active and healthy, execute seamless
+        // in-place video loading rather than reconstructing the whole iframe.
+        // --------------------------------------------------------------------
+        if (this._ytPlayer && typeof this._ytPlayer.loadVideoById === 'function') {
+            console.log('[TrailerPlayer] Reusing existing YT player, loading videoId directly:', videoId);
+            try {
+                this._ytPlayer.loadVideoById(videoId);
+                return;
+            } catch (loadErr) {
+                console.warn('[TrailerPlayer] loadVideoById failed, recreating player:', loadErr);
+            }
+        }
+
+        // Clean up previous instance and unbound listeners before creating fresh host
+        if (this._ytPlayer && typeof this._ytPlayer.destroy === 'function') {
+            try {
+                this._ytPlayer.destroy();
+            } catch (destroyErr) {
+                console.warn('[TrailerPlayer] Error destroying old YT player instance:', destroyErr);
+            }
+            this._ytPlayer = null;
+        }
+
+        /* Ensure host container has explicit full viewport geometry before YT instantiation
+           so YouTube does not measure 0px height and default to low resolution streams */
+        container.innerHTML = '<div id="yt-player-host" style="width: 100%; height: 100%; position: absolute; top: 0; left: 0;"></div>';
 
         const createPlayer = () => this._createYTPlayer(videoId);
 
@@ -493,6 +671,9 @@ export class TrailerPlayer extends Component {
             enablejsapi: '0', // Explicitly off — we're in fallback, not using the API
             fs: '1', // Allow fullscreen from native controls
             iv_load_policy: '3',
+            cc_load_policy: '0', // Suppress automatic closed captions
+            cc_lang_pref: 'none', // Prevent language auto-matching
+            vq: 'hd1080', // High definition quality parameter hint
             origin: 'https://www.youtube.com',
             host: 'https://www.youtube.com'
         };
@@ -506,7 +687,8 @@ export class TrailerPlayer extends Component {
         iframe.width = '100%';
         iframe.height = '100%';
         iframe.setAttribute('frameborder', '0');
-        iframe.allow = 'autoplay; encrypted-media; fullscreen';
+        // Include full capabilities (encrypted-media is required by Chrome for Widevine HD streams)
+        iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen';
         iframe.allowFullscreen = true;
 
         const revealIframe = () => {
@@ -519,6 +701,11 @@ export class TrailerPlayer extends Component {
 
         // Failsafe: some TV browsers swallow cross-origin load events
         setTimeout(revealIframe, 3000);
+
+        // Tag container so CSS restores native pointer events and unscaled layout
+        if (container) {
+            container.classList.add('trailer-fallback-mode');
+        }
 
         container.innerHTML = '';
         container.appendChild(iframe);
@@ -542,9 +729,18 @@ export class TrailerPlayer extends Component {
              • autoplay removed — unreliable inside sandboxed iframes on TV; we call
                                   playVideo() explicitly in the onReady callback instead
              • disablekb removed — this was blocking API command delivery on Tizen/WebOS */
+        /* Explicitly provide physical viewport pixel dimensions to YT Player.
+           Passing string percentage dimensions ('100%') causes YouTube's adaptive bitrate
+           ladder to initialize against an unmeasured container, defaulting to 144p-360p. */
+        const targetWidth = window.innerWidth || 1920;
+        const targetHeight = window.innerHeight || 1080;
+
         this._ytPlayer = new window.YT.Player('yt-player-host', {
+            width: targetWidth,
+            height: targetHeight,
             videoId: videoId,
             playerVars: {
+                autoplay: 1, // Start playback immediately to prevent initial paused state
                 controls: 0, // Hide native YT UI; we draw our own OSD
                 enablejsapi: 1, // Enable JS API postMessage bridge
                 modestbranding: 1, // Minimal YouTube branding
@@ -553,6 +749,9 @@ export class TrailerPlayer extends Component {
                 fs: 0, // No native fullscreen button
                 playsinline: 1, // Inline playback, don't hijack full screen
                 iv_load_policy: 3, // No video annotations
+                cc_load_policy: 0, // Disable automatic closed captions
+                cc_lang_pref: 'none', // Prevent auto-enabling localized subtitles
+                vq: 'hd1080', // Target 1080p resolution hint
                 // origin + host are the primary fix for error 153 (embed denied).
                 // Using youtube.com (not nocookie) matches what YouTube validates against.
                 origin: 'https://www.youtube.com',
@@ -561,6 +760,7 @@ export class TrailerPlayer extends Component {
             events: {
                 onReady: (e) => this._onYTReady(e),
                 onStateChange: (e) => this._onYTStateChange(e),
+                onPlaybackQualityChange: (e) => this._onYTQualityChange(e),
                 onError: (e) => this._onYTError(e)
             }
         });
@@ -583,14 +783,32 @@ export class TrailerPlayer extends Component {
     }
 
     _onYTReady(event) {
+        // Force highest resolution tier and strip closed captions immediately
+        this._requestHighestQuality(event.target);
+        this._disableCaptions(event.target);
+
+        // Ensure the generated iframe element has complete capability permissions
+        // (encrypted-media is strictly required by Chromium for HD adaptive streaming)
+        try {
+            const iframe = event.target.getIframe?.() || this._overlay.querySelector('#trailerIframeContainer iframe');
+            if (iframe) {
+                iframe.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share');
+                iframe.setAttribute('allowfullscreen', 'true');
+                iframe.style.width = '100%';
+                iframe.style.height = '100%';
+            }
+        } catch (e) {}
+
         event.target.playVideo();
         this._startProgressUpdate();
 
-        // Failsafe: if autoplay is blocked, it will never reach PLAYING state.
-        // Reveal the player once the API confirms it is loaded.
+        // Failsafe timer: only shed loading overlay after ample handshake time
+        // if autoplay policy prevented state change to PLAYING
         setTimeout(() => {
             this._hideLoading();
-        }, 500);
+            this._requestHighestQuality(event.target);
+            this._disableCaptions(event.target);
+        }, 3500);
 
         // Try to get real YouTube title immediately once ready
         try {
@@ -602,12 +820,16 @@ export class TrailerPlayer extends Component {
     }
 
     _onYTStateChange(event) {
-        // YT.PlayerState.PLAYING = 1, PAUSED = 2, ENDED = 0
+        // YT.PlayerState.PLAYING = 1, PAUSED = 2, ENDED = 0, BUFFERING = 3
         if (event.data === 1) {
             // Playing state active - display filled pause design
             this._isPlaying = true;
             this._playPauseBtn.innerHTML = osdIcons.pause;
             this._hideLoading();
+
+            // Re-apply highest quality request and suppress captions as playback begins
+            this._disableCaptions(event.target);
+            this._requestHighestQuality(event.target);
 
             // Try again on play in case data was delayed
             try {
@@ -616,6 +838,10 @@ export class TrailerPlayer extends Component {
                     this._titleEl.textContent = data.title;
                 }
             } catch (e) {}
+        } else if (event.data === 3) {
+            // Buffering state: prime stream quality before frames are decoded
+            this._disableCaptions(event.target);
+            this._requestHighestQuality(event.target);
         } else if (event.data === 2) {
             // Paused state active - display filled play design
             this._isPlaying = false;
@@ -624,6 +850,76 @@ export class TrailerPlayer extends Component {
             // Ended
             this._executeAction('next'); // Auto-advance to next trailer
         }
+    }
+
+    /**
+     * Unload and disable YouTube closed captions / subtitles.
+     * YouTube embeds frequently auto-enable CC based on user cookies or device locale;
+     * unloading the caption module ensures clean trailer playback without subtitle overlay.
+     *
+     * @param {Object} [player] - YouTube Player instance
+     */
+    _disableCaptions(player = this._ytPlayer) {
+        if (!player) return;
+        try {
+            if (typeof player.unloadModule === 'function') {
+                player.unloadModule('captions');
+                player.unloadModule('cc');
+            }
+        } catch (e) {}
+        try {
+            if (typeof player.setOption === 'function') {
+                player.setOption('captions', 'track', {});
+                player.setOption('cc', 'track', {});
+            }
+        } catch (e) {}
+    }
+
+    /**
+     * Request highest available playback quality from YouTube immediately.
+     * Evaluates available quality tiers from the player (e.g. hd1080, hd720)
+     * and sets both the quality range and requested playback tier to prevent
+     * YouTube's adaptive bitrate engine from starting at low definition (144p-360p).
+     *
+     * @param {Object} [player] - YouTube Player instance
+     */
+    _requestHighestQuality(player = this._ytPlayer) {
+        if (!player) return;
+        // Guard check: if already running target HD resolution, avoid re-requesting
+        try {
+            if (typeof player.getPlaybackQuality === 'function') {
+                const currentQuality = player.getPlaybackQuality();
+                if (
+                    currentQuality === 'hd1080' ||
+                    currentQuality === 'highres' ||
+                    currentQuality === 'hd1440' ||
+                    currentQuality === 'hd2160'
+                ) {
+                    return;
+                }
+            }
+        } catch (e) {}
+        try {
+            if (typeof player.setPlaybackQuality === 'function') {
+                const levels = typeof player.getAvailableQualityLevels === 'function'
+                    ? player.getAvailableQualityLevels()
+                    : null;
+
+                if (Array.isArray(levels) && levels.length > 0) {
+                    const preferred = ['highres', 'hd2160', 'hd1440', 'hd1080', 'hd720'];
+                    const target = preferred.find((p) => levels.includes(p)) || levels[0];
+                    if (target && target !== 'auto') {
+                        player.setPlaybackQuality(target);
+                    }
+                } else {
+                    player.setPlaybackQuality('hd1080');
+                }
+            }
+        } catch (e) {}
+    }
+
+    _onYTQualityChange(event) {
+        console.log('[TrailerPlayer] YouTube playback quality updated:', event?.data);
     }
 
     _startProgressUpdate() {
@@ -683,6 +979,10 @@ export class TrailerPlayer extends Component {
                 this._close();
                 break;
             case 'togglePlay':
+                // Debounce guard: reject synthetic keyup activation clicks right on mount
+                if (Date.now() - this._mountTime < 600) {
+                    return;
+                }
                 if (this._isProxy) {
                     this._sendProxyCommand(this._isPlaying ? 'pause' : 'play');
                 } else if (this._ytPlayer) {
@@ -762,13 +1062,25 @@ export class TrailerPlayer extends Component {
                 break;
             }
             case 'prev':
+                // Debounce rapid sequential triggers to allow video decoder to stabilize
+                if (this._isChangingTrailer) return;
                 if (this._currentIndex > 0) {
+                    this._isChangingTrailer = true;
+                    setTimeout(() => {
+                        this._isChangingTrailer = false;
+                    }, 800);
                     this._currentIndex--;
                     this._loadCurrentTrailer();
                 }
                 break;
             case 'next':
+                // Debounce rapid sequential triggers to prevent skipping over trailers
+                if (this._isChangingTrailer) return;
                 if (this._currentIndex < this._trailers.length - 1) {
+                    this._isChangingTrailer = true;
+                    setTimeout(() => {
+                        this._isChangingTrailer = false;
+                    }, 800);
                     this._currentIndex++;
                     this._loadCurrentTrailer();
                 } else {
@@ -776,17 +1088,95 @@ export class TrailerPlayer extends Component {
                     this._close();
                 }
                 break;
+            case 'queue':
+                // Open or close the trailer queue playlist modal
+                this._toggleQueueModal();
+                break;
         }
     }
 
     _handleKeyDown(e) {
+        // While the trailer is actively loading/buffering, suppress OSD reveal so the
+        // loading backdrop remains completely clean, while still honoring Back/Exit keys.
+        if (this._isLoading) {
+            if (e.keyCode === 461 || e.keyCode === 10009 || e.keyCode === 27 || e.keyCode === 8) {
+                e.preventDefault();
+                e.stopPropagation();
+                this._close();
+            }
+            return;
+        }
+
+        // --------------------------------------------------------------------
+        // Handle Back / Return / Escape navigation
+        // Standard player UX:
+        //  1. If the Queue Modal is currently open, initial Back dismisses it
+        //  2. If the OSD overlay is currently visible, initial Back press hides it
+        //  3. If the OSD overlay is already hidden, Back press exits playback
+        // (Note: The on-screen OSD back button explicitly triggers 'close' and always exits)
+        // --------------------------------------------------------------------
+        const isBackKey = e.keyCode === 461 || e.keyCode === 10009 || e.keyCode === 27 || e.keyCode === 8;
+        if (isBackKey) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (this._isQueueModalOpen) {
+                this._closeQueueModal();
+            } else if (this._isOsdVisible) {
+                this._hideOsd();
+            } else {
+                this._close();
+            }
+            return;
+        }
+
+        // --------------------------------------------------------------------
+        // Trailer Queue Modal Key Interception
+        // When the modal overlay is active, route directional navigation
+        // directly to the trailer playlist list without triggering media playback shortcuts.
+        // --------------------------------------------------------------------
+        if (this._isQueueModalOpen) {
+            switch (e.keyCode) {
+                case 38: // Up arrow: move focus up
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this._moveQueueFocus(-1);
+                    return;
+                case 40: // Down arrow: move focus down
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this._moveQueueFocus(1);
+                    return;
+                case 37: // Left arrow: dismiss modal back to transport controls
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this._closeQueueModal();
+                    return;
+                case 13: // Enter: select and switch to chosen trailer
+                    e.preventDefault();
+                    e.stopPropagation();
+                    // Debounce rapid Enter presses right after panel opening
+                    if (this._queueOpenedAt && (Date.now() - this._queueOpenedAt < 300)) {
+                        return;
+                    }
+                    this._selectQueueItem(this._queueFocusIndex);
+                    return;
+                default:
+                    // Consume any other hotkeys while modal is open
+                    e.preventDefault();
+                    e.stopPropagation();
+                    return;
+            }
+        }
+
         const wasHidden = !this._isOsdVisible;
 
-        // Tizen specific keys and generic media keys intercept
+        // Reset auto-hide countdown and keep OSD visibly displayed
+        // Crucial: pass shouldFocus = false so that simple key interactions
+        // do not forcefully steal or reset focus back to the play/pause button!
         this._resetAutoHide();
-        this._showOsd();
+        this._showOsd(false);
 
-        // Dynamically place focus upon wakeup
+        // Dynamically place focus only upon initial wakeup from hidden state
         if (wasHidden) {
             if (e.keyCode === 37 || e.keyCode === 39) {
                 // If woken by a seek action (Left/Right), focus the slider so the user can continue seeking quickly
@@ -798,14 +1188,6 @@ export class TrailerPlayer extends Component {
         }
 
         switch (e.keyCode) {
-            case 461: // WebOS Back
-            case 10009: // Return
-            case 27: // Escape
-            case 8: // Backspace
-                e.preventDefault();
-                e.stopPropagation();
-                this._close();
-                return;
             case 10252: // MediaPlayPause
             case 415: // MediaPlay
             case 19: // Pause
@@ -861,6 +1243,22 @@ export class TrailerPlayer extends Component {
     }
 
     _onMouseMove(e) {
+        // Ignore cursor movement triggers while the loading view is presented
+        if (this._isLoading) return;
+
+        // If the trailer queue modal is open, handle row hover selection
+        if (this._isQueueModalOpen) {
+            const row = e?.target?.closest?.('.queue-row[data-index]');
+            if (row) {
+                const idx = parseInt(row.dataset.index, 10);
+                if (!isNaN(idx) && idx !== this._queueFocusIndex) {
+                    this._queueFocusIndex = idx;
+                    this._updateQueueFocus();
+                }
+            }
+            return;
+        }
+
         if (!PlayerSettings.get('enableMagicCursor')) return;
         this._showOsd(false);
 
@@ -909,6 +1307,8 @@ export class TrailerPlayer extends Component {
     }
 
     _hideOsd() {
+        // Do not auto-hide the OSD while the trailer queue modal is open
+        if (this._isQueueModalOpen) return;
         this._isOsdVisible = false;
         this._osdEl.classList.add('osd-is-hidden');
         this._osdEl.querySelector('.osd-main').classList.add('osd-hidden');
@@ -932,10 +1332,293 @@ export class TrailerPlayer extends Component {
 
     _resetAutoHide() {
         if (this._autoHideTimer) clearTimeout(this._autoHideTimer);
-        // Only auto hide if playing
-        if (this._isPlaying) {
+        // Only auto hide if playing AND the queue modal is not open
+        if (this._isPlaying && !this._isQueueModalOpen) {
             this._autoHideTimer = setTimeout(() => this._hideOsd(), 4000);
         }
+    }
+
+    // =========================================================================
+    // Trailer Queue Modal Management
+    // =========================================================================
+
+    /**
+     * Toggles the visibility state of the trailer queue modal overlay.
+     * If the queue is open, dismisses it; otherwise, prepares and shows it.
+     *
+     * @param {boolean} [forceShow] - Optional explicit toggle state override.
+     */
+    _toggleQueueModal(forceShow) {
+        // Evaluate destination display state
+        const shouldShow = forceShow !== undefined ? forceShow : !this._isQueueModalOpen;
+
+        // Route to opening or dismissal handlers
+        if (shouldShow) {
+            this._openQueueModal();
+        } else {
+            this._closeQueueModal();
+        }
+    }
+
+    /**
+     * Opens the trailer queue modal, populating list entries from this._trailers,
+     * highlighting the currently active trailer, and centering it into the viewport.
+     */
+    _openQueueModal() {
+        // Prevent opening while loading or if already open
+        if (this._isQueueModalOpen || this._isLoading) return;
+
+        // Mark state and suspend auto-hide timer while user browses queue
+        this._isQueueModalOpen = true;
+        if (this._autoHideTimer) clearTimeout(this._autoHideTimer);
+
+        // Render queue modal markup into the overlays container
+        this._renderQueueModal();
+
+        // Reveal panel with CSS transition
+        if (this._queueModalOverlay) {
+            this._queueModalOverlay.classList.add('visible');
+        }
+
+        // Initialize focus cursor at currently playing trailer index
+        this._queueFocusIndex = this._currentIndex;
+        this._updateQueueFocus();
+
+        // Scroll the currently active trailer item into view
+        this._scrollActiveQueueItemIntoView();
+
+        // Record timestamp to debounce instant accidental Enter triggers
+        this._queueOpenedAt = Date.now();
+    }
+
+    /**
+     * Dismisses the trailer queue modal panel and restores focus to OSD controls.
+     */
+    _closeQueueModal() {
+        if (!this._isQueueModalOpen) return;
+
+        // Clear active modal open flag
+        this._isQueueModalOpen = false;
+
+        // Trigger slide-out and backdrop fade dismissal
+        if (this._queueModalOverlay) {
+            this._queueModalOverlay.classList.remove('visible');
+        }
+
+        // Restore focus to Queue button or play/pause button
+        focusManager.setActiveSection('trailer-player');
+        if (this._queueBtn && this._queueBtn.getAttribute('tabindex') !== '-1') {
+            focusManager.focusElement(this._queueBtn);
+        } else {
+            focusManager.focusElement(this._playPauseBtn);
+        }
+
+        // Invalidate spatial navigation cache
+        focusManager.invalidateCache('trailer-player');
+
+        // Resume standard playback auto-hide countdown
+        this._resetAutoHide();
+    }
+
+    /**
+     * Constructs the full DOM tree for the trailer queue modal matching the
+     * native player QueueModal layout and CSS classes.
+     */
+    _renderQueueModal() {
+        if (!this._overlaysContainer) {
+            this._overlaysContainer = this._overlay.querySelector('#trailerOsdOverlays');
+            if (!this._overlaysContainer) return;
+        }
+
+        // Clean up any stale modal overlay instance
+        if (this._queueModalOverlay) {
+            this._queueModalOverlay.remove();
+            this._queueModalOverlay = null;
+        }
+
+        const overlay = document.createElement('div');
+        overlay.className = 'queue-modal-overlay';
+        overlay.id = 'trailerQueueModalOverlay';
+
+        // Prepare movie or show context name for row subtitles
+        const parentItemName = this._parentPage?._item?.Name || this._parentPage?._item?.OriginalTitle || '';
+        const parentItemYear = this._parentPage?._item?.ProductionYear || '';
+
+        // Generate rows HTML for each trailer
+        const rowsHtml = (this._trailers || []).map((trailer, index) => {
+            const isActive = index === this._currentIndex;
+            const name = trailer.Name || `${i18n.t('Trailer') || 'Trailer'} ${index + 1}`;
+
+            // Determine thumbnail URL: priority to YouTube thumbnail, then parent item art
+            const ytId = this._extractYouTubeId(trailer.Url);
+            let thumbUrl = '';
+            if (ytId) {
+                thumbUrl = `https://i.ytimg.com/vi/${ytId}/mqdefault.jpg`;
+            } else if (this._parentPage?._item?.Id) {
+                thumbUrl = api.getImageUrl(this._parentPage._item.Id, 'Primary', { maxHeight: 120 })
+                        || api.getImageUrl(this._parentPage._item.Id, 'Backdrop', { maxWidth: 240 })
+                        || '';
+            }
+
+            // Compose contextual subtitle
+            let subtitle = '';
+            if (trailer.ItemName) {
+                subtitle = `${trailer.ItemName}${trailer.ItemYear ? ` (${trailer.ItemYear})` : ''}`;
+            } else if (parentItemName) {
+                subtitle = `${parentItemName}${parentItemYear ? ` (${parentItemYear})` : ''}`;
+            }
+
+            const fallbackHtml = this._getFallbackHtml(name);
+
+            return `
+                <div class="queue-row ${isActive ? 'queue-row--active' : ''}"
+                     data-index="${index}"
+                     tabindex="${isActive ? '0' : '-1'}">
+
+                    <!-- Queue position indicator -->
+                    <span class="queue-row__number">${index + 1}</span>
+
+                    <!-- Video thumbnail preview wrap -->
+                    <div class="queue-row__thumb-wrap">
+                        ${thumbUrl ? `
+                            <img class="queue-row__thumb" src="${thumbUrl}" alt=""
+                                 onerror="this.style.display='none'; const fb = this.parentElement.querySelector('.media-fallback'); if(fb) fb.style.display='flex';" />
+                            <div style="display: none; width: 100%; height: 100%;">
+                                ${fallbackHtml}
+                            </div>
+                        ` : fallbackHtml}
+                        ${isActive ? '<div class="queue-row__playing-indicator"></div>' : ''}
+                    </div>
+
+                    <!-- Trailer info textual metadata -->
+                    <div class="queue-row__info">
+                        <span class="queue-row__name">${name}</span>
+                        ${subtitle ? `<span class="queue-row__subtitle">${subtitle}</span>` : ''}
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        const countText = `${this._trailers.length} ${this._trailers.length === 1 ? (i18n.t('Item') || 'item') : (i18n.t('Items') || 'items')}`;
+
+        overlay.innerHTML = `
+            <div class="queue-modal">
+                <!-- Modal header bar -->
+                <div class="queue-modal__header">
+                    <span class="queue-modal__title">${i18n.t('Trailers') || 'Trailers'}</span>
+                    <span class="queue-modal__count">${countText}</span>
+                </div>
+
+                <!-- Scrollable list of trailers -->
+                <div class="queue-modal__list" id="trailerQueueModalList">
+                    ${rowsHtml || `<p class="queue-modal__empty">${i18n.t('NoTrailersAvailable') || 'No trailers available.'}</p>`}
+                </div>
+            </div>
+        `;
+
+        this._overlaysContainer.appendChild(overlay);
+        this._queueModalOverlay = overlay;
+    }
+
+    /**
+     * Generates a deterministic fallback gradient artwork card with user initials
+     * matching the core Litefin media-fallback stylesheet specifications.
+     *
+     * @param {string} name - Title string to hash for gradient selection.
+     * @returns {string} HTML snippet representing the fallback card.
+     */
+    _getFallbackHtml(name) {
+        let hash = 0;
+        for (let i = 0; i < (name || '').length; i++) {
+            hash = name.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const gradNum = (Math.abs(hash) % 6) + 1;
+        const words = (name || '').trim().split(/[\s_-]+/);
+        let initials = words[0] ? words[0][0] : '?';
+        if (words.length > 1 && words[1]) initials += words[1][0];
+        initials = initials.toUpperCase();
+
+        return `
+            <div class="media-fallback grad-${gradNum}" style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;">
+                <div class="media-fallback-initials">${initials}</div>
+                <div class="media-fallback-name">${name || ''}</div>
+            </div>
+        `;
+    }
+
+    /**
+     * Updates the focus visual treatment on queue rows and auto-scrolls the
+     * focused item into view.
+     */
+    _updateQueueFocus() {
+        if (!this._queueModalOverlay) return;
+
+        // Clear previous focus highlight on all rows
+        this._queueModalOverlay.querySelectorAll('.queue-row').forEach(row => {
+            row.classList.remove('focused');
+        });
+
+        // Apply focus highlight to active target row
+        const targetRow = this._queueModalOverlay.querySelector(`.queue-row[data-index="${this._queueFocusIndex}"]`);
+        if (targetRow) {
+            targetRow.classList.add('focused');
+            targetRow.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        }
+    }
+
+    /**
+     * Adjusts the current queue focus selection index by the given delta offset.
+     *
+     * @param {number} delta - Step distance (-1 for up, 1 for down).
+     */
+    _moveQueueFocus(delta) {
+        const count = this._trailers ? this._trailers.length : 0;
+        if (count === 0) return;
+
+        // Clamp index between valid list bounds
+        this._queueFocusIndex = Math.max(0, Math.min(count - 1, this._queueFocusIndex + delta));
+        this._updateQueueFocus();
+    }
+
+    /**
+     * Automatically scrolls the actively playing trailer row to the center
+     * of the list panel upon opening.
+     */
+    _scrollActiveQueueItemIntoView() {
+        if (!this._queueModalOverlay) return;
+        const activeRow = this._queueModalOverlay.querySelector('.queue-row--active');
+        if (activeRow) {
+            activeRow.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+    }
+
+    /**
+     * Selects and loads a target trailer by index from the queue list.
+     *
+     * @param {number} index - Index of selected trailer in this._trailers.
+     */
+    _selectQueueItem(index) {
+        if (index < 0 || index >= this._trailers.length) return;
+
+        // If a different trailer was selected, trigger transition
+        if (index !== this._currentIndex) {
+            if (this._isChangingTrailer) return;
+            this._isChangingTrailer = true;
+            setTimeout(() => {
+                this._isChangingTrailer = false;
+            }, 800);
+
+            this._currentIndex = index;
+            this._loadCurrentTrailer();
+        }
+
+        // Close the queue modal overlay
+        this._closeQueueModal();
+
+        // Route primary control focus to Play/Pause
+        focusManager.setActiveSection('trailer-player');
+        focusManager.focusElement(this._playPauseBtn);
+        focusManager.invalidateCache('trailer-player');
     }
 
     _close() {
@@ -947,6 +1630,10 @@ export class TrailerPlayer extends Component {
 
     _initProxyPlayer(videoId) {
         const container = this._overlay.querySelector('#trailerIframeContainer');
+        // Clear fallback mode class to enforce isolated headless styling
+        if (container) {
+            container.classList.remove('trailer-fallback-mode');
+        }
         container.innerHTML = `<iframe id="ytProxyIframe" src="http://localhost:8123/player.html?videoId=${encodeURIComponent(videoId)}" width="100%" height="100%" frameborder="0" allow="autoplay; encrypted-media; fullscreen"></iframe>`;
         this._proxyIframe = this._overlay.querySelector('#ytProxyIframe');
 
@@ -965,6 +1652,7 @@ export class TrailerPlayer extends Component {
             this._isPlaying = true;
             this._playPauseBtn.innerHTML = osdIcons.pause;
             this._hideLoading();
+            this._resetAutoHide();
         } else if (msg.event === 'paused') {
             this._isPlaying = false;
             this._playPauseBtn.innerHTML = osdIcons.play;
@@ -993,6 +1681,9 @@ export class TrailerPlayer extends Component {
                 }
             }
 
+            // Sync playback state indicator without triggering auto-advance loops.
+            // Note: Auto-advance (next trailer) is strictly handled by discrete 'state'
+            // events below to prevent 500ms heartbeat polling from triggering repetitive calls.
             if (msg.s !== undefined && msg.s !== -1) {
                 if (msg.s === 1) {
                     this._isPlaying = true;
@@ -1000,8 +1691,6 @@ export class TrailerPlayer extends Component {
                 } else if (msg.s === 2) {
                     this._isPlaying = false;
                     this._playPauseBtn.innerHTML = osdIcons.play;
-                } else if (msg.s === 0) {
-                    this._executeAction('next');
                 }
             }
         } else if (msg.type === 'state') {
@@ -1009,10 +1698,14 @@ export class TrailerPlayer extends Component {
             if (state === 1) {
                 this._isPlaying = true;
                 this._playPauseBtn.innerHTML = osdIcons.pause;
+                this._hideLoading();
+                this._resetAutoHide();
             } else if (state === 2) {
                 this._isPlaying = false;
                 this._playPauseBtn.innerHTML = osdIcons.play;
+                this._resetAutoHide();
             } else if (state === 0) {
+                // Discrete completion event from playback engine: advance to next trailer
                 this._executeAction('next');
             }
         } else if (msg.type === 'title') {

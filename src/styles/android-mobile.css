@@ -1,0 +1,3777 @@
+/**
+ * ============================================================================
+ * Litefin - Android Mobile & Responsive Touch Styles
+ * ============================================================================
+ * Stylesheet providing responsive phone and tablet layout overrides, touch
+ * optimizations, and viewport adaptations for Litefin running on mobile devices.
+ *
+ * Rules are strictly conditioned on:
+ * - [data-platform="android"] : Android platform-specific behavioral styles
+ * - html[data-litefin-touch]  : Touch-primary mobile devices
+ * - html[data-litefin-scaled] : Scaled mobile/tablet viewports (landscape/portrait)
+ * ============================================================================
+ */
+
+/* ============================================================================
+ * Android Touch Feedback & Inkwell / Holding Effect Elimination
+ * ============================================================================
+ * Disables the default Android WebKit tap highlight rectangle, inkwell
+ * overlays, and holding touch callouts across all DOM elements on touch devices.
+ */
+html[data-litefin-touch] *,
+html[data-litefin-touch] *::before,
+html[data-litefin-touch] *::after,
+[data-platform="android"] *,
+[data-platform="android"] *::before,
+[data-platform="android"] *::after {
+    /* Suppress WebKit tap highlight overlay box */
+    -webkit-tap-highlight-color: transparent !important;
+    -webkit-tap-highlight-color: rgba(0, 0, 0, 0) !important;
+
+    /* Disable native long-press callout magnifier / popup */
+    -webkit-touch-callout: none !important;
+}
+
+/* ============================================================================
+ * Android Native Touch Horizontal Scrolling
+ * ============================================================================
+ * Enables hardware-accelerated overflow-x scrolling managed by the compositor,
+ * suppressing scrollbars and overscroll glows for a seamless TV/mobile interface.
+ */
+[data-platform="android"] .row-items {
+    /* Allow native compositor-driven horizontal panning */
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+
+    /* Hide scrollbars across all rendering engines */
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+
+    /* Permits horizontal row swipes while passing vertical drags to page scroll */
+    touch-action: pan-x pan-y;
+}
+
+[data-platform="android"] .row-items::-webkit-scrollbar {
+    /* Suppress WebKit scrollbar thumbs */
+    display: none;
+}
+
+/* Ensure row track does not prematurely GPU-clip inner cards */
+[data-platform="android"] .row-items-track {
+    will-change: auto;
+}
+
+/* ============================================================================
+ * Android Touch-Primary Tooltip & Sidebar Overhaul
+ * ============================================================================
+ * On touchscreens, hover tooltips do not make sense. Tooltips and item labels
+ * appear only on keyboard focus-visible or during active touch press.
+ */
+html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item:not(#sidebar-sub-libraries *):focus-visible:not(#fv-item) .item-text,
+html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item:not(#sidebar-sub-libraries *):focus-visible:not(#fv-item) .sidebar-user-name,
+html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item:not(#sidebar-sub-libraries *):focus-visible:not(#fv-item) .sidebar-syncplay-label,
+html[data-litefin-touch] .sidebar:not(#nonexistent) #sidebar-logo-header:focus-visible:not(#fv-item) .logo-tooltip {
+    /* Reveal tooltip label during keyboard focus */
+    display: inline-block !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    -webkit-transform: translate3d(0, -50%, 0) scale(1) !important;
+    transform: translate3d(0, -50%, 0) scale(1) !important;
+}
+
+html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item:not(#sidebar-sub-libraries *):not(:active) .item-text,
+html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item:not(#sidebar-sub-libraries *):not(:active) .sidebar-user-name,
+html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item:not(#sidebar-sub-libraries *):not(:active) .sidebar-syncplay-label,
+html[data-litefin-touch] .sidebar:not(#nonexistent) #sidebar-logo-header:not(:active) .logo-tooltip {
+    /* Hide tooltip labels when idle to prevent persistent hover artifacts */
+    display: none !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+    -webkit-transform: translate3d(0, -50%, 0) scale(0.9) !important;
+    transform: translate3d(0, -50%, 0) scale(0.9) !important;
+}
+
+html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item:not(#sidebar-sub-libraries *):active:not(#active-boost) .item-text,
+html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item:not(#sidebar-sub-libraries *):active:not(#active-boost) .sidebar-user-name,
+html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item:not(#sidebar-sub-libraries *):active:not(#active-boost) .sidebar-syncplay-label,
+html[data-litefin-touch] .sidebar:not(#nonexistent) #sidebar-logo-header:active:not(#active-boost) .logo-tooltip {
+    /* Display tooltip feedback while actively pressed */
+    display: inline-block !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    -webkit-transform: translate3d(0, -50%, 0) scale(1) !important;
+    transform: translate3d(0, -50%, 0) scale(1) !important;
+}
+
+html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#sidebar-sub-libraries *):not(:active) .item-text,
+html[data-litefin-touch] .sidebar:not(#nonexistent) #sidebar-logo-header.focused:not(:active) .logo-tooltip {
+    /* Keep active nav item label visible when focused */
+    display: inline-block !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+}
+
+html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#sidebar-sub-libraries *):not(:active) .sidebar-user-name,
+html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#sidebar-sub-libraries *):not(:active) .sidebar-syncplay-label {
+    /* Suppress auxiliary labels to avoid visual overlap */
+    display: none !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+}
+
+/* ============================================================================
+ * Landscape Mobile & Tablet Layout Rescue (Scaled Viewports Only)
+ * ============================================================================
+ * The 1080p TV layout anchors headlines with 470px padding and pulls media rows
+ * with negative margins. On landscape mobile devices, these offsets are reduced
+ * to fit smaller vertical bounds cleanly.
+ */
+@media (orientation: landscape) {
+    html[data-litefin-scaled] .home-rows {
+        /* Reduce negative top margin to keep rows below landscape hero text */
+        margin-top: -160px !important;
+    }
+
+    html[data-litefin-scaled] .hero-carousel-container .hero-item {
+        /* Adjust hero bottom padding for mobile landscape proportions */
+        padding-bottom: 180px !important;
+    }
+
+    html[data-litefin-scaled] {
+        /* Base rem scale calibrated for landscape mobile devices */
+        font-size: 22px !important;
+        --card-title-font-scale: 1.3 !important;
+    }
+
+    html[data-litefin-scaled] .details-backdrop {
+        /* Bound backdrop dimensions to virtual design canvas */
+        width: var(--litefin-app-w, 100vw) !important;
+        height: var(--litefin-app-h, 100vh) !important;
+    }
+
+    html[data-litefin-scaled] .splash-content {
+        /* Bound splash loader dimensions */
+        width: var(--litefin-app-w, 100vw) !important;
+        height: var(--litefin-app-h, 100vh) !important;
+    }
+
+    html[data-litefin-scaled] .page-loading {
+        /* Bound page loading overlay dimensions */
+        width: var(--litefin-app-w, 100vw) !important;
+        height: var(--litefin-app-h, 100vh) !important;
+    }
+
+    html[data-litefin-scaled] .epg-grid-container {
+        /* Calibrate Live TV electronic program guide height */
+        height: calc(var(--litefin-app-h, 100vh) - 203px) !important;
+        touch-action: none;
+    }
+
+    html[data-litefin-scaled] #sidebar-sub-libraries {
+        /* Align sub-libraries flyout next to collapsed sidebar */
+        left: 358px !important;
+    }
+
+    html[data-litefin-scaled] .livetv-page .page-content {
+        /* Tighten Live TV page content padding */
+        padding-top: 12px;
+        padding-bottom: 12px;
+        overscroll-behavior: none;
+    }
+
+    html[data-litefin-scaled] .livetv-page .page-header {
+        /* Adjust Live TV header vertical rhythm */
+        padding-top: 12px;
+        padding-bottom: 12px;
+        margin-bottom: 12px;
+    }
+
+    html[data-litefin-scaled] .livetv-page .page-header h1 {
+        /* Scale header typography */
+        font-size: 2.2rem;
+        line-height: 1.15;
+        margin-bottom: 14px;
+    }
+
+    html[data-litefin-scaled] .livetv-page .ltv-tab-header {
+        /* Tab bar padding */
+        padding: 4px;
+    }
+
+    html[data-litefin-scaled] .livetv-page .ltv-tab-btn {
+        /* Generous touch targets for tab buttons */
+        padding: 10px 30px !important;
+    }
+
+    /*
+     * ========================================================================
+     * Mobile Landscape Library Page Header, Tabs, Controls & Alpha Selector
+     * ========================================================================
+     * Enlarges touch targets on landscape phones and tablets to prevent
+     * micro-sized TV proportions when scaled by CSS zoom.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .library-page .library-header,
+    html[data-litefin-touch] .library-page .library-header {
+        /* Balanced horizontal clearance for landscape touch viewports */
+        padding: 24px 36px 0 36px !important;
+    }
+
+    html[data-litefin-scaled] .library-title,
+    html[data-litefin-touch] .library-title {
+        /* Prominent header typography */
+        font-size: 38px !important;
+        font-weight: 800 !important;
+    }
+
+    /* Library Tabs in Landscape Mode */
+    html[data-litefin-scaled] .library-tabs,
+    html[data-litefin-touch] .library-tabs {
+        /* Horizontal flow with consistent gaps */
+        display: flex !important;
+        flex-wrap: wrap !important;
+        gap: 12px !important;
+        margin-bottom: 16px !important;
+    }
+
+    html[data-litefin-scaled] .tab-btn,
+    html[data-litefin-touch] .tab-btn {
+        /* Generous tap targets for tab buttons */
+        margin: 0 !important;
+        padding: 14px 28px !important;
+        min-height: 56px !important;
+        font-size: 22px !important;
+        font-weight: 700 !important;
+        border-radius: 28px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
+        touch-action: manipulation !important;
+    }
+
+    /* Library Controls in Landscape Mode */
+    html[data-litefin-scaled] .library-controls-row,
+    html[data-litefin-touch] .library-controls-row {
+        /* Bottom clearance above media grid or alpha selector */
+        padding-bottom: 14px !important;
+    }
+
+    html[data-litefin-scaled] .library-controls,
+    html[data-litefin-touch] .library-controls {
+        /* Flexible button row */
+        gap: 10px !important;
+    }
+
+    html[data-litefin-scaled] .count-indicator,
+    html[data-litefin-touch] .count-indicator {
+        /* Item counter readout */
+        font-size: 18px !important;
+        font-weight: 600 !important;
+        margin-right: 12px !important;
+    }
+
+    html[data-litefin-scaled] .control-btn,
+    html[data-litefin-touch] .control-btn {
+        /* Touch-ergonomic control buttons */
+        margin: 0 !important;
+        padding: 12px 20px !important;
+        min-height: 52px !important;
+        font-size: 20px !important;
+        font-weight: 600 !important;
+        border-radius: 18px !important;
+        gap: 8px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
+        touch-action: manipulation !important;
+    }
+
+    html[data-litefin-scaled] .control-svg,
+    html[data-litefin-touch] .control-svg {
+        /* Crisply scaled vector icons */
+        width: 24px !important;
+        height: 24px !important;
+        flex-shrink: 0 !important;
+    }
+
+    html[data-litefin-scaled] .control-btn-text,
+    html[data-litefin-touch] .control-btn-text {
+        /* Button label text sizing */
+        font-size: 20px !important;
+        line-height: 1 !important;
+    }
+
+    /* Alphabet Selector in Landscape Mode */
+    html[data-litefin-scaled] .alpha-picker-container,
+    html[data-litefin-touch] .alpha-picker-container {
+        /* Vertical clearance for alphabet bar */
+        padding: 8px 0 !important;
+    }
+
+    html[data-litefin-scaled] .alpha-picker,
+    html[data-litefin-touch] .alpha-picker {
+        /* Horizontal pill container with backdrop styling */
+        padding: 10px 18px !important;
+        border-radius: 30px !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
+    }
+
+    html[data-litefin-scaled] .alpha-btn,
+    html[data-litefin-touch] .alpha-btn {
+        /* Touch-calibrated alphabet key size */
+        width: 48px !important;
+        height: 48px !important;
+        min-width: 48px !important;
+        font-size: 22px !important;
+        font-weight: 700 !important;
+        border-radius: 14px !important;
+        margin: 3px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
+        touch-action: manipulation !important;
+    }
+
+    html[data-litefin-scaled] .alpha-btn.active,
+    html[data-litefin-touch] .alpha-btn.active {
+        /* Highlight active letter selection */
+        background-color: var(--jf-btn-primary-bg) !important;
+        color: var(--jf-btn-primary-color) !important;
+        font-weight: 800 !important;
+        transform: scale(1.12) !important;
+        border-radius: 14px !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-container {
+        /* Stretch login screen full width in landscape */
+        align-items: stretch !important;
+        max-width: none !important;
+        padding: 0 !important;
+        gap: 0 !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-header {
+        /* Sidebar layout for login branding in landscape */
+        flex: 0 0 420px !important;
+        width: 420px !important;
+        height: 100% !important;
+        margin: 0 !important;
+        padding: 0 44px !important;
+        justify-content: center !important;
+        align-items: flex-start !important;
+        gap: 0 !important;
+        border-right: 1px solid rgba(255, 255, 255, 0.08) !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-logo-container {
+        /* Logo and title horizontal arrangement */
+        flex-direction: row !important;
+        justify-content: flex-start !important;
+        align-items: center !important;
+        gap: 18px !important;
+        margin-bottom: 14px !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-logo-container img,
+    html[data-litefin-scaled] .login-page .login-logo-container svg,
+    html[data-litefin-scaled] .login-page .login-logo-svg,
+    html[data-litefin-scaled] .login-page .login-logo-img {
+        /* Logo size constraint */
+        width: 84px !important;
+        height: 84px !important;
+        max-height: 84px !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-logo {
+        /* Prominent title typography */
+        font-size: 4.2rem !important;
+        font-weight: 600 !important;
+        letter-spacing: -0.5px !important;
+        text-align: left !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-tagline {
+        /* Subtitle styling */
+        font-size: 1.35rem !important;
+        line-height: 1.5 !important;
+        text-align: left !important;
+        color: rgba(255, 255, 255, 0.6) !important;
+        max-width: 100% !important;
+        margin-top: 0 !important;
+        overflow-wrap: anywhere !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-section {
+        /* Main login form panel layout */
+        flex: 1 1 auto !important;
+        width: auto !important;
+        height: 100% !important;
+        justify-content: center !important;
+        align-items: stretch !important;
+        padding: 24px 72px 24px 64px !important;
+        overflow-y: hidden !important;
+    }
+
+    html[data-litefin-scaled] .login-page .section-title {
+        /* Section heading with clean gradient fill */
+        font-size: 3.4rem !important;
+        font-weight: 800 !important;
+        line-height: 1.08 !important;
+        letter-spacing: -1px !important;
+        text-align: left !important;
+        margin: 0 0 12px !important;
+        border: none !important;
+        background: linear-gradient(100deg, #ffffff 0%, #ffffff 34%, #a78bfa 58%, #60a5fa 82%) !important;
+        -webkit-background-clip: text !important;
+        background-clip: text !important;
+        -webkit-text-fill-color: transparent !important;
+        color: transparent !important;
+        max-width: 100% !important;
+        overflow-wrap: anywhere !important;
+    }
+
+    html[data-litefin-scaled] .login-page .input-label {
+        /* Input descriptive labels */
+        font-size: 1.3rem !important;
+        font-weight: 400 !important;
+        line-height: 1.4 !important;
+        color: rgba(255, 255, 255, 0.62) !important;
+        text-align: left !important;
+        margin: 0 0 20px !important;
+        max-width: 100% !important;
+    }
+
+    html[data-litefin-scaled] .login-page .server-input-container {
+        /* Container box for server connection inputs */
+        width: 100% !important;
+        max-width: 100% !important;
+        background: rgba(255, 255, 255, 0.045) !important;
+        border: 1px solid rgba(255, 255, 255, 0.09) !important;
+        border-radius: 24px !important;
+        padding: 20px !important;
+        box-sizing: border-box !important;
+    }
+
+    html[data-litefin-scaled] .login-page .server-url-input {
+        /* Touch-friendly text input box */
+        font-size: 1.4rem !important;
+        height: 72px !important;
+        width: 100% !important;
+        background: rgba(0, 0, 0, 0.35) !important;
+        border: 2px solid rgba(167, 139, 250, 0.55) !important;
+        border-radius: 18px !important;
+        padding: 0 24px !important;
+        box-sizing: border-box !important;
+        color: #fff !important;
+    }
+
+    html[data-litefin-scaled] .login-page .connect-btn {
+        /* Connect action button with vibrant gradient without shadows */
+        font-size: 1.4rem !important;
+        font-weight: 700 !important;
+        height: 72px !important;
+        width: 100% !important;
+        margin-top: 18px !important;
+        border: none !important;
+        border-radius: 999px !important;
+        background: linear-gradient(90deg, #8b5cf6 0%, #6366f1 45%, #3b82f6 100%) !important;
+        color: #ffffff !important;
+    }
+
+    html[data-litefin-scaled] .login-page .discovered-servers {
+        /* Discovered Jellyfin servers list container */
+        width: 100% !important;
+        max-width: 100% !important;
+        margin-top: 26px !important;
+        background: transparent !important;
+        border: none !important;
+        padding: 0 !important;
+    }
+
+    html[data-litefin-scaled] .login-page .discovered-header {
+        /* Divider line header for discovered servers */
+        display: flex !important;
+        align-items: center !important;
+        gap: 16px !important;
+        margin-bottom: 14px !important;
+    }
+
+    html[data-litefin-scaled] .login-page .discovered-header h3 {
+        /* Uppercase tracking for discovery title */
+        font-size: 1.15rem !important;
+        font-weight: 700 !important;
+        letter-spacing: 3px !important;
+        text-transform: uppercase !important;
+        color: rgba(255, 255, 255, 0.55) !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+
+    html[data-litefin-scaled] .login-page .discovered-header::after {
+        /* Accent horizontal rule */
+        content: "" !important;
+        flex: 1 !important;
+        height: 2px !important;
+        background: rgba(255, 255, 255, 0.18) !important;
+        margin-right: 8px !important;
+    }
+
+    html[data-litefin-scaled] .login-page .refresh-btn {
+        /* Discovered server refresh touch target */
+        color: rgba(255, 255, 255, 0.75) !important;
+        min-width: 52px !important;
+        min-height: 52px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+
+    html[data-litefin-scaled] .login-page .refresh-btn svg {
+        /* Icon dimensions */
+        width: 26px !important;
+        height: 26px !important;
+    }
+
+    html[data-litefin-scaled] .login-page .server-list li,
+    html[data-litefin-scaled] .login-page .server-list .server-item {
+        /* Discovered server row items */
+        font-size: 1.3rem !important;
+        min-height: 76px !important;
+        padding: 14px 24px !important;
+        background: rgba(255, 255, 255, 0.045) !important;
+        border: 1px solid rgba(255, 255, 255, 0.09) !important;
+        border-radius: 20px !important;
+        margin-bottom: 12px !important;
+    }
+
+    html[data-litefin-scaled] .login-page .server-item.empty {
+        /* Empty discovery state */
+        color: rgba(255, 255, 255, 0.5) !important;
+        justify-content: center !important;
+        font-size: 1.25rem !important;
+    }
+
+    html[data-litefin-scaled] .hero-carousel-container.immersive .hero-carousel {
+        /* Hero height bounds for landscape mobile */
+        height: var(--litefin-app-h, 90vh) !important;
+        min-height: var(--litefin-app-h, 650px) !important;
+    }
+
+    html[data-litefin-scaled] .hero-carousel-container.immersive .hero-indicators {
+        /* Indicator dots bottom offset */
+        bottom: 400px !important;
+    }
+
+    html[data-litefin-scaled] .hero-carousel-container.immersive .hero-item {
+        /* Immersive item padding */
+        padding-bottom: 423px !important;
+    }
+
+    html[data-litefin-scaled] #home-hero-placeholder.style-immersive + .home-rows {
+        /* Pull media rows upward behind immersive backdrop */
+        margin-top: -405px !important;
+    }
+
+    /*
+     * Settings Sidebar Tabs in Landscape Mode
+     * Restores comfortable, legible touch sizing for category tabs on landscape tablets
+     * and phones without affecting interior content panel controls.
+     */
+    html[data-litefin-scaled] .settings-sidebar {
+        /* Generous navigation sidebar width on landscape */
+        width: 420px !important;
+        padding: 36px 0 !important;
+    }
+
+    html[data-litefin-scaled] .settings-sidebar-header {
+        /* Sidebar header spacing */
+        padding: 0 36px !important;
+        margin-bottom: 24px !important;
+    }
+
+    html[data-litefin-scaled] .settings-sidebar-header h2 {
+        /* Header typography */
+        font-size: 2.3rem !important;
+    }
+
+    html[data-litefin-scaled] .settings-menu-btn {
+        /* Tab button dimensions and touch padding in landscape */
+        font-size: 1.45rem !important;
+        padding: 16px 24px !important;
+        margin: 6px 16px !important;
+        min-height: 64px !important;
+    }
+
+    html[data-litefin-scaled] .settings-menu-btn .menu-icon {
+        /* Tab icon dimensions */
+        width: 32px !important;
+        height: 32px !important;
+        margin-right: 18px !important;
+    }
+
+    html[data-litefin-scaled] .settings-menu-btn .menu-icon svg {
+        width: 100% !important;
+        height: 100% !important;
+    }
+
+    html[data-litefin-scaled] .profiles-dialog {
+        /* Profile selection dialog width and height bounds */
+        width: 87% !important;
+        max-height: calc(var(--litefin-app-h, 100vh) * 0.8) !important;
+    }
+
+    html[data-litefin-scaled] .profiles-dialog .modal-options {
+        /* Modal option scroll area */
+        max-height: none !important;
+    }
+
+    /*
+     * ========================================================================
+     * Mobile Landscape Profiles Page ("Who's Watching")
+     * ========================================================================
+     * Sizing and layout adjustments for mobile landscape profile selection:
+     * - Subtle ambient radial glow behind avatars.
+     * - Balanced cards and ergonomic pill buttons.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .profiles-page,
+    html[data-litefin-touch] .profiles-page {
+        /* Centered horizontal viewport alignment with ambient depth */
+        padding: 24px 32px !important;
+        min-height: 100vh !important;
+        justify-content: center !important;
+        align-items: center !important;
+        background: radial-gradient(circle at 50% 36%, rgba(var(--jf-accent-rgb, 0, 164, 220), 0.12) 0%, rgba(255, 255, 255, 0.02) 48%, transparent 72%), #000000 !important;
+    }
+
+    html[data-litefin-scaled] .profiles-header,
+    html[data-litefin-touch] .profiles-header {
+        /* Title margin in landscape */
+        margin-bottom: 32px !important;
+    }
+
+    html[data-litefin-scaled] .profiles-title,
+    html[data-litefin-touch] .profiles-title {
+        /* Landscape title typography */
+        font-size: 40px !important;
+        font-weight: 800 !important;
+    }
+
+    html[data-litefin-scaled] .profiles-grid,
+    html[data-litefin-touch] .profiles-grid {
+        /* Horizontal flow of profile cards */
+        display: flex !important;
+        flex-wrap: wrap !important;
+        justify-content: center !important;
+        align-items: center !important;
+        gap: 20px 24px !important;
+        padding: 0 !important;
+    }
+
+    html[data-litefin-scaled] .profiles-profile-item,
+    html[data-litefin-touch] .profiles-profile-item {
+        /* Clean card margin reset */
+        margin: 0 !important;
+    }
+
+    html[data-litefin-scaled] .profiles-card,
+    html[data-litefin-touch] .profiles-card {
+        /* Landscape touch card dimensions */
+        position: relative !important;
+        overflow: hidden !important;
+        width: 170px !important;
+        height: 170px !important;
+        border-radius: 24px !important;
+    }
+
+    html[data-litefin-scaled] .profiles-card-name,
+    html[data-litefin-touch] .profiles-card-name {
+        /* Name label sizing */
+        font-size: 20px !important;
+        margin-top: 12px !important;
+    }
+
+    html[data-litefin-scaled] .profiles-bottom,
+    html[data-litefin-touch] .profiles-bottom {
+        /* Action buttons clearance in landscape */
+        margin-top: 36px !important;
+        gap: 16px !important;
+    }
+
+    html[data-litefin-scaled] .profiles-sign-out-btn,
+    html[data-litefin-touch] .profiles-sign-out-btn,
+    html[data-litefin-scaled] .profiles-switch-server-btn,
+    html[data-litefin-touch] .profiles-switch-server-btn {
+        /* Pill button touch proportions */
+        min-height: 50px !important;
+        padding: 12px 24px !important;
+        font-size: 18px !important;
+        border-radius: 25px !important;
+        margin: 0 !important;
+    }
+
+    /*
+     * ========================================================================
+     * Mobile Landscape Modal Dialog Sizing & Proportions
+     * ========================================================================
+     * Fixes ultra-wide stretch and vertical squashing on landscape mobile devices:
+     * - Restricts max-width to 620px so dialogs don't span awkwardly edge-to-edge.
+     * - Expands max-height to calc(100vh - 24px) to utilize full vertical screen.
+     * - Tightens modal header and scrollable padding to eliminate wasted space.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .settings-modal,
+    html[data-litefin-touch] .settings-modal,
+    html[data-litefin-scaled] .player-media-info-modal,
+    html[data-litefin-touch] .player-media-info-modal,
+    html[data-litefin-scaled] .media-info-modal,
+    html[data-litefin-touch] .media-info-modal,
+    html[data-litefin-scaled] .fav-languages-modal,
+    html[data-litefin-touch] .fav-languages-modal,
+    html[data-litefin-scaled] .modal-overlay .settings-modal,
+    html[data-litefin-touch] .modal-overlay .settings-modal {
+        width: calc(100% - 32px) !important;
+        max-width: 620px !important;
+        min-width: 0 !important;
+        max-height: calc(100vh - 24px) !important;
+        max-height: calc(100% - 24px) !important;
+        border-radius: 20px !important;
+        box-shadow: 0 16px 50px rgba(0, 0, 0, 0.75) !important;
+    }
+
+    html[data-litefin-scaled] .settings-modal .modal-header,
+    html[data-litefin-touch] .settings-modal .modal-header {
+        padding: 12px 22px 8px 22px !important;
+    }
+
+    html[data-litefin-scaled] .settings-modal .modal-header h2,
+    html[data-litefin-touch] .settings-modal .modal-header h2 {
+        font-size: 1.35rem !important;
+        line-height: 1.2 !important;
+        padding: 2px 0 !important;
+    }
+
+    html[data-litefin-scaled] .settings-modal .modal-options,
+    html[data-litefin-touch] .settings-modal .modal-options,
+    html[data-litefin-scaled] .media-info-scrollable,
+    html[data-litefin-touch] .media-info-scrollable {
+        padding: 10px 20px !important;
+        max-height: calc(100vh - 74px) !important;
+        max-height: calc(100% - 74px) !important;
+        box-sizing: border-box !important;
+    }
+
+    html[data-litefin-scaled] .media-info-grid,
+    html[data-litefin-touch] .media-info-grid {
+        padding: 8px 14px !important;
+    }
+
+    html[data-litefin-scaled] .media-info-section,
+    html[data-litefin-touch] .media-info-section {
+        padding: 12px 16px !important;
+        margin-bottom: 12px !important;
+    }
+
+    html[data-litefin-scaled] .media-info-source-title,
+    html[data-litefin-touch] .media-info-source-title {
+        margin: 12px 0 8px 0 !important;
+        padding-bottom: 6px !important;
+    }
+
+    /*
+     * ========================================================================
+     * Mobile Landscape Player Playback Info Overlay
+     * ========================================================================
+     * Eliminates 300px TV clipping, utilizing full vertical landscape space.
+     * Positions panel neatly on the right with smooth touch scrolling.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] #osdPlaybackInfoOverlay,
+    html[data-litefin-touch] #osdPlaybackInfoOverlay,
+    html[data-platform="android"] #osdPlaybackInfoOverlay {
+        top: 14px !important;
+        bottom: 14px !important;
+        right: 18px !important;
+        left: auto !important;
+        width: 420px !important;
+        max-width: calc(100vw - 36px) !important;
+        max-height: calc(100vh - 28px) !important;
+        height: auto !important;
+        background: rgba(12, 12, 16, 0.94) !important;
+        -webkit-backdrop-filter: blur(24px) !important;
+        backdrop-filter: blur(24px) !important;
+        border: 1px solid rgba(255, 255, 255, 0.16) !important;
+        border-radius: 20px !important;
+        padding: 14px 18px !important;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.8) !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        z-index: 10002 !important;
+        box-sizing: border-box !important;
+    }
+}
+
+/* Action rows flex line-break spacer: suppressed on desktop, TV, and landscape */
+.mobile-action-break {
+    display: none;
+}
+
+/* ============================================================================
+ * Portrait Mobile & Tablet Layout Rescue (Portrait Viewports Only)
+ * ============================================================================
+ * When held vertically, the interface reconfigures to stack elements, tighten
+ * horizontal spacing, and allow vertical document scrolling.
+ */
+@media (orientation: portrait) {
+    html[data-litefin-scaled] {
+        /* Calibrated font scale and sidebar width for vertical screens */
+        font-size: 20px !important;
+        --card-title-font-scale: 1.15 !important;
+        --sidebar-width-collapsed: 0px !important;
+    }
+
+    /*
+     * In mobile portrait orientation, the vertical sidebar is replaced by
+     * the mobile bottom navbar and top bar. Suppress the sidebar container entirely.
+     */
+    html[data-litefin-scaled] #sidebar-container,
+    html[data-litefin-scaled] .sidebar-hover-trigger,
+    html[data-litefin-scaled] #main-sidebar,
+    html[data-litefin-portrait] #sidebar-container,
+    html[data-litefin-portrait] .sidebar-hover-trigger,
+    html[data-litefin-portrait] #main-sidebar {
+        display: none !important;
+        width: 0 !important;
+        pointer-events: none !important;
+    }
+
+    html[data-litefin-scaled] #page-container,
+    html[data-litefin-portrait] #page-container {
+        left: 0 !important;
+        width: 100% !important;
+    }
+
+    html[data-litefin-scaled] #app {
+        /* Enable natural vertical page scrolling */
+        overflow-x: hidden !important;
+        overflow-y: auto !important;
+    }
+
+    html[data-litefin-scaled] .details-backdrop,
+    html[data-litefin-scaled] .splash-content,
+    html[data-litefin-scaled] .page-loading {
+        /* Match canvas bounds in portrait */
+        width: var(--litefin-app-w, 100vw) !important;
+        height: var(--litefin-app-h, 100vh) !important;
+    }
+
+    html[data-litefin-scaled] .library-content,
+    html[data-litefin-portrait] .library-content {
+        /* Aligned 20px side clearances for portrait media grids */
+        padding-left: 20px !important;
+        padding-right: 20px !important;
+    }
+
+    /*
+     * ========================================================================
+     * Mobile Portrait Library Page Header, Tabs, Controls & Alpha Selector
+     * ========================================================================
+     * Calibrates dimensions for 750px vertical touch canvas:
+     * - Generous title typography and matching 20px side clearances.
+     * - Enlarged pill tabs with high-contrast active feedback and tap targets.
+     * - Sizable control buttons with crisp SVGs for touch ergonomics.
+     * - High-visibility alphabet selector formatted into balanced touch rows.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .library-page .library-header,
+    html[data-litefin-portrait] .library-page .library-header {
+        /* Unified 20px side padding aligning with details and media rows */
+        padding: 24px 20px 0 20px !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+    }
+
+    html[data-litefin-scaled] .library-title-row,
+    html[data-litefin-portrait] .library-title-row {
+        /* Vertical clearance below library title */
+        margin-bottom: 20px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: flex-start !important;
+    }
+
+    html[data-litefin-scaled] .library-title,
+    html[data-litefin-portrait] .library-title {
+        /* Bold, prominent page title readable on mobile screens */
+        font-size: 42px !important;
+        font-weight: 800 !important;
+        letter-spacing: -0.5px !important;
+        color: var(--jf-text-primary) !important;
+    }
+
+    /* Library Tabs in Portrait Mode */
+    html[data-litefin-scaled] .library-tabs,
+    html[data-litefin-portrait] .library-tabs {
+        /* Flow tabs horizontally with centered wrapping and balanced spacing */
+        display: flex !important;
+        flex-wrap: wrap !important;
+        justify-content: center !important;
+        align-items: center !important;
+        gap: 12px !important;
+        margin-bottom: 18px !important;
+        padding: 4px 0 !important;
+        width: 100% !important;
+    }
+
+    html[data-litefin-scaled] .tab-btn,
+    html[data-litefin-portrait] .tab-btn {
+        /* Substantial chip button dimensions for finger taps */
+        margin: 0 !important;
+        padding: 16px 30px !important;
+        min-height: 64px !important;
+        font-size: 26px !important;
+        font-weight: 700 !important;
+        border-radius: 32px !important;
+        border-width: 2px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
+        touch-action: manipulation !important;
+    }
+
+    /* Library Controls in Portrait Mode */
+    html[data-litefin-scaled] .library-controls-row,
+    html[data-litefin-portrait] .library-controls-row {
+        /* Centered horizontal alignment for controls bar */
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
+        padding-bottom: 18px !important;
+        width: 100% !important;
+    }
+
+    html[data-litefin-scaled] .library-controls,
+    html[data-litefin-portrait] .library-controls {
+        /* Centered wrapping flex row accommodating all action triggers */
+        display: flex !important;
+        flex-wrap: wrap !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 12px !important;
+        width: 100% !important;
+    }
+
+    html[data-litefin-scaled] .count-indicator,
+    html[data-litefin-portrait] .count-indicator {
+        /* Legible item count indicator */
+        font-size: 22px !important;
+        font-weight: 600 !important;
+        margin-right: 8px !important;
+        color: var(--jf-text-secondary) !important;
+    }
+
+    html[data-litefin-scaled] .control-btn,
+    html[data-litefin-portrait] .control-btn {
+        /* Enlarged mobile touch button dimensions */
+        margin: 0 !important;
+        padding: 14px 22px !important;
+        min-height: 62px !important;
+        font-size: 24px !important;
+        font-weight: 600 !important;
+        border-radius: 20px !important;
+        gap: 10px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
+        touch-action: manipulation !important;
+    }
+
+    html[data-litefin-scaled] .control-btn .icon,
+    html[data-litefin-portrait] .control-btn .icon {
+        /* Centered vector icon alignment */
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+
+    html[data-litefin-scaled] .control-svg,
+    html[data-litefin-portrait] .control-svg {
+        /* Crisp icon sizing for high-DPI phone displays */
+        width: 26px !important;
+        height: 26px !important;
+        flex-shrink: 0 !important;
+    }
+
+    html[data-litefin-scaled] .control-btn-text,
+    html[data-litefin-portrait] .control-btn-text {
+        /* Label typography */
+        font-size: 24px !important;
+        line-height: 1 !important;
+    }
+
+    /* Alphabet Selector in Portrait Mode */
+    html[data-litefin-scaled] .alpha-picker-container,
+    html[data-litefin-portrait] .alpha-picker-container {
+        /* Spacing above and below alphabet picker */
+        width: 100% !important;
+        padding: 6px 0 16px 0 !important;
+        box-sizing: border-box !important;
+    }
+
+    html[data-litefin-scaled] .alpha-picker,
+    html[data-litefin-portrait] .alpha-picker {
+        /* Pill-shaped backdrop grouping alphabet keys cleanly */
+        display: flex !important;
+        flex-wrap: wrap !important;
+        justify-content: center !important;
+        align-items: center !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        border-radius: 28px !important;
+        padding: 12px 10px !important;
+        box-sizing: border-box !important;
+        width: 100% !important;
+    }
+
+    html[data-litefin-scaled] .alpha-btn,
+    html[data-litefin-portrait] .alpha-btn {
+        /* Sizable touch keys fitting evenly into two balanced rows */
+        width: 46px !important;
+        height: 52px !important;
+        min-width: 46px !important;
+        font-size: 24px !important;
+        font-weight: 700 !important;
+        border-radius: 14px !important;
+        margin: 2px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
+        touch-action: manipulation !important;
+    }
+
+    html[data-litefin-scaled] .alpha-btn.active,
+    html[data-litefin-portrait] .alpha-btn.active {
+        /* Distinct active letter highlight */
+        background-color: var(--jf-btn-primary-bg) !important;
+        color: var(--jf-btn-primary-color) !important;
+        font-weight: 800 !important;
+        transform: scale(1.12) !important;
+        border-radius: 14px !important;
+    }
+
+    /* Right-Docked Alphabet Selector in Portrait Mode */
+    html[data-alpha-picker-position="right"] .alpha-picker-container {
+        width: 60px !important;
+        right: 8px !important;
+    }
+
+    html[data-alpha-picker-position="right"] .alpha-picker {
+        padding: 8px 4px !important;
+        border-radius: 30px !important;
+    }
+
+    html[data-alpha-picker-position="right"] .alpha-btn {
+        width: 44px !important;
+        height: 38px !important;
+        min-width: 44px !important;
+        font-size: 20px !important;
+        font-weight: 700 !important;
+        margin: 2px 0 !important;
+        border-radius: 10px !important;
+    }
+
+    html[data-alpha-picker-position="right"] .library-page .library-header,
+    html[data-alpha-picker-position="right"] .library-page .library-content {
+        padding-right: 74px !important;
+    }
+
+    /*
+     * ========================================================================
+     * Portrait Details Page Presentation (Hero Media Architecture)
+     * ========================================================================
+     * Stacks the hero artwork above metadata with cinematic proportion:
+     * - Vertical posters expand to 440px (~60% portrait canvas width).
+     * - Horizontal episode thumbnails expand prominently to 640px (92% canvas).
+     * - Generous vertical clearances: 12px below topbar, 30px above title.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .details-main-split,
+    html[data-litefin-portrait] .details-main-split {
+        /* Align poster centrally above typography in vertical viewports */
+        flex-direction: column !important;
+        align-items: center !important;
+        /* Padding cushions the split container against viewport edges */
+        padding: 16px 20px 0 20px !important;
+    }
+
+    html[data-litefin-scaled] .hero-poster,
+    html[data-litefin-portrait] .hero-poster {
+        /* Centered heroic movie/series poster container */
+        width: 100% !important;
+        max-width: 440px !important;
+        /* Center artwork horizontally within portrait column */
+        margin-left: auto !important;
+        margin-right: auto !important;
+        /* Balanced vertical clearance above artwork and below towards title */
+        margin-top: 12px !important;
+        margin-bottom: 30px !important;
+        height: auto !important;
+        padding-bottom: 0 !important;
+        /* Preserve standard 2:3 vertical theatrical poster aspect ratio */
+        aspect-ratio: 2 / 3 !important;
+        /* Continuous curved squircle corners */
+        border-radius: 20px !important;
+        overflow: hidden !important;
+        /* Ambient depth elevation shadow separating poster from background blur */
+        box-shadow: 0 16px 44px rgba(0, 0, 0, 0.6) !important;
+    }
+
+    html[data-litefin-scaled] .hero-poster.landscape,
+    html[data-litefin-portrait] .hero-poster.landscape {
+        /* Wide cinematic 16:9 thumbnail format for TV episodes & backdrops */
+        max-width: 640px !important;
+        width: 92% !important;
+        /* Standard 16:9 widescreen video aspect ratio (~360px portrait height) */
+        aspect-ratio: 16 / 9 !important;
+        border-radius: 18px !important;
+        /* Spacing above episode thumbnail and below towards episode title */
+        margin-top: 10px !important;
+        margin-bottom: 30px !important;
+    }
+
+    html[data-litefin-scaled] .hero-poster.square,
+    html[data-litefin-portrait] .hero-poster.square {
+        /* 1:1 Square artwork format for music albums and box sets */
+        max-width: 440px !important;
+        width: 62% !important;
+        aspect-ratio: 1 / 1 !important;
+        border-radius: 20px !important;
+        margin-top: 12px !important;
+        margin-bottom: 30px !important;
+    }
+
+    html[data-litefin-scaled] .hero-poster img,
+    html[data-litefin-portrait] .hero-poster img {
+        /* Ensure poster graphic scales smoothly to fill rounded container bounds */
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: cover !important;
+        border-radius: inherit !important;
+    }
+
+    html[data-litefin-scaled] .details-info-col,
+    html[data-litefin-portrait] .details-info-col {
+        /* Metadata column takes full width under poster */
+        width: 100% !important;
+    }
+
+    html[data-litefin-scaled] .details-logo,
+    html[data-litefin-portrait] .details-logo {
+        /* Hide large logo image in portrait to preserve vertical screen space */
+        display: none !important;
+    }
+
+    /*
+     * ========================================================================
+     * Portrait Action Buttons Layout & Sizing (Centered & 2 Uniform Rows)
+     * ========================================================================
+     * Enlarges circular buttons to 88px touch targets with 36px iconography.
+     * Centers action rows horizontally under typography and metadata badges.
+     * Uses .mobile-action-break to guarantee a perfect 50/50 uniform row split
+     * (e.g. 8 buttons split into 4 & 4, 9 buttons split into 5 & 4).
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .details-actions,
+    html[data-litefin-portrait] .details-actions {
+        /* Centered flex row layout */
+        display: flex !important;
+        flex-wrap: wrap !important;
+        align-items: center !important;
+        justify-content: center !important;
+        /* Center container horizontally within metadata column */
+        margin-left: auto !important;
+        margin-right: auto !important;
+        /* Uniform horizontal and vertical spacing between buttons */
+        gap: 16px 16px !important;
+        width: 100% !important;
+        max-width: 620px !important;
+        /* Vertical clearance separating action rows from metadata chips and synopsis */
+        margin-top: 20px !important;
+        margin-bottom: 36px !important;
+        position: relative !important;
+    }
+
+    /* Flex line break marker dividing action buttons into two uniform rows */
+    html[data-litefin-scaled] .mobile-action-break,
+    html[data-litefin-portrait] .mobile-action-break {
+        display: block !important;
+        flex-basis: 100% !important;
+        width: 100% !important;
+        height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: none !important;
+        pointer-events: none !important;
+    }
+
+    html[data-litefin-scaled] .details-actions > *,
+    html[data-litefin-portrait] .details-actions > * {
+        /* Clear legacy margin-right in favor of native CSS flex gap */
+        margin-right: 0 !important;
+        margin-left: 0 !important;
+        margin-top: 0 !important;
+        margin-bottom: 0 !important;
+    }
+
+    /* Enlarged touch target height across all action buttons (88px) */
+    html[data-litefin-scaled] .details-actions .btn,
+    html[data-litefin-portrait] .details-actions .btn,
+    html[data-litefin-scaled] .details-actions .btn-icon,
+    html[data-litefin-portrait] .details-actions .btn-icon {
+        height: 88px !important;
+        min-height: 88px !important;
+        box-sizing: border-box !important;
+    }
+
+    /* Circular action buttons (Reset, Ghost, Watched, Fav, Audio, Subs, More) */
+    html[data-litefin-scaled] .details-actions .btn-icon,
+    html[data-litefin-portrait] .details-actions .btn-icon,
+    html[data-litefin-scaled] .details-page:not(.tooltips-disabled) .details-actions .play-btn,
+    html[data-litefin-portrait] .details-page:not(.tooltips-disabled) .details-actions .play-btn {
+        width: 88px !important;
+        height: 88px !important;
+        min-width: 88px !important;
+        min-height: 88px !important;
+        border-radius: 50% !important;
+    }
+
+    /* Enlarged SVG icon geometry inside circular buttons (36px) */
+    html[data-litefin-scaled] .details-actions .btn-icon svg,
+    html[data-litefin-portrait] .details-actions .btn-icon svg,
+    html[data-litefin-scaled] .details-page:not(.tooltips-disabled) .details-actions .play-btn svg,
+    html[data-litefin-portrait] .details-page:not(.tooltips-disabled) .details-actions .play-btn svg {
+        width: 36px !important;
+        height: 36px !important;
+        min-width: 36px !important;
+        min-height: 36px !important;
+    }
+
+    /* Primary Resume pill button with progress time badge */
+    html[data-litefin-scaled] .details-actions .resume-btn,
+    html[data-litefin-portrait] .details-actions .resume-btn {
+        height: 88px !important;
+        min-height: 88px !important;
+        padding: 0 30px !important;
+        border-radius: 44px !important;
+        font-size: 1.55rem !important;
+    }
+
+    html[data-litefin-scaled] .details-actions .resume-btn svg,
+    html[data-litefin-portrait] .details-actions .resume-btn svg {
+        width: 34px !important;
+        height: 34px !important;
+        min-width: 34px !important;
+        min-height: 34px !important;
+        margin-right: 12px !important;
+    }
+
+    /* Primary Play pill button when tooltips mode is disabled */
+    html[data-litefin-scaled] .details-page.tooltips-disabled .details-actions .play-btn,
+    html[data-litefin-portrait] .details-page.tooltips-disabled .details-actions .play-btn {
+        height: 88px !important;
+        min-height: 88px !important;
+        padding: 0 34px !important;
+        border-radius: 44px !important;
+        font-size: 1.55rem !important;
+    }
+
+    html[data-litefin-scaled] .details-page.tooltips-disabled .details-actions .play-btn svg,
+    html[data-litefin-portrait] .details-page.tooltips-disabled .details-actions .play-btn svg {
+        width: 34px !important;
+        height: 34px !important;
+        min-width: 34px !important;
+        min-height: 34px !important;
+        margin-right: 12px !important;
+    }
+
+    /*
+     * ========================================================================
+     * Portrait Rich Metadata & Media Rows Alignment (Unified 20px Grid Axis)
+     * ========================================================================
+     * Dials down the legacy 60px desktop side margins across rich metadata chips
+     * and horizontal media row headings in portrait mode to 20px, creating
+     * unbroken vertical alignment with the overview synopsis and details card above.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .details-rich-meta,
+    html[data-litefin-portrait] .details-rich-meta {
+        /* Align rich metadata flush with 20px details synopsis margins */
+        margin: 10px 20px 32px 20px !important;
+        padding: 0 !important;
+    }
+
+    html[data-litefin-scaled] .row-title,
+    html[data-litefin-portrait] .row-title,
+    html[data-litefin-scaled] .songs-title,
+    html[data-litefin-portrait] .songs-title,
+    html[data-litefin-scaled] #playlist-items-title,
+    html[data-litefin-portrait] #playlist-items-title {
+        /* Align section row titles with 20px page side padding */
+        padding-left: 20px !important;
+        padding-right: 20px !important;
+    }
+
+    html[data-litefin-scaled] .see-more-container,
+    html[data-litefin-portrait] .see-more-container {
+        /* Compact see-more button margins in portrait */
+        padding: 16px 20px 24px 20px !important;
+    }
+
+    html[data-litefin-scaled] .person-grid,
+    html[data-litefin-portrait] .person-grid {
+        /* Align person credits grid with 20px side padding */
+        padding-left: 20px !important;
+        padding-right: 20px !important;
+    }
+
+    html[data-litefin-scaled] .media-row--skeleton .row-items-track,
+    html[data-litefin-portrait] .media-row--skeleton .row-items-track {
+        /* Skeleton track padding in portrait mode */
+        padding-left: 20px !important;
+        padding-right: 20px !important;
+    }
+
+    /*
+     * ========================================================================
+     * Portrait Home Carousel Sizing (Recalibrated 120% Vertical Bound)
+     * ========================================================================
+     * Adjusts the home carousel height to 120% (1.2x) in portrait mode, giving
+     * the title, metadata badges, overview synopsis, and progress dots ideal
+     * breathing room without pushing media rows too far down the display.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .hero-carousel-container.immersive .hero-carousel,
+    html[data-litefin-portrait] .hero-carousel-container.immersive .hero-carousel {
+        /* Hero container height in portrait */
+        height: var(--litefin-app-h, 90vh) !important;
+        min-height: var(--litefin-app-h, 650px) !important;
+    }
+
+    html[data-litefin-scaled] .hero-carousel-container.immersive .hero-item,
+    html[data-litefin-portrait] .hero-carousel-container.immersive .hero-item {
+        /* Recalibrated item bottom padding for 1.2x longer carousel content */
+        padding-bottom: 997px !important;
+    }
+
+    html[data-litefin-scaled] .hero-carousel-container.immersive .hero-indicators,
+    html[data-litefin-portrait] .hero-carousel-container.immersive .hero-indicators {
+        /* Position carousel indicators cleanly below description and above rows */
+        bottom: 944px !important;
+    }
+
+    html[data-litefin-scaled] #home-hero-placeholder.style-immersive + .home-rows,
+    html[data-litefin-portrait] #home-hero-placeholder.style-immersive + .home-rows {
+        /* Overlap media rows right below the 1.2x extended carousel */
+        margin-top: -956px !important;
+    }
+
+    /*
+     * ========================================================================
+     * Home Carousel Background Sizing (Recalibrated for 1.2x Carousel)
+     * ========================================================================
+     * Scales the background backdrop image and its gradient blend layers to
+     * proportionally match the 20% taller carousel (60% portrait height),
+     * ensuring artwork blankets the slide before fading smoothly into rows.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .hero-carousel-container .hero-backdrop,
+    html[data-litefin-portrait] .hero-carousel-container .hero-backdrop {
+        /* Restrict backdrop artwork height to cover the 1.2x carousel */
+        height: calc(var(--litefin-app-h, 100vh) * 0.60) !important;
+        max-height: 60vh !important;
+    }
+
+    /*
+     * Redundant Text Shadow Vignette Layer (::before):
+     * The radial/horizontal text shadow vignette is unnecessary on mobile builds
+     * because the text container already provides dedicated contrast backing.
+     * Removing this overlay reveals clean, unoccluded backdrop artwork.
+     */
+    html[data-litefin-scaled] .hero-carousel-container .hero-item::before,
+    html[data-litefin-portrait] .hero-carousel-container .hero-item::before,
+    [data-platform="android"] .hero-carousel-container .hero-item::before {
+        display: none !important;
+        background: none !important;
+    }
+
+    html[data-litefin-scaled] .hero-carousel-container .hero-item::after,
+    html[data-litefin-portrait] .hero-carousel-container .hero-item::after {
+        /* Match bottom gradient blend precisely to the 60% boundary */
+        height: calc(var(--litefin-app-h, 100vh) * 0.60) !important;
+        max-height: 60vh !important;
+        /* Smooth, seamless fade from transparent artwork into solid background */
+        background: linear-gradient(
+            to bottom,
+            transparent 0%,
+            transparent 35%,
+            rgba(0, 0, 0, 0.40) 65%,
+            rgba(0, 0, 0, 0.85) 85%,
+            var(--jf-background, #000000) 100%
+        ) !important;
+    }
+
+    /*
+     * ========================================================================
+     * Ambient Glow Theme Mask Treatment (Recalibrated for 1.2x Carousel)
+     * ========================================================================
+     * In Ambient Glow mode, hero backdrop fade uses CSS alpha masking on .hero-item
+     * so the colorful ambient background mesh on <body> bleeds through seamlessly.
+     * Transition into complete transparency at 60% portrait height.
+     * ========================================================================
+     */
+    html[data-litefin-scaled][data-theme-mode="ambient"] .hero-carousel-container .hero-item,
+    html[data-litefin-portrait][data-theme-mode="ambient"] .hero-carousel-container .hero-item,
+    [data-theme-mode="ambient"] html[data-litefin-scaled] .hero-carousel-container .hero-item,
+    [data-theme-mode="ambient"] html[data-litefin-portrait] .hero-carousel-container .hero-item {
+        /* Alpha mask transition to pure transparent at 60% portrait height */
+        -webkit-mask-image: linear-gradient(to bottom, black 25%, transparent 60%) !important;
+        mask-image: linear-gradient(to bottom, black 25%, transparent 60%) !important;
+    }
+
+    html[data-litefin-scaled] .livetv-page .ltv-tab-header {
+        /* Live TV tab bar */
+        padding: 4px;
+        max-width: calc(100% - 24px);
+        align-self: flex-start !important;
+        margin: 0 !important;
+    }
+
+    html[data-litefin-scaled] .livetv-page .page-header {
+        /* Header horizontal margins */
+        padding-left: 16px !important;
+        padding-right: 16px !important;
+    }
+
+    html[data-litefin-scaled] .livetv-page .ltv-tab-btn {
+        /* Live TV tab buttons */
+        padding: 10px 18px !important;
+        font-size: 1.05rem !important;
+        white-space: nowrap;
+    }
+
+    html[data-litefin-scaled] .livetv-page .page-content {
+        /* Page content margins */
+        padding-left: 12px !important;
+        padding-right: 12px !important;
+    }
+
+    html[data-litefin-scaled] .livetv-page .page-content .person-grid {
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+    }
+
+    html[data-litefin-scaled] .person-grid {
+        /* 3-column person grid layout in portrait */
+        padding-left: 12px !important;
+        padding-right: 12px !important;
+    }
+
+    html[data-litefin-scaled] .person-grid .media-card {
+        width: calc(33.33% - 14px) !important;
+        margin-right: 6px !important;
+        margin-left: 6px !important;
+    }
+
+    html[data-litefin-scaled] .person-grid .card-image {
+        height: auto !important;
+        aspect-ratio: 1 / 1 !important;
+    }
+
+    html[data-litefin-scaled] .sidebar .sidebar-item {
+        /* Touch target height for sidebar icons */
+        height: 96px !important;
+        min-height: 96px !important;
+    }
+
+    html[data-litefin-scaled] .sidebar .item-icon {
+        height: 96px !important;
+    }
+
+    html[data-litefin-scaled] .sidebar .item-icon svg {
+        /* Larger touch icons */
+        width: 44px !important;
+        height: 44px !important;
+        max-height: 44px !important;
+    }
+
+    html[data-litefin-scaled] .epg-grid-container {
+        /* Live TV guide height in portrait */
+        height: calc(var(--litefin-app-h, 100vh) - 347px) !important;
+        touch-action: none;
+    }
+
+    html[data-litefin-scaled] #sidebar-sub-libraries {
+        /* Sub-libraries panel offset */
+        left: 322px !important;
+    }
+
+    /* ========================================================================
+     * Settings Page - Mobile Portrait 2-Page Scenario
+     * ========================================================================
+     * In portrait orientation, Settings transitions between two dedicated screens:
+     * Screen 1: Category list with rich descriptions and disclosure indicators.
+     * Screen 2: Dedicated category controls with sticky navigation and back button.
+     * Landscape orientation remains strictly isolated in its 2-column layout.
+     */
+
+    /*
+     * When settings mobile portrait view is active, delegate vertical scrolling
+     * entirely to the active settings viewport (.settings-sidebar or .settings-content-panel).
+     * Prevents parent container scroll traps.
+     */
+    body.settings-mobile-portrait #app {
+        overflow-y: hidden !important;
+    }
+
+    html[data-litefin-scaled] .settings-page,
+    html[data-litefin-portrait] .settings-page,
+    .settings-page.mobile-portrait {
+        width: 100% !important;
+        height: 100% !important;
+        min-height: 0 !important;
+        max-height: 100% !important;
+        flex: 1 1 0px !important;
+        overflow: hidden !important;
+        touch-action: pan-y !important;
+    }
+
+    html[data-litefin-scaled] .settings-split-view,
+    html[data-litefin-portrait] .settings-split-view,
+    .settings-page.mobile-portrait .settings-split-view {
+        width: 100% !important;
+        height: 100% !important;
+        min-height: 0 !important;
+        max-height: 100% !important;
+        flex: 1 1 0px !important;
+        display: flex !important;
+        flex-direction: column !important;
+        overflow: hidden !important;
+        position: relative !important;
+        touch-action: pan-y !important;
+    }
+
+    /* ------------------------------------------------------------------------
+     * Screen 1: Category Selection View (Default when mobile detail is closed)
+     * ------------------------------------------------------------------------ */
+    html[data-litefin-scaled] .settings-page:not(.mobile-detail-open) .settings-sidebar,
+    html[data-litefin-portrait] .settings-page:not(.mobile-detail-open) .settings-sidebar,
+    .settings-page.mobile-portrait:not(.mobile-detail-open) .settings-sidebar {
+        display: block !important;
+        flex: 1 1 0px !important;
+        width: 100% !important;
+        min-width: 100% !important;
+        max-width: 100% !important;
+        height: 100% !important;
+        min-height: 0 !important;
+        max-height: 100% !important;
+        border: none !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        background: transparent !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        -webkit-overflow-scrolling: touch !important;
+        touch-action: pan-y !important;
+        overscroll-behavior-y: contain !important;
+        transform: translateZ(0) !important;
+        -webkit-transform: translateZ(0) !important;
+        will-change: scroll-position !important;
+    }
+
+    /* Suppress content panel on Screen 1 */
+    html[data-litefin-scaled] .settings-page:not(.mobile-detail-open) .settings-content-panel,
+    html[data-litefin-portrait] .settings-page:not(.mobile-detail-open) .settings-content-panel,
+    .settings-page.mobile-portrait:not(.mobile-detail-open) .settings-content-panel {
+        display: none !important;
+    }
+
+    /* Header styling with title and subtitle */
+    html[data-litefin-scaled] .settings-page .settings-sidebar-header,
+    html[data-litefin-portrait] .settings-page .settings-sidebar-header,
+    .settings-page.mobile-portrait .settings-sidebar-header {
+        /* Generous top offset clears the floating mobile top navigation bar */
+        padding: calc(145px + env(safe-area-inset-top, 0px)) 20px 14px 20px !important;
+        margin: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 6px !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .settings-sidebar-header h2,
+    html[data-litefin-portrait] .settings-page .settings-sidebar-header h2,
+    .settings-page.mobile-portrait .settings-sidebar-header h2 {
+        font-size: 2.4rem !important;
+        font-weight: 700 !important;
+        letter-spacing: -0.5px !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        margin: 0 !important;
+        line-height: 1.15 !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .settings-sidebar-subtitle,
+    html[data-litefin-portrait] .settings-page .settings-sidebar-subtitle,
+    .settings-page.mobile-portrait .settings-sidebar-subtitle {
+        display: block !important;
+        font-size: 1.15rem !important;
+        font-weight: 400 !important;
+        color: var(--jf-text-secondary, rgba(255, 255, 255, 0.7)) !important;
+        margin: 0 !important;
+        line-height: 1.35 !important;
+    }
+
+    /* Category list container with safe bottom scroll clearance */
+    html[data-litefin-scaled] .settings-page .settings-menu-list,
+    html[data-litefin-portrait] .settings-page .settings-menu-list,
+    .settings-page.mobile-portrait .settings-menu-list,
+    html[data-litefin-scaled] .settings-page .settings-sidebar-list,
+    html[data-litefin-portrait] .settings-page .settings-sidebar-list,
+    .settings-page.mobile-portrait .settings-sidebar-list {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 10px !important;
+        padding: 10px 16px 20px 16px !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+        touch-action: pan-y !important;
+    }
+
+    /*
+     * Tab buttons in portrait mode: strictly uniform appearance.
+     * No enlargement, scaling, focus outlines, or active highlight differences.
+     * Every tab card appears identical whether opened, previously visited, or unvisited.
+     */
+    html[data-litefin-scaled] .settings-page .settings-menu-btn,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn,
+    .settings-page.mobile-portrait .settings-menu-btn,
+    html[data-litefin-scaled] .settings-page .settings-menu-btn:focus,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn:focus,
+    .settings-page.mobile-portrait .settings-menu-btn:focus,
+    html[data-litefin-scaled] .settings-page .settings-menu-btn.focused,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn.focused,
+    .settings-page.mobile-portrait .settings-menu-btn.focused,
+    html[data-litefin-scaled] .settings-page .settings-menu-btn:hover,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn:hover,
+    .settings-page.mobile-portrait .settings-menu-btn:hover,
+    html[data-litefin-scaled] .settings-page .settings-menu-btn.active,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn.active,
+    .settings-page.mobile-portrait .settings-menu-btn.active,
+    html[data-litefin-scaled] .settings-page .settings-menu-btn:active,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn:active,
+    .settings-page.mobile-portrait .settings-menu-btn:active {
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: center !important;
+        justify-content: flex-start !important;
+        width: 100% !important;
+        min-height: 78px !important;
+        margin: 0 !important;
+        padding: 16px 20px !important;
+        box-sizing: border-box !important;
+        border-radius: 18px !important;
+        background: rgba(255, 255, 255, 0.04) !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        -webkit-backdrop-filter: blur(16px) !important;
+        backdrop-filter: blur(16px) !important;
+        cursor: pointer !important;
+        text-align: left !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        transform: none !important;
+        -webkit-transform: none !important;
+        outline: none !important;
+        box-shadow: none !important;
+        touch-action: pan-y !important;
+    }
+
+    /* Icon display remains consistent across states */
+    html[data-litefin-scaled] .settings-page .settings-menu-btn .menu-icon .icon-filled,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn .menu-icon .icon-filled,
+    .settings-page.mobile-portrait .settings-menu-btn .menu-icon .icon-filled {
+        display: none !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .settings-menu-btn .menu-icon .icon-outline,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn .menu-icon .icon-outline,
+    .settings-page.mobile-portrait .settings-menu-btn .menu-icon .icon-outline {
+        display: block !important;
+    }
+
+    /* Category icon container - enlarged badge reflecting active theme accent */
+    html[data-litefin-scaled] .settings-page .settings-menu-btn .menu-icon,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn .menu-icon,
+    .settings-page.mobile-portrait .settings-menu-btn .menu-icon {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 52px !important;
+        height: 52px !important;
+        min-width: 52px !important;
+        min-height: 52px !important;
+        border-radius: 14px !important;
+        background: var(--jf-accent-light, rgba(var(--jf-accent-rgb, 0, 164, 220), 0.12)) !important;
+        color: var(--jf-accent, #00a4dc) !important;
+        margin-right: 18px !important;
+        margin-left: 0 !important;
+        flex-shrink: 0 !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .settings-menu-btn .menu-icon svg,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn .menu-icon svg,
+    .settings-page.mobile-portrait .settings-menu-btn .menu-icon svg {
+        width: 28px !important;
+        height: 28px !important;
+        stroke-width: 2.4px !important;
+        color: var(--jf-accent, #00a4dc) !important;
+    }
+
+    /* Text block: Title and localized summary */
+    html[data-litefin-scaled] .settings-page .settings-menu-btn .menu-text-wrap,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn .menu-text-wrap,
+    .settings-page.mobile-portrait .settings-menu-btn .menu-text-wrap {
+        display: flex !important;
+        flex-direction: column !important;
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        justify-content: center !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .settings-menu-btn .menu-label,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn .menu-label,
+    .settings-page.mobile-portrait .settings-menu-btn .menu-label {
+        font-size: 1.35rem !important;
+        font-weight: 600 !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        line-height: 1.25 !important;
+        letter-spacing: -0.2px !important;
+        margin-bottom: 3px !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .settings-menu-btn .menu-desc,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn .menu-desc,
+    .settings-page.mobile-portrait .settings-menu-btn .menu-desc {
+        display: -webkit-box !important;
+        -webkit-box-orient: vertical !important;
+        -webkit-line-clamp: 2 !important;
+        font-size: 1.05rem !important;
+        font-weight: 400 !important;
+        color: var(--jf-text-secondary, rgba(255, 255, 255, 0.7)) !important;
+        line-height: 1.35 !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        margin: 0 !important;
+    }
+
+    /* Right-aligned disclosure chevron indicator */
+    html[data-litefin-scaled] .settings-page .settings-menu-btn .menu-chevron,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn .menu-chevron,
+    .settings-page.mobile-portrait .settings-menu-btn .menu-chevron {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 26px !important;
+        height: 26px !important;
+        min-width: 26px !important;
+        color: rgba(255, 255, 255, 0.35) !important;
+        margin-left: 10px !important;
+        flex-shrink: 0 !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .settings-menu-btn .menu-chevron svg,
+    html[data-litefin-portrait] .settings-page .settings-menu-btn .menu-chevron svg,
+    .settings-page.mobile-portrait .settings-menu-btn .menu-chevron svg {
+        width: 22px !important;
+        height: 22px !important;
+        stroke-width: 2.6px !important;
+    }
+
+    /* ------------------------------------------------------------------------
+     * Screen 2: Tab Detail View (When mobile detail is active)
+     * ------------------------------------------------------------------------ */
+    /* Suppress sidebar category list on Screen 2 */
+    html[data-litefin-scaled] .settings-page.mobile-detail-open .settings-sidebar,
+    html[data-litefin-portrait] .settings-page.mobile-detail-open .settings-sidebar,
+    .settings-page.mobile-portrait.mobile-detail-open .settings-sidebar {
+        display: none !important;
+    }
+
+    /* Full-width content container on Screen 2 */
+    html[data-litefin-scaled] .settings-page.mobile-detail-open .settings-content-panel.page-content,
+    html[data-litefin-portrait] .settings-page.mobile-detail-open .settings-content-panel.page-content,
+    .settings-page.mobile-portrait.mobile-detail-open .settings-content-panel.page-content {
+        display: block !important;
+        flex: 1 1 0px !important;
+        width: 100% !important;
+        min-width: 100% !important;
+        max-width: 100% !important;
+        height: 100% !important;
+        min-height: 0 !important;
+        max-height: 100% !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        -webkit-overflow-scrolling: touch !important;
+        touch-action: pan-y !important;
+        overscroll-behavior-y: contain !important;
+        transform: translateZ(0) !important;
+        -webkit-transform: translateZ(0) !important;
+        will-change: scroll-position !important;
+    }
+
+    /* Screen 2 Body Scroll Area */
+    html[data-litefin-scaled] .settings-page .settings-tab-body,
+    html[data-litefin-portrait] .settings-page .settings-tab-body,
+    .settings-page.mobile-portrait .settings-tab-body {
+        display: block !important;
+        width: 100% !important;
+        /* Push active settings content comfortably below the fixed topbar */
+        padding: calc(150px + env(safe-area-inset-top, 0px)) 20px 24px 20px !important;
+        box-sizing: border-box !important;
+    }
+
+    /* Tab Title styling - clean, bold, large header inspired by iOS settings design */
+    html[data-litefin-scaled] .settings-page .content-title,
+    html[data-litefin-portrait] .settings-page .content-title,
+    .settings-page.mobile-portrait .content-title {
+        font-size: 2.6rem !important;
+        font-weight: 700 !important;
+        letter-spacing: -0.6px !important;
+        color: #ffffff !important;
+        margin: 0 0 8px 0 !important;
+        padding-bottom: 0 !important;
+        line-height: 1.15 !important;
+    }
+
+    /* Tab Subtitle styling with subtle divider for clear visual hierarchy */
+    html[data-litefin-scaled] .settings-page .content-subtitle,
+    html[data-litefin-portrait] .settings-page .content-subtitle,
+    .settings-page.mobile-portrait .content-subtitle {
+        font-size: 1.15rem !important;
+        font-weight: 400 !important;
+        color: var(--jf-text-secondary, rgba(255, 255, 255, 0.65)) !important;
+        margin: 0 0 24px 0 !important;
+        padding-bottom: 18px !important;
+        line-height: 1.45 !important;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+    }
+
+    /*
+     * Bottom Scrolling Spacer
+     * Generous blank clearance element placed at the end of both Screen 1 (categories)
+     * and Screen 2 (active settings controls). Guarantees the user can scroll well past
+     * the bottom navigation bar so no card or toggle is ever clipped or obscured.
+     */
+    html[data-litefin-scaled] .settings-page .settings-bottom-spacer,
+    html[data-litefin-portrait] .settings-page .settings-bottom-spacer,
+    .settings-page.mobile-portrait .settings-bottom-spacer {
+        display: block !important;
+        width: 100% !important;
+        height: 220px !important;
+        height: calc(200px + env(safe-area-inset-bottom, 24px)) !important;
+        min-height: 180px !important;
+        flex-shrink: 0 !important;
+        pointer-events: none !important;
+        background: transparent !important;
+    }
+
+    /* ------------------------------------------------------------------------
+     * Setting Controls Adaptation for Portrait Viewport
+     * ------------------------------------------------------------------------ */
+    html[data-litefin-scaled] .settings-page .setting-item,
+    html[data-litefin-portrait] .settings-page .setting-item,
+    .settings-page.mobile-portrait .setting-item {
+        /*
+         * Horizontal Setting Row Layout:
+         * Places labels and descriptions on the left, while toggles, dropdown buttons,
+         * and options align cleanly to the right side, just like in landscape mode.
+         */
+        display: flex !important;
+        flex-direction: row !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+        width: 100% !important;
+        min-width: 0 !important;
+        padding: 18px 20px !important;
+        margin: 12px 0 !important;
+        min-height: 72px !important;
+        border-radius: 20px !important;
+        background: rgba(255, 255, 255, 0.04) !important;
+        border: 1px solid rgba(255, 255, 255, 0.07) !important;
+        box-sizing: border-box !important;
+        gap: 16px !important;
+        transition: background-color 0.15s ease, border-color 0.15s ease !important;
+    }
+
+    /* Elevated interactive feedback on card touch */
+    html[data-litefin-scaled] .settings-page .setting-item:active,
+    html[data-litefin-portrait] .settings-page .setting-item:active,
+    .settings-page.mobile-portrait .setting-item:active {
+        background: rgba(255, 255, 255, 0.06) !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .setting-item .setting-label,
+    html[data-litefin-portrait] .settings-page .setting-item .setting-label,
+    .settings-page.mobile-portrait .setting-item .setting-label {
+        /* Flexible left column for setting title and description */
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        width: auto !important;
+        padding-right: 8px !important;
+        margin-bottom: 0 !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .setting-item .setting-name,
+    html[data-litefin-portrait] .settings-page .setting-item .setting-name,
+    .settings-page.mobile-portrait .setting-item .setting-name {
+        display: block !important;
+        font-size: 1.35rem !important;
+        font-weight: 600 !important;
+        letter-spacing: -0.3px !important;
+        color: #ffffff !important;
+        margin-bottom: 4px !important;
+        line-height: 1.25 !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .setting-item .setting-description,
+    html[data-litefin-portrait] .settings-page .setting-item .setting-description,
+    .settings-page.mobile-portrait .setting-item .setting-description {
+        display: block !important;
+        font-size: 1.0rem !important;
+        font-weight: 400 !important;
+        color: var(--jf-text-secondary, rgba(255, 255, 255, 0.65)) !important;
+        line-height: 1.35 !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .setting-item .setting-control,
+    html[data-litefin-portrait] .settings-page .setting-item .setting-control,
+    .settings-page.mobile-portrait .setting-item .setting-control {
+        /* Right-aligned control group matching landscape presentation */
+        flex: 0 0 auto !important;
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: 52% !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: flex-end !important;
+        flex-wrap: wrap !important;
+        gap: 8px !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .setting-item .btn-option,
+    html[data-litefin-portrait] .settings-page .setting-item .btn-option,
+    .settings-page.mobile-portrait .setting-item .btn-option {
+        margin-left: 0 !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+        min-height: 46px !important;
+        padding: 10px 16px !important;
+        font-size: 1.15rem !important;
+        font-weight: 500 !important;
+        border-radius: 12px !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid rgba(255, 255, 255, 0.12) !important;
+        color: #ffffff !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
+        white-space: nowrap !important;
+    }
+
+    /* Option select triggers and action buttons styled and positioned on the right */
+    html[data-litefin-scaled] .settings-page .setting-item .select-btn,
+    html[data-litefin-scaled] .settings-page .setting-item .theme-color-select-btn,
+    html[data-litefin-scaled] .settings-page .setting-item .loader-style-select-btn,
+    html[data-litefin-scaled] .settings-page .setting-item .setting-action-btn,
+    html[data-litefin-portrait] .settings-page .setting-item .select-btn,
+    html[data-litefin-portrait] .settings-page .setting-item .theme-color-select-btn,
+    html[data-litefin-portrait] .settings-page .setting-item .loader-style-select-btn,
+    html[data-litefin-portrait] .settings-page .setting-item .setting-action-btn,
+    .settings-page.mobile-portrait .setting-item .select-btn,
+    .settings-page.mobile-portrait .setting-item .theme-color-select-btn,
+    .settings-page.mobile-portrait .setting-item .loader-style-select-btn,
+    .settings-page.mobile-portrait .setting-item .setting-action-btn {
+        min-width: 0 !important;
+        max-width: 100% !important;
+        min-height: 48px !important;
+        padding: 10px 16px !important;
+        font-size: 1.15rem !important;
+        font-weight: 500 !important;
+        border-radius: 12px !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid rgba(255, 255, 255, 0.12) !important;
+        color: #ffffff !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        box-sizing: border-box !important;
+        text-align: right !important;
+        gap: 8px !important;
+        transition: background-color 0.15s ease, transform 0.1s ease !important;
+    }
+
+    /* Clean truncation for select buttons with longer text values */
+    html[data-litefin-scaled] .settings-page .setting-item .select-btn .btn-label,
+    html[data-litefin-portrait] .settings-page .setting-item .select-btn .btn-label,
+    .settings-page.mobile-portrait .setting-item .select-btn .btn-label {
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
+        max-width: 150px !important;
+    }
+
+    html[data-litefin-scaled] .settings-page .setting-item .select-btn:active,
+    html[data-litefin-portrait] .settings-page .setting-item .select-btn:active,
+    .settings-page.mobile-portrait .setting-item .select-btn:active {
+        transform: scale(0.98) !important;
+        background: rgba(255, 255, 255, 0.14) !important;
+    }
+
+    /* Range sliders and select inputs appropriately bounded on the right */
+    html[data-litefin-scaled] .settings-page .setting-item input[type="range"],
+    html[data-litefin-scaled] .settings-page .setting-item select,
+    html[data-litefin-portrait] .settings-page .setting-item input[type="range"],
+    html[data-litefin-portrait] .settings-page .setting-item select,
+    .settings-page.mobile-portrait .setting-item input[type="range"],
+    .settings-page.mobile-portrait .setting-item select {
+        width: auto !important;
+        min-width: 120px !important;
+        max-width: 180px !important;
+    }
+
+    /* ------------------------------------------------------------------------
+     * Modal Dialogs Sizing in Mobile Portrait Viewport
+     * Generous width and height with modern rounded sheet styling
+     * ------------------------------------------------------------------------ */
+    html[data-litefin-scaled] .settings-modal,
+    html[data-litefin-portrait] .settings-modal,
+    .settings-page.mobile-portrait .settings-modal,
+    .mobile-portrait .settings-modal,
+    html[data-litefin-scaled] .player-media-info-modal,
+    html[data-litefin-portrait] .player-media-info-modal,
+    html[data-litefin-scaled] .media-info-modal,
+    html[data-litefin-portrait] .media-info-modal,
+    html[data-litefin-scaled] .fav-languages-modal,
+    html[data-litefin-portrait] .fav-languages-modal,
+    .mobile-portrait .fav-languages-modal,
+    html[data-litefin-scaled] .modal-overlay .settings-modal,
+    html[data-litefin-portrait] .modal-overlay .settings-modal,
+    .modal-overlay .settings-modal {
+        /*
+         * Responsive modal dialog with maximum width constraint:
+         * Uses calc(100% - 32px) with max-width: 520px to prevent edge bleeding on tablets/large phones.
+         * Guarantees ample vertical space up to calc(100vh - 48px).
+         */
+        width: calc(100% - 32px) !important;
+        max-width: 520px !important;
+        min-width: 0 !important;
+        max-height: 88vh !important;
+        max-height: calc(100% - 48px) !important;
+        border-radius: 24px !important;
+        box-sizing: border-box !important;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6) !important;
+    }
+
+    html[data-litefin-scaled] .fav-languages-modal .fav-lang-list,
+    html[data-litefin-portrait] .fav-languages-modal .fav-lang-list,
+    .mobile-portrait .fav-languages-modal .fav-lang-list {
+        max-height: calc(88vh - 160px) !important;
+        max-height: calc(100% - 160px) !important;
+    }
+
+    /*
+     * ========================================================================
+     * Mobile Portrait Player Playback Info Overlay
+     * ========================================================================
+     * Centers playback info panel as a responsive modal card on portrait viewports.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] #osdPlaybackInfoOverlay,
+    html[data-litefin-portrait] #osdPlaybackInfoOverlay,
+    html[data-litefin-touch] #osdPlaybackInfoOverlay,
+    html[data-platform="android"] #osdPlaybackInfoOverlay {
+        top: 50% !important;
+        left: 50% !important;
+        right: auto !important;
+        bottom: auto !important;
+        transform: translate(-50%, -50%) !important;
+        width: calc(100% - 32px) !important;
+        max-width: 480px !important;
+        max-height: calc(100vh - 48px) !important;
+        max-height: calc(100% - 48px) !important;
+        background: rgba(12, 12, 16, 0.95) !important;
+        -webkit-backdrop-filter: blur(24px) !important;
+        backdrop-filter: blur(24px) !important;
+        border: 1px solid rgba(255, 255, 255, 0.16) !important;
+        border-radius: 22px !important;
+        padding: 16px 20px !important;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8) !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        z-index: 10002 !important;
+        box-sizing: border-box !important;
+    }
+
+    html[data-litefin-scaled] .settings-modal .modal-header,
+    html[data-litefin-portrait] .settings-modal .modal-header,
+    .settings-page.mobile-portrait .settings-modal .modal-header,
+    .mobile-portrait .settings-modal .modal-header {
+        padding: 20px 24px 12px 24px !important;
+    }
+
+    html[data-litefin-scaled] .settings-modal .modal-header h2,
+    html[data-litefin-portrait] .settings-modal .modal-header h2,
+    .settings-page.mobile-portrait .settings-modal .modal-header h2,
+    .mobile-portrait .settings-modal .modal-header h2 {
+        font-size: 1.55rem !important;
+        font-weight: 700 !important;
+        color: #ffffff !important;
+        padding: 4px 0 !important;
+    }
+
+    html[data-litefin-scaled] .settings-modal .modal-options,
+    html[data-litefin-portrait] .settings-modal .modal-options,
+    .settings-page.mobile-portrait .settings-modal .modal-options,
+    .mobile-portrait .settings-modal .modal-options,
+    html[data-litefin-scaled] .media-info-scrollable,
+    html[data-litefin-portrait] .media-info-scrollable {
+        padding: 10px 18px !important;
+        max-height: calc(88vh - 100px) !important;
+        max-height: calc(100% - 100px) !important;
+        box-sizing: border-box !important;
+    }
+
+    html[data-litefin-scaled] .settings-modal .modal-option-btn,
+    html[data-litefin-portrait] .settings-modal .modal-option-btn,
+    .settings-page.mobile-portrait .settings-modal .modal-option-btn,
+    .mobile-portrait .settings-modal .modal-option-btn {
+        min-height: 60px !important;
+        padding: 14px 20px !important;
+        margin-bottom: 8px !important;
+        font-size: 1.25rem !important;
+        font-weight: 500 !important;
+        border-radius: 14px !important;
+    }
+
+    html[data-litefin-scaled] .settings-modal .modal-actions,
+    html[data-litefin-portrait] .settings-modal .modal-actions,
+    .settings-page.mobile-portrait .settings-modal .modal-actions,
+    .mobile-portrait .settings-modal .modal-actions {
+        padding: 14px 20px 18px 20px !important;
+    }
+
+    html[data-litefin-scaled] .settings-modal .modal-action-btn,
+    html[data-litefin-portrait] .settings-modal .modal-action-btn,
+    .settings-page.mobile-portrait .settings-modal .modal-action-btn,
+    .mobile-portrait .settings-modal .modal-action-btn {
+        min-height: 52px !important;
+        padding: 12px 32px !important;
+        font-size: 1.2rem !important;
+        font-weight: 600 !important;
+        border-radius: 14px !important;
+    }
+
+    html[data-litefin-scaled] .details-page .details-title {
+        /* Responsive title wrapping */
+        max-width: 100% !important;
+        font-size: 2.6rem !important;
+        line-height: 1.15 !important;
+        overflow-wrap: anywhere !important;
+        word-break: break-word !important;
+    }
+
+    html[data-litefin-scaled] .details-page .details-original-title {
+        max-width: 100% !important;
+        overflow-wrap: anywhere !important;
+        word-break: break-word !important;
+    }
+
+    html[data-litefin-scaled] .details-page .details-main-split,
+    html[data-litefin-scaled] .details-page .details-content {
+        overflow-x: hidden !important;
+        max-width: 100% !important;
+    }
+
+    html[data-litefin-scaled] .details-page .details-info-col,
+    html[data-litefin-scaled] .details-page .hero-info {
+        max-width: 100% !important;
+        min-width: 0 !important;
+        overflow-x: hidden !important;
+    }
+
+    /*
+     * ========================================================================
+     * Mobile Portrait Details Page: Episode List & Next-Up Vertical Layout
+     * ========================================================================
+     * Transforms horizontal TV episode rows into full-bleed vertical cards:
+     * - Stacks the 16:9 thumbnail on top spanning full container width.
+     * - Places title, metadata badges, and overview in a clean column below.
+     * - Eliminates tight horizontal squeezing and awkward text truncation.
+     * - Applies smooth tactile press feedback for mobile touch interactions.
+     * ========================================================================
+     */
+
+    /* Episode list container padding and flow overrides */
+    html[data-litefin-scaled] .details-page .episode-list-container,
+    html[data-litefin-portrait] .details-page .episode-list-container,
+    html[data-litefin-scaled] .season-page .episode-list-container,
+    html[data-litefin-portrait] .season-page .episode-list-container,
+    html[data-litefin-scaled] .episodes-list.vertical-list .episode-list-container,
+    html[data-litefin-portrait] .episodes-list.vertical-list .episode-list-container,
+    html[data-litefin-scaled] .next-up-row.vertical-list .episode-list-container,
+    html[data-litefin-portrait] .next-up-row.vertical-list .episode-list-container {
+        display: flex !important;
+        flex-direction: column !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        /* Aligns card edges perfectly with the 20px details page side margins */
+        padding: 0 20px !important;
+        margin-top: 14px !important;
+        margin-bottom: 24px !important;
+        gap: 18px !important;
+        box-sizing: border-box !important;
+    }
+
+    /* Ensure vertical-list containers don't restrict width or clip content */
+    html[data-litefin-scaled] .details-page .vertical-list,
+    html[data-litefin-portrait] .details-page .vertical-list,
+    html[data-litefin-scaled] .season-page .vertical-list,
+    html[data-litefin-portrait] .season-page .vertical-list {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        overflow: visible !important;
+        padding: 0 !important;
+        box-sizing: border-box !important;
+    }
+
+    /* Episode row item shell */
+    html[data-litefin-scaled] .episode-row,
+    html[data-litefin-portrait] .episode-row {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        height: auto !important;
+        min-height: 0 !important;
+        margin-bottom: 0 !important;
+        box-sizing: border-box !important;
+        contain: none !important;
+    }
+
+    /* Vertical stacked episode card button with rich dark backdrop */
+    html[data-litefin-scaled] .episode-row-card,
+    html[data-litefin-portrait] .episode-row-card {
+        display: flex !important;
+        flex-direction: column !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        height: auto !important;
+        min-height: 0 !important;
+        /* Rich dark card container with glass blur */
+        background: rgba(14, 14, 18, 0.92) !important;
+        border: 1px solid rgba(255, 255, 255, 0.12) !important;
+        -webkit-backdrop-filter: blur(20px) !important;
+        backdrop-filter: blur(20px) !important;
+        border-radius: 20px !important;
+        overflow: hidden !important;
+        position: relative !important;
+        box-sizing: border-box !important;
+        padding: 0 !important;
+        text-align: left !important;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45) !important;
+        touch-action: manipulation !important;
+        outline: none !important;
+        transform: translateZ(0) !important;
+        transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease !important;
+    }
+
+    /* Suppress sticky remote-focus outlines on touch interactions */
+    html[data-litefin-touch] .episode-row-card:focus:not(:active) {
+        transform: none !important;
+        outline: none !important;
+    }
+
+    /* Suppress TV border animation pseudo-element */
+    html[data-litefin-scaled] .episode-row-card::after,
+    html[data-litefin-portrait] .episode-row-card::after {
+        display: none !important;
+    }
+
+    /* Tactile spring compression on mobile press */
+    html[data-litefin-scaled] .episode-row-card:active,
+    html[data-litefin-portrait] .episode-row-card:active,
+    html[data-litefin-touch] .episode-row-card:active {
+        transform: scale(0.98) !important;
+        background: rgba(22, 22, 28, 0.96) !important;
+        border-color: rgba(255, 255, 255, 0.25) !important;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5) !important;
+    }
+
+    /* Full-width cinematic 16:9 thumbnail on top of the card */
+    html[data-litefin-scaled] .episode-row-thumb,
+    html[data-litefin-portrait] .episode-row-thumb {
+        width: 100% !important;
+        min-width: 100% !important;
+        max-width: 100% !important;
+        height: auto !important;
+        aspect-ratio: 16 / 9 !important;
+        position: relative !important;
+        overflow: hidden !important;
+        background: rgba(0, 0, 0, 0.45) !important;
+        border-top-left-radius: 19px !important;
+        border-top-right-radius: 19px !important;
+        border-bottom-left-radius: 0 !important;
+        border-bottom-right-radius: 0 !important;
+        flex-shrink: 0 !important;
+        margin: 0 !important;
+        -webkit-mask-image: none !important;
+        mask-image: none !important;
+    }
+
+    /* High-resolution responsive image scaling */
+    html[data-litefin-scaled] .episode-row-thumb img,
+    html[data-litefin-portrait] .episode-row-thumb img {
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: cover !important;
+        display: block !important;
+        border-radius: 0 !important;
+    }
+
+    /* Episode information column positioned cleanly below thumbnail with black tint for superior readability */
+    html[data-litefin-scaled] .episode-row-info,
+    html[data-litefin-portrait] .episode-row-info {
+        display: flex !important;
+        flex-direction: column !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        height: auto !important;
+        min-height: 0 !important;
+        padding: 16px 18px 18px 18px !important;
+        box-sizing: border-box !important;
+        justify-content: flex-start !important;
+        /* Black tint behind text to enhance contrast over bright backdrops */
+        background: rgba(8, 8, 12, 0.88) !important;
+        -webkit-backdrop-filter: blur(12px) !important;
+        backdrop-filter: blur(12px) !important;
+        overflow: visible !important;
+    }
+
+    /* Prominent multi-line episode title */
+    html[data-litefin-scaled] .episode-row-title,
+    html[data-litefin-portrait] .episode-row-title {
+        display: -webkit-box !important;
+        -webkit-line-clamp: 2 !important;
+        line-clamp: 2 !important;
+        -webkit-box-orient: vertical !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: normal !important;
+        font-size: 1.55rem !important;
+        font-weight: 700 !important;
+        line-height: 1.35 !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        margin: 0 0 8px 0 !important;
+        width: 100% !important;
+        letter-spacing: -0.2px !important;
+    }
+
+    /* Balanced metadata row with rating, duration, and end-time */
+    html[data-litefin-scaled] .episode-row-meta,
+    html[data-litefin-portrait] .episode-row-meta {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        align-items: center !important;
+        gap: 6px 14px !important;
+        font-size: 1.25rem !important;
+        line-height: 1.2 !important;
+        color: var(--jf-text-secondary, rgba(255, 255, 255, 0.7)) !important;
+        margin: 0 0 10px 0 !important;
+        width: 100% !important;
+        white-space: normal !important;
+        overflow: visible !important;
+    }
+
+    html[data-litefin-scaled] .episode-row-meta > *,
+    html[data-litefin-portrait] .episode-row-meta > * {
+        margin-right: 0 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+    }
+
+    /* Star rating chip */
+    html[data-litefin-scaled] .episode-row-rating,
+    html[data-litefin-portrait] .episode-row-rating {
+        display: inline-flex !important;
+        align-items: center !important;
+        color: #f5c518 !important;
+        font-weight: 700 !important;
+    }
+
+    html[data-litefin-scaled] .episode-row-rating svg,
+    html[data-litefin-portrait] .episode-row-rating svg {
+        width: 16px !important;
+        height: 16px !important;
+        margin-right: 4px !important;
+        fill: currentColor !important;
+        display: inline-block !important;
+    }
+
+    /* Legible multi-line synopsis clamped to 3 lines */
+    html[data-litefin-scaled] .episode-row-overview,
+    html[data-litefin-portrait] .episode-row-overview {
+        display: -webkit-box !important;
+        -webkit-line-clamp: 3 !important;
+        line-clamp: 3 !important;
+        -webkit-box-orient: vertical !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        font-size: 1.25rem !important;
+        line-height: 1.5 !important;
+        color: rgba(255, 255, 255, 0.78) !important;
+        margin: 0 !important;
+        opacity: 1 !important;
+        width: 100% !important;
+    }
+
+    /* "See More" episodes button */
+    html[data-litefin-scaled] .episode-row .see-more-card,
+    html[data-litefin-portrait] .episode-row .see-more-card {
+        min-height: 64px !important;
+        height: 64px !important;
+        border-radius: 18px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        background: rgba(14, 14, 18, 0.92) !important;
+        border: 1.5px dashed rgba(255, 255, 255, 0.2) !important;
+        box-shadow: none !important;
+    }
+
+    /*
+     * ========================================================================
+     * Tooltip Suppression on Mobile Portrait & Touch Devices
+     * ========================================================================
+     * Suppresses remote-control focus tooltip popups that linger over text
+     * and taglines on mobile touchscreens.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .action-btn-tooltip-bar,
+    html[data-litefin-portrait] .action-btn-tooltip-bar,
+    html[data-litefin-touch] .action-btn-tooltip-bar,
+    .mobile-portrait .action-btn-tooltip-bar {
+        display: none !important;
+        opacity: 0 !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+    }
+
+    /*
+     * ========================================================================
+     * Seerr Discover Page Mobile Top Clearance & Layout
+     * ========================================================================
+     * Guarantees that the top row of media cards in Seerr Discover clears the
+     * fixed mobile topbar with a comfortable buffer.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .discover-page .page-content,
+    html[data-litefin-portrait] .discover-page .page-content,
+    html[data-litefin-scaled] .discover-page .discover-content,
+    html[data-litefin-portrait] .discover-page .discover-content,
+    body.mobile-topbar-visible .discover-page .page-content,
+    body.mobile-topbar-visible .discover-page .discover-content {
+        padding-top: calc(145px + env(safe-area-inset-top, 0px)) !important;
+        box-sizing: border-box !important;
+    }
+
+    html[data-litefin-scaled] .discover-controls,
+    html[data-litefin-portrait] .discover-controls {
+        padding: 16px 20px 8px 20px !important;
+    }
+
+    /*
+     * ========================================================================
+     * Seerr Details Page Mobile Portrait: Buttons, Spacing & Polish
+     * ========================================================================
+     * Reconfigures Seerr details page action buttons and vertical spacing:
+     * - Enlarges buttons to 80px circular touch targets with 32px iconography.
+     * - Centers buttons in a balanced flex row with generous 16px gaps.
+     * - Provides tactile spring compression feedback on touch press.
+     * - Distinct coloring for cancel, request, trailer, and watchlist actions.
+     * - Refines tagline, overview synopsis, and metadata chips spacing.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .seerr-details-page .hero-poster,
+    html[data-litefin-portrait] .seerr-details-page .hero-poster {
+        /* Centered poster with balanced clearance below topbar */
+        margin-top: 14px !important;
+        margin-bottom: 24px !important;
+    }
+
+    html[data-litefin-scaled] .seerr-details-page .details-actions,
+    html[data-litefin-portrait] .seerr-details-page .details-actions {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 16px !important;
+        width: 100% !important;
+        max-width: 620px !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        margin-top: 22px !important;
+        margin-bottom: 28px !important;
+        position: relative !important;
+    }
+
+    /* Touch-target circular buttons for Seerr actions */
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn,
+    html[data-litefin-scaled] .seerr-details-page:not(.tooltips-disabled) .details-actions .btn,
+    html[data-litefin-portrait] .seerr-details-page:not(.tooltips-disabled) .details-actions .btn {
+        width: 80px !important;
+        height: 80px !important;
+        min-width: 80px !important;
+        min-height: 80px !important;
+        border-radius: 50% !important;
+        -webkit-border-radius: 50% !important;
+        padding: 0 !important;
+        align-items: center !important;
+        justify-content: center !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        border: 1.5px solid rgba(255, 255, 255, 0.2) !important;
+        color: #ffffff !important;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35) !important;
+        touch-action: manipulation !important;
+        outline: none !important;
+        transform: translateZ(0) !important;
+        transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease !important;
+    }
+
+    /* Only unhidden action buttons display as flex container */
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn:not(.hidden),
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn:not(.hidden) {
+        display: inline-flex !important;
+    }
+
+    /* Explicitly enforce display:none on hidden buttons so available items match landscape mode */
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn.hidden,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn.hidden,
+    html[data-litefin-scaled] .details-actions .btn.hidden,
+    html[data-litefin-portrait] .details-actions .btn.hidden,
+    .details-actions .btn.hidden {
+        display: none !important;
+    }
+
+    /* Tactile press spring feedback */
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn:active,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn:active,
+    html[data-litefin-touch] .seerr-details-page .details-actions .btn:active {
+        transform: scale(0.92) !important;
+        background: rgba(255, 255, 255, 0.18) !important;
+        border-color: rgba(255, 255, 255, 0.38) !important;
+    }
+
+    /* Primary play button accent tint */
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn.btn-primary,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn.btn-primary {
+        background: var(--jf-btn-primary-bg, var(--jf-accent, #00a4dc)) !important;
+        border-color: var(--jf-btn-primary-border, var(--jf-accent, #00a4dc)) !important;
+        color: #ffffff !important;
+    }
+
+    /* Cancel Request button distinct tint */
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn.seerr-cancel-request-btn,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn.seerr-cancel-request-btn {
+        background: rgba(142, 68, 173, 0.35) !important;
+        border-color: rgba(165, 105, 189, 0.6) !important;
+        color: #f5eef8 !important;
+    }
+
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn.seerr-cancel-request-btn:active,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn.seerr-cancel-request-btn:active {
+        background: rgba(142, 68, 173, 0.55) !important;
+    }
+
+    /* Icon geometry inside action buttons */
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn svg,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn svg {
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
+        min-height: 32px !important;
+        margin: 0 !important;
+        fill: currentColor !important;
+    }
+
+    /* Single SVGs without outline/filled pairs display cleanly */
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn svg:not(.icon-filled):not(.icon-outline),
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn svg:not(.icon-filled):not(.icon-outline) {
+        display: block !important;
+    }
+
+    /* Dynamic icon pairs: default to outlined variant, hide filled variant */
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn .icon-filled,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn .icon-filled {
+        display: none !important;
+    }
+
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn .icon-outline,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn .icon-outline {
+        display: block !important;
+    }
+
+    /* Active / focused / pressed state: swap outline for filled variant */
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn:active .icon-filled,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn:active .icon-filled,
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn.active .icon-filled,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn.active .icon-filled,
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn:focus .icon-filled,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn:focus .icon-filled,
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn.focused .icon-filled,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn.focused .icon-filled {
+        display: block !important;
+    }
+
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn:active .icon-outline,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn:active .icon-outline,
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn.active .icon-outline,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn.active .icon-outline,
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn:focus .icon-outline,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn:focus .icon-outline,
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn.focused .icon-outline,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn.focused .icon-outline {
+        display: none !important;
+    }
+
+    /* Hide text labels inside circular action buttons on mobile */
+    html[data-litefin-scaled] .seerr-details-page .details-actions .btn span,
+    html[data-litefin-portrait] .seerr-details-page .details-actions .btn span {
+        display: none !important;
+    }
+
+    /* Secondary metadata badges row (status, release date, budget, revenue) */
+    html[data-litefin-scaled] .seerr-details-page .secondary-meta-row,
+    html[data-litefin-portrait] .seerr-details-page .secondary-meta-row {
+        gap: 8px 10px !important;
+        margin-top: 8px !important;
+        margin-bottom: 8px !important;
+    }
+
+    html[data-litefin-scaled] .seerr-details-page .seerr-meta-card,
+    html[data-litefin-portrait] .seerr-details-page .seerr-meta-card {
+        border-radius: 10px !important;
+        font-size: 1.18rem !important;
+        padding: 5px 12px !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid rgba(255, 255, 255, 0.14) !important;
+    }
+
+    /* Tagline and synopsis spacing */
+    html[data-litefin-scaled] .seerr-details-page .details-overview,
+    html[data-litefin-portrait] .seerr-details-page .details-overview {
+        margin-top: 4px !important;
+        margin-bottom: 24px !important;
+        text-align: left !important;
+        width: 100% !important;
+    }
+
+    html[data-litefin-scaled] .seerr-details-page .details-tagline,
+    html[data-litefin-portrait] .seerr-details-page .details-tagline {
+        font-size: 1.5rem !important;
+        line-height: 1.35 !important;
+        font-style: italic !important;
+        font-weight: 400 !important;
+        color: rgba(255, 255, 255, 0.88) !important;
+        margin: 0 0 12px 0 !important;
+    }
+
+    html[data-litefin-scaled] .seerr-details-page .overview-text,
+    html[data-litefin-portrait] .seerr-details-page .overview-text {
+        font-size: 1.35rem !important;
+        line-height: 1.55 !important;
+        color: rgba(255, 255, 255, 0.78) !important;
+        margin-bottom: 20px !important;
+    }
+
+    /*
+     * ========================================================================
+     * Mobile Portrait Modern Login Page Overrides
+     * ========================================================================
+     * Adapts the modern landscape login screen to mobile portrait orientation:
+     * - Restores clean solid-color typography matching the modern desktop theme.
+     * - Centers the entire login container vertically to remove the bottom void.
+     * - Hides duplicate labels (e.g. redundant "Connect to Server" label).
+     * - Restores authentic modern squircle inputs and clean accent buttons.
+     * - Symmetrically balances user profile circles and secondary action rows.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .login-page,
+    html[data-litefin-portrait] .login-page {
+        /* Full viewport height takeover */
+        width: 100% !important;
+        height: 100% !important;
+        min-height: 100% !important;
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: center !important;
+        align-items: center !important;
+        overflow-x: hidden !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+        box-sizing: border-box !important;
+        background: var(--jf-background, #000000) !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-container,
+    html[data-litefin-portrait] .login-page .login-container {
+        /* Vertically centered layout container with phone safe-area clearance */
+        width: 100% !important;
+        max-width: 580px !important;
+        height: 100% !important;
+        min-height: 100% !important;
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: center !important;
+        align-items: stretch !important;
+        padding: calc(36px + env(safe-area-inset-top, 0px)) 24px calc(36px + env(safe-area-inset-bottom, 0px)) 24px !important;
+        margin: 0 auto !important;
+        box-sizing: border-box !important;
+        gap: 0 !important;
+        overflow-y: auto !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-header,
+    html[data-litefin-portrait] .login-page .login-header {
+        /* Branding header floats with auto-margin for balanced vertical centering */
+        flex: none !important;
+        width: 100% !important;
+        height: auto !important;
+        min-height: 0 !important;
+        margin-top: auto !important;
+        margin-bottom: 28px !important;
+        padding: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        text-align: center !important;
+        background: transparent !important;
+        border: none !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-logo-container,
+    html[data-litefin-portrait] .login-page .login-logo-container {
+        /* Horizontal brand logo row with balanced proportional spacing */
+        display: flex !important;
+        flex-direction: row !important;
+        justify-content: center !important;
+        align-items: center !important;
+        gap: 16px !important;
+        margin-bottom: 8px !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-logo-svg,
+    html[data-litefin-scaled] .login-page .login-logo-img,
+    html[data-litefin-portrait] .login-page .login-logo-svg,
+    html[data-litefin-portrait] .login-page .login-logo-img {
+        /* Crisp vector logo icon enlarged for prominent mobile brand presence */
+        width: 68px !important;
+        height: 68px !important;
+        max-height: 68px !important;
+        object-fit: contain !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-logo,
+    html[data-litefin-portrait] .login-page .login-logo {
+        /* Bold header wordmark slightly enlarged for visual weight */
+        font-size: 4.2rem !important;
+        font-weight: 700 !important;
+        letter-spacing: -1.5px !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        margin: 0 !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-tagline,
+    html[data-litefin-portrait] .login-page .login-tagline {
+        /* Clear secondary app descriptor */
+        font-size: 1.25rem !important;
+        font-weight: 400 !important;
+        opacity: 0.6 !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        text-align: center !important;
+        margin: 0 !important;
+        line-height: 1.35 !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-section,
+    html[data-litefin-portrait] .login-page .login-section {
+        /* Interactive section shell with bottom auto-margin for vertical centering */
+        flex: none !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        margin-bottom: auto !important;
+        padding: 0 !important;
+        background: transparent !important;
+        box-sizing: border-box !important;
+    }
+
+    html[data-litefin-scaled] .login-page .section-title,
+    html[data-litefin-portrait] .login-page .section-title {
+        /* Clean solid typography matching the modern desktop layout */
+        font-size: 2.8rem !important;
+        font-weight: 700 !important;
+        letter-spacing: -0.5px !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        text-align: left !important;
+        margin: 0 0 8px 0 !important;
+        padding: 0 !important;
+        border: none !important;
+        background: none !important;
+        -webkit-text-fill-color: var(--jf-text-primary, #ffffff) !important;
+        line-height: 1.15 !important;
+    }
+
+    /* Modern subtitle typography under section title with crisp, readable contrast */
+    html[data-litefin-scaled] .server-section .section-title::after,
+    html[data-litefin-portrait] .server-section .section-title::after {
+        content: 'Enter the URL or IP address of your Jellyfin server.' !important;
+        display: block !important;
+        font-size: 1.35rem !important;
+        font-weight: 400 !important;
+        color: rgba(255, 255, 255, 0.82) !important;
+        -webkit-text-fill-color: rgba(255, 255, 255, 0.82) !important;
+        margin-top: 10px !important;
+        letter-spacing: normal !important;
+        line-height: 1.4 !important;
+    }
+
+    /* Suppress duplicate label in server connection panel */
+    html[data-litefin-scaled] .server-section .input-label,
+    html[data-litefin-portrait] .server-section .input-label {
+        display: none !important;
+    }
+
+    html[data-litefin-scaled] .login-page .server-input-container,
+    html[data-litefin-portrait] .login-page .server-input-container {
+        /* Clean vertical stack matching the modern landscape layout */
+        display: flex !important;
+        flex-direction: column !important;
+        position: relative !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        background: transparent !important;
+        border: none !important;
+        padding: 0 !important;
+        margin-top: 24px !important;
+        margin-bottom: 24px !important;
+        box-sizing: border-box !important;
+    }
+
+    html[data-litefin-scaled] .login-page .server-url-input,
+    html[data-litefin-portrait] .login-page .server-url-input,
+    html[data-litefin-scaled] .server-section .server-url-input,
+    html[data-litefin-portrait] .server-section .server-url-input,
+    html[data-litefin-scaled] .login-page .server-url-input.text-input.tv-input,
+    html[data-litefin-portrait] .login-page .server-url-input.text-input.tv-input {
+        /* Generously sized squircle input bar with ergonomic touch height */
+        background: var(--jf-surface, #121212) !important;
+        border: 2px solid rgba(255, 255, 255, 0.12) !important;
+        border-radius: 22px !important;
+        padding: 0 24px 0 76px !important;
+        font-size: 1.75rem !important;
+        height: 80px !important;
+        min-height: 80px !important;
+        line-height: normal !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        margin-bottom: 16px !important;
+        outline: none !important;
+        transition: border-color 0.2s ease, background-color 0.2s ease !important;
+    }
+
+    html[data-litefin-scaled] .login-page .server-url-input:focus,
+    html[data-litefin-portrait] .login-page .server-url-input:focus,
+    html[data-litefin-scaled] .server-section .server-url-input:focus,
+    html[data-litefin-portrait] .server-section .server-url-input:focus {
+        border-color: var(--jf-accent, #7c4dff) !important;
+        background: var(--jf-card-bg-hover, #181818) !important;
+    }
+
+    /* Anchor URL icon cleanly in the exact center of the 80px input bar */
+    html[data-litefin-scaled] .login-page .server-input-container::before,
+    html[data-litefin-portrait] .login-page .server-input-container::before,
+    html[data-litefin-scaled] .server-section .server-input-container::before,
+    html[data-litefin-portrait] .server-section .server-input-container::before {
+        content: '' !important;
+        position: absolute !important;
+        left: 24px !important;
+        top: 40px !important;
+        transform: translateY(-50%) !important;
+        width: 28px !important;
+        height: 28px !important;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.45)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'%3E%3C/path%3E%3Cpath d='M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'%3E%3C/path%3E%3C/svg%3E") !important;
+        background-repeat: no-repeat !important;
+        background-size: contain !important;
+        pointer-events: none !important;
+        z-index: 5 !important;
+    }
+
+    html[data-litefin-scaled] .login-page .connect-btn,
+    html[data-litefin-portrait] .login-page .connect-btn,
+    html[data-litefin-scaled] .server-section .connect-btn,
+    html[data-litefin-portrait] .server-section .connect-btn {
+        /* Prominent full-width call-to-action button matching input height */
+        width: 100% !important;
+        height: 76px !important;
+        min-height: 76px !important;
+        background: var(--jf-accent, #7c4dff) !important;
+        border: none !important;
+        border-radius: 22px !important;
+        font-size: 1.7rem !important;
+        font-weight: 700 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        color: var(--jf-primary-btn-color, #ffffff) !important;
+        cursor: pointer !important;
+        margin: 0 !important;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3) !important;
+        transition: transform 0.2s ease, opacity 0.2s ease !important;
+    }
+
+    html[data-litefin-scaled] .login-page .connect-btn:active,
+    html[data-litefin-portrait] .login-page .connect-btn:active {
+        transform: scale(0.97) !important;
+        opacity: 0.9 !important;
+    }
+
+    /* Connect button leading icon */
+    html[data-litefin-scaled] .login-page .connect-btn span::before,
+    html[data-litefin-portrait] .login-page .connect-btn span::before {
+        content: '' !important;
+        display: inline-block !important;
+        width: 24px !important;
+        height: 24px !important;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4'%3E%3C/path%3E%3Cpolyline points='10 17 15 12 10 7'%3E%3C/polyline%3E%3Cline x1='15' y1='12' x2='3' y2='12'%3E%3C/line%3E%3C/svg%3E") !important;
+        background-repeat: no-repeat !important;
+        background-size: contain !important;
+        vertical-align: middle !important;
+        margin-right: 10px !important;
+    }
+
+    /* Discovered and saved servers section */
+    html[data-litefin-scaled] .login-page .discovered-servers,
+    html[data-litefin-portrait] .login-page .discovered-servers {
+        border-top: 1px solid rgba(255, 255, 255, 0.08) !important;
+        padding-top: 24px !important;
+        margin-top: 32px !important;
+        position: relative !important;
+        text-align: left !important;
+        width: 100% !important;
+        background: transparent !important;
+        border-left: none !important;
+        border-right: none !important;
+        border-bottom: none !important;
+    }
+
+    html[data-litefin-scaled] .login-page .discovered-header,
+    html[data-litefin-portrait] .login-page .discovered-header {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        margin-bottom: 18px !important;
+        width: 100% !important;
+    }
+
+    html[data-litefin-scaled] .login-page .discovered-header h3,
+    html[data-litefin-portrait] .login-page .discovered-header h3 {
+        /* Subtle uppercase tracking for discovered header */
+        font-size: 1.05rem !important;
+        font-weight: 700 !important;
+        letter-spacing: 1.5px !important;
+        color: rgba(255, 255, 255, 0.35) !important;
+        text-transform: uppercase !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        position: static !important;
+    }
+
+    /* Remove decorative dashed line pseudo-elements */
+    html[data-litefin-scaled] .login-page .discovered-header h3::before,
+    html[data-litefin-scaled] .login-page .discovered-header h3::after,
+    html[data-litefin-portrait] .login-page .discovered-header h3::before,
+    html[data-litefin-portrait] .login-page .discovered-header h3::after {
+        display: none !important;
+    }
+
+    html[data-litefin-scaled] .login-page .refresh-btn,
+    html[data-litefin-portrait] .login-page .refresh-btn {
+        color: rgba(255, 255, 255, 0.65) !important;
+        min-width: 44px !important;
+        min-height: 44px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        background: transparent !important;
+        border: none !important;
+        cursor: pointer !important;
+    }
+
+    html[data-litefin-scaled] .login-page .refresh-btn svg,
+    html[data-litefin-portrait] .login-page .refresh-btn svg {
+        width: 22px !important;
+        height: 22px !important;
+    }
+
+    html[data-litefin-scaled] .login-page .server-list,
+    html[data-litefin-portrait] .login-page .server-list {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 12px !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        list-style: none !important;
+    }
+
+    html[data-litefin-scaled] .login-page .server-item,
+    html[data-litefin-portrait] .login-page .server-item {
+        /* Modern server tile layout */
+        width: 100% !important;
+        background: var(--jf-card-bg, #0f0f0f) !important;
+        border: 1.5px solid rgba(255, 255, 255, 0.08) !important;
+        padding: 16px 20px !important;
+        border-radius: 16px !important;
+        position: relative !important;
+        display: flex !important;
+        align-items: center !important;
+        box-sizing: border-box !important;
+        min-height: 72px !important;
+        margin: 0 !important;
+        cursor: pointer !important;
+        transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease !important;
+    }
+
+    html[data-litefin-scaled] .login-page .server-item:active,
+    html[data-litefin-portrait] .login-page .server-item:active {
+        transform: scale(0.98) !important;
+        border-color: var(--jf-accent, #7c4dff) !important;
+    }
+
+    /* Enforce strict hidden rules so image and fallback never clash on login */
+    html[data-litefin-scaled] .login-page .user-avatar-placeholder.hidden,
+    html[data-litefin-portrait] .login-page .user-avatar-placeholder.hidden,
+    html[data-litefin-touch] .login-page .user-avatar-placeholder.hidden,
+    html[data-litefin-scaled] .login-page .login-user-avatar.hidden,
+    html[data-litefin-portrait] .login-page .login-user-avatar.hidden,
+    html[data-litefin-touch] .login-page .login-user-avatar.hidden,
+    html[data-litefin-scaled] .login-page .user-avatar.hidden,
+    html[data-litefin-portrait] .login-page .user-avatar.hidden,
+    html[data-litefin-touch] .login-page .user-avatar.hidden,
+    html[data-litefin-scaled] .password-section .selected-user .user-avatar-placeholder.hidden,
+    html[data-litefin-portrait] .password-section .selected-user .user-avatar-placeholder.hidden,
+    html[data-litefin-touch] .password-section .selected-user .user-avatar-placeholder.hidden,
+    html[data-litefin-scaled] .password-section .selected-user .login-user-avatar.hidden,
+    html[data-litefin-portrait] .password-section .selected-user .login-user-avatar.hidden,
+    html[data-litefin-touch] .password-section .selected-user .login-user-avatar.hidden,
+    html[data-litefin-scaled] .password-section .selected-user .user-avatar.hidden,
+    html[data-litefin-portrait] .password-section .selected-user .user-avatar.hidden,
+    html[data-litefin-touch] .password-section .selected-user .user-avatar.hidden {
+        display: none !important;
+    }
+
+    /* User Selection Panel */
+    html[data-litefin-scaled] .login-page .users-section,
+    html[data-litefin-portrait] .login-page .users-section {
+        text-align: center !important;
+        width: 100% !important;
+    }
+
+    html[data-litefin-scaled] .login-page .users-grid,
+    html[data-litefin-portrait] .login-page .users-grid {
+        /* Symmetrically centered user avatar layout */
+        display: flex !important;
+        flex-wrap: wrap !important;
+        justify-content: center !important;
+        align-items: flex-start !important;
+        gap: 24px 20px !important;
+        margin: 28px auto 32px auto !important;
+        padding: 0 !important;
+        max-width: 540px !important;
+        max-height: none !important;
+        overflow: visible !important;
+    }
+
+    html[data-litefin-scaled] .login-page .user-item,
+    html[data-litefin-portrait] .login-page .user-item {
+        /* Individual user column */
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        width: 150px !important;
+        margin: 0 !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-user-card,
+    html[data-litefin-portrait] .login-page .login-user-card {
+        /* Circular avatar shape matching desktop modern theme */
+        position: relative !important;
+        width: 140px !important;
+        height: 140px !important;
+        min-width: 140px !important;
+        min-height: 140px !important;
+        background: var(--jf-surface, #121212) !important;
+        border-radius: 50% !important;
+        overflow: hidden !important;
+        border: 3px solid rgba(255, 255, 255, 0.1) !important;
+        display: block !important;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4) !important;
+        cursor: pointer !important;
+        outline: none !important;
+        padding: 0 !important;
+        transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.2s ease !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-user-card:active,
+    html[data-litefin-portrait] .login-page .login-user-card:active {
+        transform: scale(0.96) !important;
+        border-color: var(--jf-accent, #7c4dff) !important;
+    }
+
+    /* Position avatar and fallback placeholder absolutely so they never stack side-by-side */
+    html[data-litefin-scaled] .login-page .login-user-card .login-user-avatar,
+    html[data-litefin-portrait] .login-page .login-user-card .login-user-avatar,
+    html[data-litefin-scaled] .login-page .login-user-card .user-avatar,
+    html[data-litefin-portrait] .login-page .login-user-card .user-avatar,
+    html[data-litefin-scaled] .login-page .login-user-card .user-avatar-placeholder,
+    html[data-litefin-portrait] .login-page .login-user-card .user-avatar-placeholder,
+    html[data-litefin-scaled] .login-page .user-card .login-user-avatar,
+    html[data-litefin-portrait] .login-page .user-card .login-user-avatar,
+    html[data-litefin-scaled] .login-page .user-card .user-avatar,
+    html[data-litefin-portrait] .login-page .user-card .user-avatar,
+    html[data-litefin-scaled] .login-page .user-card .user-avatar-placeholder,
+    html[data-litefin-portrait] .login-page .user-card .user-avatar-placeholder {
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        border-radius: 50% !important;
+    }
+
+    html[data-litefin-scaled] .login-page .login-user-avatar,
+    html[data-litefin-portrait] .login-page .login-user-avatar,
+    html[data-litefin-scaled] .login-page .user-avatar,
+    html[data-litefin-portrait] .login-page .user-avatar {
+        object-fit: cover !important;
+        display: block !important;
+    }
+
+    html[data-litefin-scaled] .login-page .user-avatar-placeholder:not(.hidden),
+    html[data-litefin-portrait] .login-page .user-avatar-placeholder:not(.hidden) {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        font-size: 3.8rem !important;
+        font-weight: 700 !important;
+        color: var(--jf-accent, #7c4dff) !important;
+        background: var(--jf-surface, #121212) !important;
+    }
+
+    html[data-litefin-scaled] .login-page .user-name,
+    html[data-litefin-portrait] .login-page .user-name,
+    html[data-litefin-scaled] .login-page .login-user-name,
+    html[data-litefin-portrait] .login-page .login-user-name {
+        margin-top: 12px !important;
+        font-size: 1.25rem !important;
+        font-weight: 600 !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        text-align: center !important;
+        max-width: 140px !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
+    }
+
+    /* Action Buttons Row */
+    html[data-litefin-scaled] .login-page .login-actions,
+    html[data-litefin-scaled] .login-page .modern-button-row,
+    html[data-litefin-portrait] .login-page .login-actions,
+    html[data-litefin-portrait] .login-page .modern-button-row {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        gap: 14px !important;
+        width: 100% !important;
+        justify-content: center !important;
+        margin-top: 24px !important;
+    }
+
+    /* Full-width primary CTA in user picker */
+    html[data-litefin-scaled] .users-section .modern-button-row .quick-connect-btn,
+    html[data-litefin-portrait] .users-section .modern-button-row .quick-connect-btn {
+        width: 100% !important;
+        flex: 1 1 100% !important;
+    }
+
+    /* Symmetrically split secondary actions */
+    html[data-litefin-scaled] .users-section .modern-button-row .manual-login-btn,
+    html[data-litefin-scaled] .users-section .modern-button-row .change-server-btn,
+    html[data-litefin-portrait] .users-section .modern-button-row .manual-login-btn,
+    html[data-litefin-portrait] .users-section .modern-button-row .change-server-btn {
+        flex: 1 1 calc(50% - 7px) !important;
+    }
+
+    /* Respect JavaScript visibility toggles on action buttons */
+    html[data-litefin-scaled] .login-page .btn[style*="display: none"],
+    html[data-litefin-portrait] .login-page .btn[style*="display: none"],
+    html[data-litefin-scaled] .login-page .btn.hidden,
+    html[data-litefin-portrait] .login-page .btn.hidden {
+        display: none !important;
+    }
+
+    html[data-litefin-scaled] .login-page .btn,
+    html[data-litefin-portrait] .login-page .btn {
+        /* Standardized modern action button styling */
+        height: 64px !important;
+        min-height: 64px !important;
+        border-radius: 18px !important;
+        font-size: 1.35rem !important;
+        letter-spacing: -0.2px !important;
+        font-weight: 600 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
+        cursor: pointer !important;
+        outline: none !important;
+        border: none !important;
+        margin: 0 !important;
+        padding: 0 14px !important;
+        white-space: nowrap !important;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25) !important;
+        transition: transform 0.2s ease, opacity 0.2s ease, background-color 0.2s ease !important;
+    }
+
+    /* Equal split for active two-button rows in manual & password views */
+    html[data-litefin-scaled] .manual-section .modern-button-row .btn:not([style*="display: none"]),
+    html[data-litefin-portrait] .manual-section .modern-button-row .btn:not([style*="display: none"]),
+    html[data-litefin-scaled] .password-section .modern-button-row .btn,
+    html[data-litefin-portrait] .password-section .modern-button-row .btn {
+        flex: 1 1 calc(50% - 7px) !important;
+    }
+
+    html[data-litefin-scaled] .login-page .btn-primary,
+    html[data-litefin-portrait] .login-page .btn-primary {
+        background: var(--jf-accent, #7c4dff) !important;
+        color: var(--jf-primary-btn-color, #ffffff) !important;
+    }
+
+    html[data-litefin-scaled] .login-page .btn-secondary,
+    html[data-litefin-portrait] .login-page .btn-secondary {
+        background: rgba(255, 255, 255, 0.08) !important;
+        border: 1.5px solid rgba(255, 255, 255, 0.12) !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+    }
+
+    html[data-litefin-scaled] .login-page .btn:active,
+    html[data-litefin-portrait] .login-page .btn:active {
+        transform: scale(0.97) !important;
+    }
+
+    /* Manual Login and Input Forms */
+    html[data-litefin-scaled] .login-page .manual-form-container,
+    html[data-litefin-portrait] .login-page .manual-form-container {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 20px !important;
+        width: 100% !important;
+        margin-bottom: 24px !important;
+        padding: 0 !important;
+    }
+
+    html[data-litefin-scaled] .login-page .input-group,
+    html[data-litefin-portrait] .login-page .input-group {
+        display: flex !important;
+        flex-direction: column !important;
+        width: 100% !important;
+        margin-bottom: 0 !important;
+        padding: 0 !important;
+    }
+
+    html[data-litefin-scaled] .login-page .manual-section .input-label,
+    html[data-litefin-portrait] .login-page .manual-section .input-label {
+        font-size: 1.25rem !important;
+        font-weight: 500 !important;
+        color: rgba(255, 255, 255, 0.78) !important;
+        margin-bottom: 8px !important;
+        display: block !important;
+        text-align: left !important;
+    }
+
+    html[data-litefin-scaled] .login-page .input-container,
+    html[data-litefin-portrait] .login-page .input-container {
+        position: relative !important;
+        width: 100% !important;
+        padding: 0 !important;
+    }
+
+    html[data-litefin-scaled] .login-page .text-input.tv-input:not(.server-url-input),
+    html[data-litefin-portrait] .login-page .text-input.tv-input:not(.server-url-input),
+    html[data-litefin-scaled] .manual-section .text-input,
+    html[data-litefin-portrait] .manual-section .text-input,
+    html[data-litefin-scaled] .password-section .text-input,
+    html[data-litefin-portrait] .password-section .text-input {
+        background: var(--jf-surface, #121212) !important;
+        border: 2px solid rgba(255, 255, 255, 0.12) !important;
+        border-radius: 18px !important;
+        padding: 0 24px 0 68px !important;
+        font-size: 1.55rem !important;
+        height: 74px !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        outline: none !important;
+        transition: border-color 0.2s ease, background-color 0.2s ease !important;
+    }
+
+    html[data-litefin-scaled] .login-page .text-input.tv-input:not(.server-url-input):focus,
+    html[data-litefin-portrait] .login-page .text-input.tv-input:not(.server-url-input):focus,
+    html[data-litefin-scaled] .manual-section .text-input:focus,
+    html[data-litefin-portrait] .manual-section .text-input:focus,
+    html[data-litefin-scaled] .password-section .text-input:focus,
+    html[data-litefin-portrait] .password-section .text-input:focus {
+        border-color: var(--jf-accent, #7c4dff) !important;
+        background: var(--jf-card-bg-hover, #181818) !important;
+    }
+
+    /* Icon in manual username input */
+    html[data-litefin-scaled] .login-page .user-input-container::before,
+    html[data-litefin-portrait] .login-page .user-input-container::before {
+        content: '' !important;
+        position: absolute !important;
+        left: 22px !important;
+        top: 50% !important;
+        transform: translateY(-50%) !important;
+        width: 26px !important;
+        height: 26px !important;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.45)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2'%3E%3C/path%3E%3Ccircle cx='12' cy='7' r='4'%3E%3C/circle%3E%3C/svg%3E") !important;
+        background-repeat: no-repeat !important;
+        background-size: contain !important;
+        pointer-events: none !important;
+        z-index: 5 !important;
+    }
+
+    /* Icon in manual password input */
+    html[data-litefin-scaled] .login-page .pass-input-container::before,
+    html[data-litefin-portrait] .login-page .pass-input-container::before {
+        content: '' !important;
+        position: absolute !important;
+        left: 22px !important;
+        top: 50% !important;
+        transform: translateY(-50%) !important;
+        width: 26px !important;
+        height: 26px !important;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.45)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='11' width='18' height='11' rx='2' ry='2'%3E%3C/rect%3E%3Cpath d='M7 11V7a5 5 0 0 1 10 0v4'%3E%3C/path%3E%3C/svg%3E") !important;
+        background-repeat: no-repeat !important;
+        background-size: contain !important;
+        pointer-events: none !important;
+        z-index: 5 !important;
+    }
+
+    /* Password Section Profile Badge */
+    html[data-litefin-scaled] .password-section .selected-user,
+    html[data-litefin-portrait] .password-section .selected-user {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        margin: 20px auto 28px auto !important;
+    }
+
+    html[data-litefin-scaled] .password-section .selected-user .login-user-avatar,
+    html[data-litefin-scaled] .password-section .selected-user .user-avatar,
+    html[data-litefin-scaled] .password-section .selected-user .user-avatar-placeholder,
+    html[data-litefin-portrait] .password-section .selected-user .login-user-avatar,
+    html[data-litefin-portrait] .password-section .selected-user .user-avatar,
+    html[data-litefin-portrait] .password-section .selected-user .user-avatar-placeholder {
+        width: 120px !important;
+        height: 120px !important;
+        border-radius: 50% !important;
+        border: 3px solid rgba(255, 255, 255, 0.15) !important;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45) !important;
+        object-fit: cover !important;
+    }
+
+    /* When placeholder is active in password section, format letter initial */
+    html[data-litefin-scaled] .password-section .selected-user .user-avatar-placeholder:not(.hidden),
+    html[data-litefin-portrait] .password-section .selected-user .user-avatar-placeholder:not(.hidden) {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        font-size: 3.4rem !important;
+        font-weight: 700 !important;
+        color: var(--jf-accent, #7c4dff) !important;
+        background: var(--jf-surface, #121212) !important;
+    }
+
+    html[data-litefin-scaled] .password-section .selected-user .login-user-name,
+    html[data-litefin-portrait] .password-section .selected-user .login-user-name,
+    html[data-litefin-scaled] .password-section .selected-user .user-name,
+    html[data-litefin-portrait] .password-section .selected-user .user-name {
+        margin-top: 12px !important;
+        font-size: 1.4rem !important;
+        font-weight: 600 !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        text-align: center !important;
+    }
+
+    /* Quick Connect Section */
+    html[data-litefin-scaled] .quick-connect-section,
+    html[data-litefin-portrait] .quick-connect-section {
+        text-align: center !important;
+    }
+
+    html[data-litefin-scaled] .quick-connect-section .quick-connect-instructions,
+    html[data-litefin-portrait] .quick-connect-section .quick-connect-instructions {
+        font-size: 1.15rem !important;
+        line-height: 1.5 !important;
+        opacity: 0.65 !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        margin: 12px auto 28px auto !important;
+        max-width: 480px !important;
+    }
+
+    html[data-litefin-scaled] .quick-connect-section .quick-connect-code,
+    html[data-litefin-portrait] .quick-connect-section .quick-connect-code {
+        font-size: 4.8rem !important;
+        font-weight: 700 !important;
+        letter-spacing: 6px !important;
+        color: var(--jf-accent, #7c4dff) !important;
+        margin: 24px 0 !important;
+        text-align: center !important;
+    }
+
+    html[data-litefin-scaled] .quick-connect-section .quick-connect-status,
+    html[data-litefin-portrait] .quick-connect-section .quick-connect-status {
+        font-size: 1.1rem !important;
+        opacity: 0.5 !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        margin-bottom: 28px !important;
+    }
+
+    /*
+     * ========================================================================
+     * Mobile Portrait Profiles Page ("Who's Watching")
+     * ========================================================================
+     * Responsive layout engine for the mobile portrait profile selector:
+     * - Fixes element layering so initial badges never peek past avatar photos.
+     * - Vertically centers the entire profile selection block on the screen.
+     * - Dynamically balances profile cards so 2-3 cards fit in a single row.
+     * - Balanced 2x2 arrangement when exactly four profile cards are present.
+     * - Suppresses persistent remote-focus outlines on mobile touch devices.
+     * ========================================================================
+     */
+    html[data-litefin-scaled] .profiles-page,
+    html[data-litefin-portrait] .profiles-page {
+        /* Full-height viewport container with safe-area spacing */
+        width: 100% !important;
+        height: 100% !important;
+        min-height: 100% !important;
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: center !important;
+        align-items: center !important;
+        padding: calc(36px + env(safe-area-inset-top, 0px)) 24px calc(36px + env(safe-area-inset-bottom, 0px)) 24px !important;
+        box-sizing: border-box !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch !important;
+
+        /* Ambient soft backdrop lighting centered behind the avatars */
+        background: radial-gradient(circle at 50% 45%, rgba(var(--jf-accent-rgb, 0, 164, 220), 0.14) 0%, rgba(255, 255, 255, 0.02) 48%, transparent 72%), #000000 !important;
+    }
+
+    html[data-litefin-scaled] .profiles-header,
+    html[data-litefin-portrait] .profiles-header {
+        /* Distributes vertical space above header to achieve true vertical centering */
+        margin-top: auto !important;
+        margin-bottom: 40px !important;
+        text-align: center !important;
+        width: 100% !important;
+    }
+
+    html[data-litefin-scaled] .profiles-title,
+    html[data-litefin-portrait] .profiles-title {
+        /* Crisp, prominent title typography */
+        font-size: 44px !important;
+        font-weight: 800 !important;
+        letter-spacing: -0.6px !important;
+        color: #ffffff !important;
+        line-height: 1.15 !important;
+        margin: 0 !important;
+        text-shadow: 0 4px 20px rgba(0, 0, 0, 0.8) !important;
+    }
+
+    /* Flexible wrapping container for profile cards */
+    html[data-litefin-scaled] .profiles-grid,
+    html[data-litefin-portrait] .profiles-grid {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        justify-content: center !important;
+        align-items: flex-start !important;
+        gap: 28px 24px !important;
+        width: 100% !important;
+        max-width: 620px !important;
+        padding: 0 !important;
+        margin: 0 auto !important;
+        box-sizing: border-box !important;
+    }
+
+    /* Balanced 2x2 arrangement when exactly four items exist */
+    html[data-litefin-scaled] .profiles-grid:has(> .profiles-profile-item:nth-child(4):last-child),
+    html[data-litefin-portrait] .profiles-grid:has(> .profiles-profile-item:nth-child(4):last-child) {
+        max-width: 390px !important;
+    }
+
+    html[data-litefin-scaled] .profiles-profile-item,
+    html[data-litefin-portrait] .profiles-profile-item {
+        /* Individual card and label wrapper */
+        margin: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        width: auto !important;
+    }
+
+    html[data-litefin-scaled] .profiles-card,
+    html[data-litefin-portrait] .profiles-card {
+        /* Generous squircle touch target sized for mobile phone widths */
+        position: relative !important;
+        width: 160px !important;
+        height: 160px !important;
+        min-width: 160px !important;
+        min-height: 160px !important;
+        border-radius: 26px !important;
+        background: rgba(255, 255, 255, 0.06) !important;
+        border: 2px solid rgba(255, 255, 255, 0.1) !important;
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45) !important;
+        overflow: hidden !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        touch-action: manipulation !important;
+        outline: none !important;
+
+        /* Tactile spring feedback on user interactions */
+        -webkit-transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.2s ease, box-shadow 0.2s ease !important;
+        transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.2s ease, box-shadow 0.2s ease !important;
+    }
+
+    /* Suppress sticky remote-focus outlines on touch interactions */
+    html[data-litefin-touch] .profiles-card:focus:not(:active) {
+        transform: none !important;
+        outline: none !important;
+    }
+
+    html[data-litefin-scaled] .profiles-card:active,
+    html[data-litefin-portrait] .profiles-card:active,
+    html[data-litefin-touch] .profiles-card:active {
+        /* Subtle tactile compression when pressed */
+        transform: scale(0.96) !important;
+        border-color: var(--jf-accent, #00a4dc) !important;
+        box-shadow: 0 6px 20px rgba(var(--jf-accent-rgb, 0, 164, 220), 0.35) !important;
+    }
+
+    html[data-litefin-scaled] .profiles-card-avatar,
+    html[data-litefin-portrait] .profiles-card-avatar {
+        /* Full-bleed avatar photo anchored within the card */
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: cover !important;
+        border-radius: 24px !important;
+        display: block !important;
+    }
+
+    /* Enforce strict hiding of fallback elements when flagged */
+    html[data-litefin-scaled] .profiles-card-avatar.hidden,
+    html[data-litefin-portrait] .profiles-card-avatar.hidden,
+    html[data-litefin-touch] .profiles-card-avatar.hidden {
+        display: none !important;
+    }
+
+    html[data-litefin-scaled] .profiles-card-initial,
+    html[data-litefin-portrait] .profiles-card-initial {
+        /* Initial letter fallback badge positioned absolutely to prevent side-by-side leaking */
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        font-size: 4.8rem !important;
+        font-weight: 700 !important;
+        border-radius: 24px !important;
+        background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.03) 100%) !important;
+        color: var(--jf-accent, #00a4dc) !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+
+    /* Explicitly hide the fallback letter badge when an avatar image is loaded */
+    html[data-litefin-scaled] .profiles-card-initial.hidden,
+    html[data-litefin-portrait] .profiles-card-initial.hidden,
+    html[data-litefin-touch] .profiles-card-initial.hidden {
+        display: none !important;
+    }
+
+    html[data-litefin-scaled] .profiles-add-card,
+    html[data-litefin-portrait] .profiles-add-card {
+        /* Dashed secondary styling for add-profile action */
+        background: rgba(255, 255, 255, 0.03) !important;
+        border: 2px dashed rgba(255, 255, 255, 0.22) !important;
+    }
+
+    html[data-litefin-scaled] .profiles-add-icon,
+    html[data-litefin-portrait] .profiles-add-icon {
+        /* Plus glyph typography */
+        font-size: 4.6rem !important;
+        font-weight: 200 !important;
+        color: rgba(255, 255, 255, 0.5) !important;
+        line-height: 1 !important;
+    }
+
+    html[data-litefin-scaled] .profiles-card-name,
+    html[data-litefin-portrait] .profiles-card-name {
+        /* Clean typography for profile username label */
+        margin-top: 14px !important;
+        font-size: 22px !important;
+        font-weight: 600 !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        letter-spacing: -0.2px !important;
+        max-width: 175px !important;
+        text-align: center !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
+    }
+
+    /* Bottom action buttons in portrait mode */
+    html[data-litefin-scaled] .profiles-bottom,
+    html[data-litefin-portrait] .profiles-bottom {
+        /* Distributes vertical space below buttons to center the entire group */
+        margin-top: 48px !important;
+        margin-bottom: auto !important;
+        display: flex !important;
+        flex-direction: row !important;
+        justify-content: center !important;
+        align-items: center !important;
+        gap: 16px !important;
+        width: 100% !important;
+        max-width: 520px !important;
+        padding: 0 16px !important;
+        box-sizing: border-box !important;
+    }
+
+    html[data-litefin-scaled] .profiles-sign-out-btn,
+    html[data-litefin-portrait] .profiles-sign-out-btn,
+    html[data-litefin-scaled] .profiles-switch-server-btn,
+    html[data-litefin-portrait] .profiles-switch-server-btn {
+        /* Ergonomic pill-shaped action buttons */
+        min-height: 54px !important;
+        padding: 12px 28px !important;
+        font-size: 21px !important;
+        font-weight: 600 !important;
+        border-radius: 27px !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        border: 1.5px solid rgba(255, 255, 255, 0.16) !important;
+        color: var(--jf-text-primary, #ffffff) !important;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3) !important;
+        margin: 0 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        touch-action: manipulation !important;
+        transition: transform 0.2s ease, background-color 0.2s ease, border-color 0.2s ease !important;
+    }
+
+    /* Suppress sticky remote-focus styling on action buttons for touch */
+    html[data-litefin-touch] .profiles-sign-out-btn:focus:not(:active),
+    html[data-litefin-touch] .profiles-switch-server-btn:focus:not(:active) {
+        transform: none !important;
+        outline: none !important;
+    }
+
+    html[data-litefin-scaled] .profiles-sign-out-btn:active,
+    html[data-litefin-portrait] .profiles-sign-out-btn:active,
+    html[data-litefin-scaled] .profiles-switch-server-btn:active,
+    html[data-litefin-portrait] .profiles-switch-server-btn:active,
+    html[data-litefin-touch] .profiles-sign-out-btn:active,
+    html[data-litefin-touch] .profiles-switch-server-btn:active {
+        /* Tactile press response */
+        transform: scale(0.96) !important;
+        background: rgba(255, 255, 255, 0.15) !important;
+        border-color: rgba(255, 255, 255, 0.3) !important;
+    }
+}
+
+/* ============================================================================
+ * Mobile Loading Indicator Sizing
+ * ============================================================================
+ * Scales up the loading indicator for mobile portrait screens and touch devices
+ * so that it is noticeably larger, crisp, and comfortable to view.
+ * Applies zoom: 1.38 to scale all 12 loader animations and their pseudo-elements
+ * proportionately without overriding GPU keyframe rotation transforms.
+ * ============================================================================
+ */
+html[data-litefin-scaled] .page-loading .loading-spinner,
+html[data-litefin-scaled] .page.loading .loading-spinner,
+html[data-litefin-scaled] #app-splash .loading-spinner,
+html[data-litefin-scaled] .loading-section .loading-spinner,
+html[data-litefin-scaled] .search-loading .loading-spinner,
+html[data-litefin-touch] .page-loading .loading-spinner,
+html[data-litefin-touch] .page.loading .loading-spinner,
+html[data-litefin-touch] #app-splash .loading-spinner,
+html[data-litefin-touch] .loading-section .loading-spinner,
+html[data-litefin-touch] .search-loading .loading-spinner,
+[data-platform="android"] .page-loading .loading-spinner,
+[data-platform="android"] .page.loading .loading-spinner,
+[data-platform="android"] #app-splash .loading-spinner,
+[data-platform="android"] .loading-section .loading-spinner,
+[data-platform="android"] .search-loading .loading-spinner,
+html[data-litefin-portrait] .page-loading .loading-spinner,
+html[data-litefin-portrait] .page.loading .loading-spinner,
+html[data-litefin-portrait] #app-splash .loading-spinner,
+html[data-litefin-portrait] .loading-section .loading-spinner,
+html[data-litefin-portrait] .search-loading .loading-spinner {
+    zoom: 1.38 !important;
+}
+
+@media (orientation: portrait) {
+    .page-loading .loading-spinner,
+    .page.loading .loading-spinner,
+    #app-splash .loading-spinner,
+    .loading-section .loading-spinner,
+    .search-loading .loading-spinner {
+        zoom: 1.38 !important;
+    }
+}

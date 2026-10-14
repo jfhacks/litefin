@@ -17,20 +17,101 @@ export default class PlaybackSpeedMenu extends BaseMenu {
         super(osdController);
         this.isModal = true;
         this.title = i18n.t('PlaybackRate');
-        this.options = [
-            0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4
-        ].map(speed => ({
-            id: speed,
-            label: i18n.t('SpeedValue', [ speed.toString() ]),
-        }));
+
+        /*
+         * ====================================================================
+         * Comprehensive Playback Rate Spectrum
+         * ====================================================================
+         * Covers all player backend capabilities across platforms:
+         * - 0.25x (ultra-slow)
+         * - 0.5x, 0.75x
+         * - 1.0x (standard / normal rate)
+         * - 1.25x, 1.5x, 1.75x, 2.0x (smooth audio acceleration)
+         * - 2.5x, 3.0x, 3.5x, 4.0x (high-speed scrubbing)
+         * - 8.0x (hardware trickplay fast-forward)
+         * ====================================================================
+         */
+        this.availableSpeeds = [
+            0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4, 8
+        ];
+
+        // Initialize options annotated with initial support flags
+        this._refreshOptions();
+    }
+
+    /**
+     * Rebuild the speed options array and query the active player backend
+     * to determine if each speed is natively supported.
+     *
+     * @private
+     */
+    _refreshOptions() {
+        // Retrieve player instance from OSDController
+        const player = this.osd?.player;
+
+        // Map every speed into an option object with localized label and support status
+        this.options = this.availableSpeeds.map(speed => {
+            // Check native hardware support via JellyfinPlayer or local fallback
+            const isSupported = player?.isPlaybackSpeedSupported
+                ? player.isPlaybackSpeedSupported(speed)
+                : this._isSpeedSupportedFallback(speed);
+
+            return {
+                id: speed,
+                label: i18n.t('SpeedValue', [ speed.toString() ]),
+                isSupported
+            };
+        });
+    }
+
+    /**
+     * Fallback validation for active player backend support.
+     * Used when the player instance is deferred or during cold boot.
+     *
+     * @private
+     * @param {number} speed - The playback speed multiplier
+     * @returns {boolean} Whether the speed is natively supported by the backend
+     */
+    _isSpeedSupportedFallback(speed) {
+        // Resolve backend type identifier ('movi' | 'html5' | 'tizen' | 'webos' | 'exoplayer')
+        const backend = this.osd?.player?.getBackendType?.() ||
+                        this.osd?.player?._backendType || 'html5';
+
+        switch (backend) {
+            case 'webos':
+                // LG webOS hardware decoders natively handle [0.5, 1, 2, 4]; others are snapped
+                return [0.5, 1, 2, 4].includes(speed);
+
+            case 'tizen':
+                // Samsung AVPlay trickplay engine expects integer multipliers [1, 2, 4, 8]
+                return Number.isInteger(speed) && [1, 2, 4, 8].includes(speed);
+
+            case 'movi':
+                // movi-player WebCodecs WASM engine clamps playbackRate to a maximum of 2.0x
+                return speed >= 0.25 && speed <= 2;
+
+            case 'exoplayer':
+                // Android ExoPlayer with Sonic audio processor supports standard positive floats
+                return speed >= 0.25 && speed <= 8;
+
+            case 'html5':
+            default:
+                // Standard browser HTML5 video element (Chrome, Edge, Firefox, Safari)
+                return speed >= 0.25 && speed <= 4;
+        }
     }
 
     open() {
+        // Re-evaluate options against currently active player backend
+        this._refreshOptions();
+
         // Pre-select current speed
         const currentSpeed = this.osd.player.getPlaybackSpeed();
         const index = this.options.findIndex(opt => opt.id === currentSpeed);
         
-        this.focusIndex = index !== -1 ? index : 2; // Default to 1x (index 2) if not found
+        // Find default 1x index or fallback to index 3 (1.0x in standard list)
+        const defaultIndex = this.options.findIndex(opt => opt.id === 1);
+        this.focusIndex = index !== -1 ? index : (defaultIndex !== -1 ? defaultIndex : 3);
         
         this.render();
         this.show();
@@ -95,6 +176,7 @@ export default class PlaybackSpeedMenu extends BaseMenu {
         const optionsHtml = this.options.map((opt, i) => {
             // Determine if the speed index is equal to current playback rate.
             const isSelected = opt.id === currentSpeed;
+            const isSupported = opt.isSupported;
             
             // ================================================================
             // Dynamic Selection Mark
@@ -102,13 +184,25 @@ export default class PlaybackSpeedMenu extends BaseMenu {
             // Checkmark SVG applied to option that is actively used.
             // We use the unified check icon directly.
             const checkIcon = isSelected ? osdIcons.check : '';
+
+            /*
+             * Hardware capability indicator pill badge:
+             * Clearly flags playback rates outside native backend support
+             * while preserving full focus, clickability, and user override.
+             */
+            const unsupportedBadge = !isSupported
+                ? `<span class="track-badge track-badge-unsupported" data-i18n="Unsupported">${i18n.t('Unsupported') || 'Unsupported'}</span>`
+                : '';
             
             // Build and return the HTML button structure for the specific speed.
             return `
-            <button class="track-option track-item ${isSelected ? 'selected' : ''}" 
+            <button class="track-option track-item ${isSelected ? 'selected' : ''} ${!isSupported ? 'speed-unsupported' : ''}" 
                     data-id="${opt.id}" data-menu-index="${i}">
                 <span class="track-option-icon">${opt.icon || ''}</span>
-                <span class="track-option-label">${opt.label}</span>
+                <span class="track-option-label">
+                    <span class="track-label-text">${opt.label}</span>
+                    ${unsupportedBadge}
+                </span>
                 <span class="track-option-check">${checkIcon}</span>
             </button>
             `;
@@ -182,7 +276,7 @@ export default class PlaybackSpeedMenu extends BaseMenu {
     handleEnter() {
         const selected = this.options[this.focusIndex];
         if (selected) {
-            log.info('Selected speed:', selected.id);
+            log.info(`Selected playback speed: ${selected.id}x (backend support: ${selected.isSupported ? 'native' : 'unsupported/override'})`);
             this.osd.player.setPlaybackSpeed(selected.id);
             this.osd.closeMenu();
         }

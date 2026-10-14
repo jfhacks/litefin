@@ -137,6 +137,22 @@ async onPlayerStart(item, api) {
 }
 ```
 
+## Server-Side Plugins
+
+Litefin pairs with dedicated server-side plugins to unlock advanced capabilities:
+
+### 1. Litefin Server Plugin ([Jellyfin](https://github.com/MoazSalem/litefin-plugin) / [Emby](https://github.com/MoazSalem/litefin-plugin-emby))
+Extends your server with features that require elevated or backend network access:
+- **Seerr Discovery & Requests**: Proxies Jellyseerr / Overseerr requests without exposing API keys to client devices.
+- **Where to Watch (Streaming Availability)**: Queries TMDB streaming provider catalogs (Netflix, Prime, Disney+, etc.) grouped by subscription and rental.
+- **MDBList Ratings Aggregation**: Enriches media items with multi-source ratings (Rotten Tomatoes, IMDb, Metacritic, Trakt, Letterboxd).
+
+### 2. Litefin Client Plugin (`Litefin.Client.Plugin`)
+Embeds Litefin directly inside your Jellyfin server web interface:
+- **Repository Manifest**: `https://github.com/MoazSalem/litefin/releases/latest/download/litefin-plugin-manifest.json`
+- **Manual Sideloading**: Drop `Litefin.Client.Plugin.dll` and `manifest.json` into `/plugins/Litefin_Client/`.
+- Accessible at `http://<server-ip>:<port>/litefin`.
+
 ## Security & Sandbox
 
 Plugins are **sandboxed** via the `PluginAPI`.
@@ -144,3 +160,4 @@ Plugins are **sandboxed** via the `PluginAPI`.
 - **DO NOT** import internal Litefin modules directly (e.g., `src/core/Router.js`).
 - **DO** use `api.on()` (auto-unsubscribed), `api.showToast()`, `api.getStorage()`, `api.addOSDWidget()`, and `api.serverPlugins` for all operations.
 - This ensures your plugin doesn't break if Litefin's internal directory structure changes.
+

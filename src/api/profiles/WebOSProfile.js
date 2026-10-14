@@ -94,7 +94,19 @@ function getProbedCodecs() {
 function getWebOSVersion() {
     const userAgent = navigator.userAgent.toLowerCase();
     const match = /(?:chrome|crios|crmo)\/([0-9.]+)/.exec(userAgent);
-    if (!match) return 0;
+    if (!match) {
+        // Ancient WebOS 1.x/2.x platforms use pure WebKit without Chrome in UserAgent.
+        // Fall back to parsing the AppleWebKit version number:
+        //   AppleWebKit/538.2 -> WebOS 2.x
+        //   AppleWebKit/537.41 -> WebOS 1.x
+        const webkitMatch = /applewebkit\/([0-9.]+)/.exec(userAgent);
+        if (webkitMatch) {
+            const webkitVersion = parseFloat(webkitMatch[1]);
+            if (webkitVersion >= 538) return 2;
+            if (webkitVersion >= 537) return 1;
+        }
+        return 1; // Minimum safe fallback instead of 0
+    }
 
     const versionMajor = parseInt(match[1].split('.')[0], 10);
 
@@ -385,11 +397,27 @@ export function buildJellyfinProfile(options = {}) {
 
     // Resolve user's maximum audio channels setting (-1 = all/auto hardware capability)
     const userMaxChannels = PlayerSettings.get('allowedAudioChannels');
-    const maxAudioChannels = (userMaxChannels && userMaxChannels > 0) ? userMaxChannels : caps.maxAudioChannels;
+    // When DTS or TrueHD passthrough is enabled, TV/eARC soundbar systems support full 7.1 (8-channel)
+    // audio bitstreams. Defaulting to 6 channels causes Jellyfin server's CodecProfiles condition
+    // (AudioChannels <= 6) to reject DirectPlay for 7.1 tracks with AudioChannelsNotSupported,
+    // forcing unnecessary server transcoding to a 5.1 AC3 compatibility track.
+    const defaultMaxChannels = (enableDts || enableTrueHd) ? 8 : caps.maxAudioChannels;
+    const maxAudioChannels = (userMaxChannels && userMaxChannels > 0) ? userMaxChannels : defaultMaxChannels;
 
     // ProfileCondition.Value is always a string in Jellyfin's schema, so we keep
     // a separate string-form for use inside CodecProfile condition objects.
     const maxAudioChannelsStr = String(maxAudioChannels);
+
+    // -------------------------------------------------------------------------
+    // Transcode Maximum Audio Channels Resolution
+    // -------------------------------------------------------------------------
+    // Dictates the maximum audio channels emitted during server transcode.
+    // If not set explicitly (-1 / auto), falls back to Direct Play channel cap.
+    // -------------------------------------------------------------------------
+    const userTransChannels = PlayerSettings.get('transcodeMaxAudioChannels');
+    const transMaxAudioChannels = (userTransChannels && userTransChannels > 0)
+        ? userTransChannels
+        : maxAudioChannels;
 
     // -------------------------------------------------------------------------
     // fMP4 HLS preference resolution
@@ -449,7 +477,7 @@ export function buildJellyfinProfile(options = {}) {
     if (caps.webosVersion >= 4) {
         audioCodecs.push('opus');
     }
-    if (enableDts) audioCodecs.push('dts', 'dca');
+    if (enableDts) audioCodecs.push('dts', 'dca', 'dtshd', 'dts-hd', 'dts-ma', 'dts-x');
     if (enableTrueHd) audioCodecs.push('truehd');
 
     const audioCodecString = audioCodecs.join(',');
@@ -471,22 +499,24 @@ export function buildJellyfinProfile(options = {}) {
     // =========================================================================
     // Direct Play Profiles Configuration
     // =========================================================================
-    // We only declare standard web-compatible containers (MP4, MKV, WebM, HLS)
-    // for Direct Play on webOS.
+    // Standard web-compatible containers (MP4, MKV, WebM) are declared for all
+    // backends. When using the native WebOSPlayer backend (hardware decode pipeline),
+    // we also declare MPEG-TS (ts, mpegts) and Blu-ray M2TS (m2ts) containers.
     //
-    // CRITICAL DETAIL:
-    // We previously had an override block here that allowed TS, M2TS, AVI, WMV,
-    // and MPG containers to direct play when using the native WebOSPlayer backend.
-    // However, while the webOS hardware can play these containers locally (e.g.
-    // via USB), the browser engine's HTML5 <video> tag does NOT support progressive
-    // HTTP playback of these formats. Trying to Direct Play a static .ts file
-    // results in a DEMUXER_ERROR_COULD_NOT_OPEN crash.
+    // EXTENDED TS / M2TS CONTAINER DIRECT PLAY:
+    // LG WebOS Smart TVs feature dedicated hardware demuxers for MPEG-TS and M2TS
+    // transport streams in their native media engine (MediaPipeline / NDL).
+    // Progressive 4K TS and M2TS media — specifically 4K HEVC Dolby Vision Profile 8.1
+    // and Profile 7 Blu-ray rips — direct play flawlessly via _playNativeDirect(),
+    // passing the raw bitstream to the hardware decoder alongside the dvh1 hint.
     //
-    // By removing them from Direct Play, we force the Jellyfin server to remux
-    // them (Direct Stream) into standard HLS streams. Since webOS natively
-    // supports HLS streaming, these files will play flawlessly and without quality
-    // loss, as the server just repackages the container on-the-fly without
-    // transcoding the actual audio/video streams.
+    // When omitted from DirectPlayProfiles, the Jellyfin server is forced to remux
+    // these high-bitrate (60-90+ Mbps) 4K streams into HLS chunks on-the-fly.
+    // That remux pipeline leads to severe buffer exhaustion, continuous stuttering,
+    // and intermittent loss of Dolby Vision RPU metadata (causing washed-out colors).
+    //
+    // Note: To preserve Live TV stability, interlaced TS streams (e.g. ATSC / DVB)
+    // are explicitly blocked from DirectPlay in CodecProfiles below via IsInterlaced: false.
     // =========================================================================
     const directPlayProfiles = [];
 
@@ -513,6 +543,42 @@ export function buildJellyfinProfile(options = {}) {
                 Type: 'Video',
                 VideoCodec: webmVideoCodecs.join(','),
                 AudioCodec: 'vorbis,opus'
+            });
+        }
+
+        /*
+         * Native WebOS DirectPlay for TS and M2TS containers:
+         *
+         * Only the native WebOS backend (WebOSPlayer) on WebOS 5+ direct-plays progressive TS/M2TS
+         * streams natively over HTTP. Older WebOS 3/4 hardware demuxers crash with decode errors
+         * on raw HTTP progressive TS streams and require HLS packaging instead.
+         * The fallback HTML5 backend (Hls.js) lacks progressive TS demuxing in standard browsers.
+         */
+        if (!isHtml5 && caps.webosVersion >= 5) {
+            // Build supported video codecs list for MPEG-TS container
+            const tsVideoCodecs = ['h264', 'vc1'];
+            if (enableHEVC) tsVideoCodecs.push('hevc');
+            if (caps.mpeg2video) tsVideoCodecs.push('mpeg2video');
+
+            // Build supported video codecs list for M2TS container (Blu-ray rips)
+            const m2tsVideoCodecs = ['h264', 'vc1'];
+            if (enableHEVC) m2tsVideoCodecs.push('hevc');
+            if (caps.mpeg2video) m2tsVideoCodecs.push('mpeg2video');
+
+            // MPEG-TS DirectPlay profile
+            directPlayProfiles.push({
+                Container: 'ts,mpegts',
+                Type: 'Video',
+                VideoCodec: tsVideoCodecs.join(','),
+                AudioCodec: audioCodecString
+            });
+
+            // M2TS DirectPlay profile
+            directPlayProfiles.push({
+                Container: 'm2ts',
+                Type: 'Video',
+                VideoCodec: m2tsVideoCodecs.join(','),
+                AudioCodec: audioCodecString
             });
         }
 
@@ -559,40 +625,51 @@ export function buildJellyfinProfile(options = {}) {
     //   'aac'  — AAC (last resort for devices that can't handle AC3/EAC3 in HLS)
     // ---------------------------------------------------------------------------
 
-    // Read user preference and build the codec list.
-    // Options: 'auto', 'prefer_ac3', 'prefer_aac', 'force_eac3', 'force_ac3', 'force_aac'.
     const preferredTranscodeCodec = PlayerSettings.get('transcodeAudioCodec') || 'auto';
 
+    // =========================================================================
+    // Transcode Target Codec Resolution
+    // =========================================================================
+    // Jellyfin server's StreamBuilder evaluates TranscodingProfiles using a
+    // priority-based search. When higher-ranking codecs (e.g. EAC3) are present
+    // in TranscodingProfiles alongside AAC, the server will select EAC3 whenever
+    // the source audio has EAC3 or exceeds AAC's channel conditions in CodecProfiles.
+    //
+    // Therefore, when the user explicitly requests 'prefer_aac' or 'prefer_ac3',
+    // conflicting higher-priority codecs must NOT be advertised in TranscodingProfiles.
+    // =========================================================================
     const transAudioCodecsArr = [];
     if (preferredTranscodeCodec === 'auto') {
-        // Auto (Prefer E-AC3) -> E-AC3 first, then AC3, then AAC fallback
+        // Auto (Prefer E-AC3) -> E-AC3 first, then AC3, then AAC/MP3 fallback
         if (caps.eac3) transAudioCodecsArr.push('eac3');
         if (caps.ac3) transAudioCodecsArr.push('ac3');
-        transAudioCodecsArr.push('aac');
+        transAudioCodecsArr.push('aac', 'mp3');
         if (enableMp2) transAudioCodecsArr.push('mp2');
     } else if (preferredTranscodeCodec === 'prefer_ac3') {
-        // Prefer AC3 -> AC3 first, then E-AC3, then AAC fallback
+        // Prefer AC3 (with AAC fallback) -> AC3 first, then AAC/MP3 fallback.
+        // EAC3 is strictly excluded so the server never upgrades to E-AC3.
         if (caps.ac3) transAudioCodecsArr.push('ac3');
-        if (caps.eac3) transAudioCodecsArr.push('eac3');
-        transAudioCodecsArr.push('aac');
+        transAudioCodecsArr.push('aac', 'mp3');
         if (enableMp2) transAudioCodecsArr.push('mp2');
     } else if (preferredTranscodeCodec === 'prefer_aac') {
-        // Prefer AAC -> AAC first, then E-AC3, then AC3
-        transAudioCodecsArr.push('aac');
+        // Prefer AAC -> AAC first, then MP3/MP2 fallback.
+        // EAC3 and AC3 are strictly excluded so the server honors the user's AAC preference.
+        transAudioCodecsArr.push('aac', 'mp3');
         if (enableMp2) transAudioCodecsArr.push('mp2');
-        if (caps.eac3) transAudioCodecsArr.push('eac3');
-        if (caps.ac3) transAudioCodecsArr.push('ac3');
     } else if (preferredTranscodeCodec === 'force_eac3') {
-        // Only E-AC3
+        // Force/Only E-AC3
         transAudioCodecsArr.push('eac3');
     } else if (preferredTranscodeCodec === 'force_ac3') {
-        // Only AC3
+        // Force/Only AC3
         transAudioCodecsArr.push('ac3');
+    } else if (preferredTranscodeCodec === 'force_aac') {
+        // Force/Only AAC
+        transAudioCodecsArr.push('aac');
     } else if (preferredTranscodeCodec === 'force_mp3') {
-        // Only MP3
+        // Force/Only MP3
         transAudioCodecsArr.push('mp3');
     } else {
-        // Only AAC
+        // Universal fallback
         transAudioCodecsArr.push('aac');
     }
 
@@ -610,7 +687,7 @@ export function buildJellyfinProfile(options = {}) {
     // to eARC exactly like the native LG media player does for local files.
     // ---------------------------------------------------------------------------
     const directAudioCodecsArr = ['aac', 'ac3', 'eac3', 'mp3', 'flac'];
-    if (enableDts) directAudioCodecsArr.push('dts', 'dca');
+    if (enableDts) directAudioCodecsArr.push('dts', 'dca', 'dtshd', 'dts-hd', 'dts-ma', 'dts-x');
     if (enableTrueHd) directAudioCodecsArr.push('truehd');
     const directAudioCodecs = directAudioCodecsArr.join(',');
 
@@ -646,6 +723,25 @@ export function buildJellyfinProfile(options = {}) {
 
     const transcodingProfiles = [];
 
+    // -------------------------------------------------------------------------
+    // Direct Stream / Remux Video Detection
+    // -------------------------------------------------------------------------
+    // When video is passed through without re-encoding (remux or audio-only transcode),
+    // FFmpeg is in stream-copy mode (-c:v copy) and CANNOT cut segments on arbitrary
+    // non-keyframes. If the client forces a short SegmentLength (e.g. 2s or 6s), the server
+    // generates an HLS playlist declaring fixed durations while FFmpeg produces GOP-aligned
+    // segments. This mismatch causes buffer holes, continuous bufferSeekOverHole events,
+    // and severe audio/video desynchronization.
+    // By leaving SegmentLength undefined during remux/copy, Jellyfin server
+    // dynamically falls back to its adaptive keyframe-aligned cuts.
+    // -------------------------------------------------------------------------
+    const isVideoDirectStream = playbackMode === 'remux' || playbackMode === 'transcodeAudio';
+    const effectiveSegmentLength = isVideoDirectStream
+        ? undefined
+        : (isHtml5
+            ? PlayerSettings.get('html5SegmentLength') || 2
+            : PlayerSettings.get('webosSegmentLength') || 6);
+
     // Primary HLS video transcoding profile (one for each codec in transAudioCodecsArr)
     for (const audioCodec of transAudioCodecsArr) {
         transcodingProfiles.push({
@@ -660,7 +756,7 @@ export function buildJellyfinProfile(options = {}) {
              *     container and required for legacy WebOS 4/5 systems.
              *
              * Segment sizing strategy:
-             *   webos  (native) — larger segments (4s) reduce HTTP round-trips and
+             *   webos  (native) — larger segments (6s) reduce HTTP round-trips and
              *            give the hardware decoder more headroom.
              *   html5  (Hls.js) — smaller segments (2s) enable faster startup and
              *            allow Hls.js to recover from network blips more quickly.
@@ -672,29 +768,18 @@ export function buildJellyfinProfile(options = {}) {
             Context: 'Streaming',
             Protocol: 'hls',
             // Integer fields — Jellyfin TranscodingProfileDto schema is strict
-            MaxAudioChannels: maxAudioChannels,
+            MaxAudioChannels: transMaxAudioChannels,
             // ---------------------------------------------------------------------
-            // Segment sizing: fixed at 6 seconds for all TS content.
-            //
-            // This matches the official jellyfin-webos client behaviour and ensures
-            // that each HLS chunk stays at a manageable ~72 MB at 96 Mbps (4K HEVC),
-            // which the LG hardware decoder and RAM bus can handle without stalling.
-            //
-            // A previous version used 10 s for "DV content" but the detection was
-            // based on settings (enableDolbyVision && enableHEVC) rather than actual
-            // stream metadata, so it incorrectly applied to all HDR10/HDR10+ content
-            // as well — causing the slideshow / slowmo playback reports.
+            // Segment sizing: left undefined during video copy to align with GOPs.
+            // When re-encoding, defaults to 2s for HTML5 / 6s for native WebOS.
             // ---------------------------------------------------------------------
-            SegmentLength: isHtml5
-                ? PlayerSettings.get('html5SegmentLength') || 2
-                : PlayerSettings.get('webosSegmentLength') || 6,
-            // Force IDR-aligned segment cuts for all TS content, not only DOVI.
-            // The WebOS decoder produces visible macroblocking artifacts when split
-            // mid-GOP, and the resulting non-IDR boundaries also trigger additional
-            // 'waiting' events. BreakOnNonKeyFrames is never safe on this platform.
-            // Exception: fMP4 is already forced-IDR by the muxer; and remux mode
-            // passes the stream through as-is so we must not override it either.
-            BreakOnNonKeyFrames: primaryHlsContainer === 'mp4' ? false : playbackMode === 'remux' ? false : false, // always false for TS on WebOS
+            MinSegments: isHtml5 ? 1 : 2,
+            SegmentLength: effectiveSegmentLength,
+            // BreakOnNonKeyFrames MUST be true for HTML5/HLS.js (matching official jellyfin-web).
+            // Setting it to false causes Jellyfin server to append -noaccurate_seek and omit
+            // -copypriorss:a:0 0 in FFmpeg, which breaks audio/video synchronization.
+            // On native WebOS media pipeline, keep false to ensure strict hardware GOP compliance.
+            BreakOnNonKeyFrames: isHtml5 ? true : false,
             EnableAudioVbrEncoding: !PlayerSettings.get('disableVbrAudio')
         });
     }
@@ -735,7 +820,7 @@ export function buildJellyfinProfile(options = {}) {
             VideoCodec: mkvVideoCodecs.join(','),
             Context: 'Static',
             CopyTimestamps: true,
-            MaxAudioChannels: maxAudioChannels
+            MaxAudioChannels: transMaxAudioChannels
         },
         {
             Container: 'mp4',
@@ -761,13 +846,11 @@ export function buildJellyfinProfile(options = {}) {
                 VideoCodec: transVideoCodecs,
                 Context: 'Streaming',
                 Protocol: 'hls',
-                MaxAudioChannels: maxAudioChannels,
-                MinSegments: 1,
-                SegmentLength: isHtml5
-                    ? PlayerSettings.get('html5SegmentLength') || 2
-                    : PlayerSettings.get('webosSegmentLength') || 6,
-                // fMP4 segments MUST align to IDR boundaries; never break on subtitle cue points.
-                BreakOnNonKeyFrames: false,
+                MaxAudioChannels: transMaxAudioChannels,
+                MinSegments: isHtml5 ? 1 : 2,
+                SegmentLength: effectiveSegmentLength,
+                // BreakOnNonKeyFrames with fMP4: must be true for HTML5/HLS.js
+                BreakOnNonKeyFrames: isHtml5 ? true : false,
                 EnableAudioVbrEncoding: !PlayerSettings.get('disableVbrAudio')
             });
         }
@@ -865,6 +948,27 @@ export function buildJellyfinProfile(options = {}) {
                     : [])
             ]
         },
+        // ---------------------------------------------------------------------
+        // Video Audio Channel Cap Condition
+        // ---------------------------------------------------------------------
+        // Enforce maximum audio channels on audio streams inside video files
+        // (MKV, MP4, TS, etc.) so Jellyfin evaluates server-side transcode/downmix.
+        // ---------------------------------------------------------------------
+        {
+            Type: 'VideoAudio',
+            Conditions: [
+                {
+                    Condition: 'LessThanEqual',
+                    Property: 'AudioChannels',
+                    // ProfileCondition.Value must be a string in Jellyfin's schema
+                    Value: maxAudioChannelsStr,
+                    IsRequired: false
+                }
+            ]
+        },
+        // ---------------------------------------------------------------------
+        // Standalone Audio Channel Cap Condition
+        // ---------------------------------------------------------------------
         {
             Type: 'Audio',
             Conditions: [
@@ -873,6 +977,32 @@ export function buildJellyfinProfile(options = {}) {
                     Property: 'AudioChannels',
                     // ProfileCondition.Value must be a string in Jellyfin's schema
                     Value: maxAudioChannelsStr,
+                    IsRequired: false
+                }
+            ]
+        },
+        // -----------------------------------------------------------------------
+        // Block interlaced TS / MPEGTS / M2TS streams from DirectPlay.
+        //
+        // Broadcast television feeds (e.g. HDHomeRun ATSC 1.0 or DVB) typically
+        // deliver interlaced 1080i or 480i video in MPEG-2 or H.264 within TS containers.
+        // Progressive playback of interlaced streams directly in the browser pipeline
+        // causes deinterlacing failures and FFmpeg crashes on tuner capture sessions.
+        //
+        // Requiring IsInterlaced: false instructs the Jellyfin server to drop
+        // DirectPlay for interlaced content and smoothly route it through an
+        // HLS transcode pipeline with yadif deinterlacing applied.
+        // Progressive 4K UHD movies (including Dolby Vision) evaluate IsInterlaced=false
+        // and continue to DirectPlay with maximum quality and performance.
+        // -----------------------------------------------------------------------
+        {
+            Type: 'Video',
+            Container: 'ts,mpegts,m2ts',
+            Conditions: [
+                {
+                    Condition: 'Equals',
+                    Property: 'IsInterlaced',
+                    Value: 'false',
                     IsRequired: false
                 }
             ]
@@ -904,40 +1034,12 @@ export function buildJellyfinProfile(options = {}) {
                     Property: 'VideoBitDepth',
                     Value: enableHDR ? '10' : '8',
                     IsRequired: false
-                },
-                // ---------------------------------------------------------------
-                // HDR10 codec tag gate — prevents VAAPI from stripping HDR metadata
-                // ---------------------------------------------------------------
-                // PROBLEM (confirmed via server FFmpeg logs):
-                //   When Jellyfin's server decides to re-encode HEVC HDR10 content
-                //   via VAAPI (hevc_vaapi), it uses:
-                //       -profile:v:0 main          ← forces 8-bit output
-                //       -vf "setparams=color_primaries=bt709:color_trc=bt709:..."
-                //   This explicitly converts the stream to SDR bt709. The hardware
-                //   encoder doesn't support Main 10 / HDR reliably in VAAPI, so
-                //   Jellyfin silently downgrades to SDR. WebOS receives an SDR stream
-                //   and naturally shows no HDR signal — by design.
-                //
-                // FIX:
-                //   Require VideoCodecTag = 'hvc1' for HDR HEVC. The hvc1 tag is
-                //   only present when the HEVC stream is COPIED verbatim (remux path).
-                //   When the server would re-encode (transcode path), it produces a
-                //   different / no codec tag, failing this condition. Jellyfin then
-                //   falls back to the copy path — preserving all HDR10 SEI metadata
-                //   (mastering display, MaxCLL/MaxFALL, HDR10+) in the output TS segments.
-                //
-                // NOTE: This only applies when HDR is enabled. SDR content is freely
-                //   re-encodable since there is no HDR metadata to preserve.
-                ...(enableHDR
-                    ? [
-                          {
-                              Condition: 'EqualsAny',
-                              Property: 'VideoCodecTag',
-                              Value: 'hvc1|dvh1|hev1',
-                              IsRequired: false
-                          }
-                      ]
-                    : [])
+                }
+                // Note: VideoCodecTag condition is intentionally omitted from the
+                // general HEVC profile. MPEG-TS and Blu-ray M2TS transport streams do not
+                // use ISOBMFF fourcc codec tags (like hvc1/hev1/dvh1). Adding a VideoCodecTag
+                // requirement here causes the Jellyfin server to reject DirectPlay for all
+                // TS and M2TS files with TranscodeReasons=VideoCodecTagNotSupported.
             ]
         });
 
@@ -1158,22 +1260,15 @@ export function buildJellyfinProfile(options = {}) {
         TranscodingProfiles: transcodingProfiles,
         CodecProfiles: codecProfiles,
         SubtitleProfiles: BaseProfile.getSubtitleProfiles(),
-        ResponseProfiles: [
-            {
-                Container: 'mkv',
-                Type: 'Video',
-                Conditions: [
-                    {
-                        Condition: 'EqualsAny',
-                        Property: 'VideoCodec',
-                        Value: 'h264'
-                    }
-                ],
-                Action: 'Remux',
-                ContainerOverride: 'mp4'
-            },
-            ...BaseProfile.getResponseProfiles()
-        ]
+        // =====================================================================
+        // Response Profiles (MIME Type and Container Mapping)
+        // =====================================================================
+        // Use standardized base response profiles. Custom response profiles with
+        // non-standard condition properties (such as 'VideoCodec') fail JSON
+        // deserialization in Jellyfin's ProfileConditionValue enum, resulting
+        // in HTTP 400 Bad Request on PlaybackInfo endpoints.
+        // =====================================================================
+        ResponseProfiles: BaseProfile.getResponseProfiles()
     };
 }
 

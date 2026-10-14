@@ -202,6 +202,9 @@ class ImageCache {
         img.onload = onDone;
         img.onerror = onDone; // Failures are silently ignored — LazyLoader will handle them
 
+        // Configure anonymous CORS so images load seamlessly across local network origins
+        img.crossOrigin = 'anonymous';
+
         // Assigning src starts the network request.
         // The browser caches the response under this URL, so any subsequent
         // img.src = url assignment (by LazyLoader) hits "from memory cache".

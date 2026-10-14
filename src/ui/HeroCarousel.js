@@ -19,12 +19,14 @@ import { shouldShowScore } from '../utils/visibility.js';
 import { platformInfo } from '../utils/PlatformInfo.js';
 import { detailsIcons } from '../utils/Icons.js';
 import { escapeHtml } from '../utils/Utils.js';
+import { getMdbProviderInfo } from '../plugins/installed/mdblist-ratings/ratingsFormatter.js';
 
 const log = logger.create('HeroCarousel');
 
 class HeroCarousel {
     constructor(options = {}) {
-        this._items = options.items || [];
+        // Filter out items lacking valid IDs to prevent broken image requests and routing errors
+        this._items = (options.items || []).filter((item) => item && item.Id && item.Id !== '0');
         this._currentIndex = 0;
         this._timer = null;
         this._container = null;
@@ -32,6 +34,12 @@ class HeroCarousel {
         const savedInterval = storage.getItem('pref:heroCarouselInterval');
         this._autoScrollInterval = savedInterval ? parseInt(savedInterval, 10) : 8000; // Default 8s
         this._hideTimeoutId = null;
+
+        // Viewport visibility and progressive preloading state tracking
+        this._isVisible = true;
+        this._intersectionObserver = null;
+        this._preloadTimeoutId = null;
+        this._preloadIdleId = null;
 
         // Bindings
         this._handleFocus = this._handleFocus.bind(this);
@@ -46,6 +54,11 @@ class HeroCarousel {
 
         // Default carousel style is set to 'immersive' for a premium tvOS-style design.
         const carouselStyle = storage.getItem('pref:heroCarouselStyle') || 'immersive';
+
+        // Read the chosen indicator presentation style ('dots', 'lines', or 'progress')
+        const indicatorStyle = storage.getItem('pref:heroCarouselIndicatorStyle') || 'dots';
+
+        // Render slides and indicator elements
         const itemsHtml = this._items.map((item, index) => this._renderItem(item, index, carouselStyle)).join('');
         const dotsHtml = this._items
             .map(
@@ -54,13 +67,15 @@ class HeroCarousel {
             )
             .join('');
 
+        // Query layout configuration flags from persistent storage
         const isCompact = storage.getItem('pref:heroCarouselCompact') !== 'false';
         const isZoomEnabled = storage.getItem('pref:heroCarouselZoom') === 'true';
         const isAnimationEnabled = storage.getItem('pref:heroCarouselIndicatorAnimation') !== 'false';
         const intervalInSeconds = (this._autoScrollInterval / 1000).toFixed(1) + 's';
 
         let navArrowsHtml = '';
-        if ((platformInfo.isWeb || platformInfo.isWebOS) && this._items.length > 1) {
+        // Render navigation arrows on pointer-driven platforms (Web, Desktop, WebOS Magic Remote)
+        if ((platformInfo.isWeb || platformInfo.isDesktop || platformInfo.isWebOS) && this._items.length > 1) {
             navArrowsHtml = `
                 <div class="hero-nav-arrows">
                     <button class="hero-arrow hero-arrow-left" aria-label="Previous" tabindex="-1">
@@ -76,9 +91,10 @@ class HeroCarousel {
         // Apply compact to the container to manage external margins (Banner Mode)
         // Use with-zoom to conditionally apply the focus transform
         // Use no-indicator-animation to disable the progress bar fill
+        // Use indicator-${indicatorStyle} to switch between lines, dots, or progress pills
         return `
             <div id="hero-carousel-container" 
-                 class="hero-carousel-container ${carouselStyle} ${isCompact ? 'compact' : ''} ${isZoomEnabled ? 'with-zoom' : ''} ${!isAnimationEnabled ? 'no-indicator-animation' : ''} focusable" 
+                 class="hero-carousel-container ${carouselStyle} indicator-${indicatorStyle} ${isCompact ? 'compact' : ''} ${isZoomEnabled ? 'with-zoom' : ''} ${!isAnimationEnabled ? 'no-indicator-animation' : ''} focusable" 
                  style="--indicator-duration: ${intervalInSeconds}"
                  tabindex="0">
                 <div class="hero-carousel">
@@ -109,10 +125,25 @@ class HeroCarousel {
         // Get optimized image parameters from ImageService based on style
         const params = imageService.getParams(`hero-${carouselStyle}`);
 
-        const backdropUrl = api.getImageUrl(item.Id, 'Backdrop', {
+        // Resolve backdrop tag and source item ID (supports both item and parent series backdrops)
+        const backdropTag =
+            item.BackdropImageTags && item.BackdropImageTags.length > 0
+                ? item.BackdropImageTags[0]
+                : item.ParentBackdropImageTags && item.ParentBackdropImageTags.length > 0
+                    ? item.ParentBackdropImageTags[0]
+                    : item.ImageTags?.Backdrop;
+
+        // Fall back to parent backdrop ID when the child item lacks its own artwork
+        const backdropItemId =
+            item.BackdropImageTags && item.BackdropImageTags.length > 0
+                ? item.Id
+                : item.ParentBackdropItemId || item.Id;
+
+        // Compile optimized backdrop URL with tag query for HTTP cache validation
+        const backdropUrl = api.getImageUrl(backdropItemId, 'Backdrop', {
             maxWidth: params.maxWidth,
             quality: params.quality,
-            tag: item.ImageTags?.Backdrop
+            tag: backdropTag
         });
 
         // Get Logo URL (prefer Logo, then ParentLogo)
@@ -132,6 +163,12 @@ class HeroCarousel {
                 quality: logoParams.quality,
                 tag: logoTag
             });
+            // -----------------------------------------------------------------
+            // Progressive asset loading:
+            // The active slide (index 0) loads its logo immediately via src.
+            // Inactive slides store the URL in data-src to prevent the browser
+            // from making 5-10 concurrent high-res image requests on mount.
+            // -----------------------------------------------------------------
             const logoSrc = isActive ? `src="${logoUrl}"` : `data-src="${logoUrl}"`;
             logoHtml = `<div class="hero-logo-container"><img ${logoSrc} alt="" class="hero-logo"></div>`;
         } else {
@@ -178,10 +215,21 @@ class HeroCarousel {
             }
         }
 
+        // ---------------------------------------------------------------------
+        // Lazy Backdrop & BlurHash Texture Allocation
+        // ---------------------------------------------------------------------
+        // TV chipsets have limited GPU texture memory. If all 5-10 slides mount
+        // with inline background-image, the browser decodes every full-screen
+        // 1820px backdrop at once, starving the main thread during page load.
+        // We set background-image exclusively for the active slide (index 0).
+        // Inactive slides store the URL in data-backdrop and load just-in-time.
+        // ---------------------------------------------------------------------
+        const backdropStyle = isActive ? ` style="background-image: url('${backdropUrl}')"` : '';
+
         return `
             <div class="hero-item ${isActive ? 'active' : ''}" data-index="${index}"${!isActive ? ' style="visibility:hidden"' : ''}>
-                <div class="hero-backdrop" data-backdrop="${backdropUrl}"${isActive ? ` style="background-image: url('${backdropUrl}')"` : ''}>
-                    ${blurHash ? `<canvas class="hero-blurhash-canvas" data-blurhash="${blurHash}" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; transition: opacity 500ms ease-out; z-index: 0; pointer-events: none; opacity: 1;"></canvas>` : ''}
+                <div class="hero-backdrop" data-backdrop="${backdropUrl}"${backdropStyle}>
+                    ${blurHash && isActive ? `<canvas class="hero-blurhash-canvas" data-blurhash="${blurHash}" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; transition: opacity 500ms ease-out; z-index: 0; pointer-events: none; opacity: 1;"></canvas>` : ''}
                 </div>
                 <div class="hero-content">
                     ${logoHtml}
@@ -198,26 +246,43 @@ class HeroCarousel {
      * Renders MDBList Ratings and Awards for the carousel row.
      * @private
      */
-    _renderMdbMetadata(data) {
+     _renderMdbMetadata(data) {
         if (!data) return '';
 
         let html = '';
         const assetBase = `${api.serverUrl}/Plugins/MdbListRatings/Assets/`;
+        const features = data.features || null;
+        const settings = data.settings || null;
 
         // 1. Render Ratings
         if (data.ratings && data.ratings.length > 0) {
             for (const rating of data.ratings) {
-                if (rating.value === null || rating.value === undefined) continue;
+                // Resolve normalized provider info and precision formatting
+                const provider = getMdbProviderInfo(
+                    rating.source || rating.Source,
+                    rating.value !== undefined ? rating.value : rating.Value,
+                    rating.score !== undefined ? rating.score : rating.Score,
+                    features,
+                    settings
+                );
 
-                const provider = this._getMdbProviderInfo(rating.source, rating.value);
-                const formattedValue = provider.format ? provider.format(rating.value) : rating.value;
+                // Skip if formatting failed or no display text
+                if (!provider || !provider.formattedText) continue;
 
                 if (provider.assetName) {
                     const iconUrl = `${assetBase}${provider.assetName}`;
+                    // Include onerror fallback to hide broken image icon cleanly on older 10.xx servers
                     html += `
-                        <div class="hero-mdb-item">
-                            <img src="${iconUrl}" class="hero-mdb-icon" alt="" />
-                            <span class="hero-mdb-value">${formattedValue}</span>
+                        <div class="hero-mdb-item" title="${provider.displayName}: ${provider.formattedText}">
+                            <img src="${iconUrl}" class="hero-mdb-icon" alt="${provider.displayName}" onerror="this.onerror=null;this.style.display='none';" />
+                            <span class="hero-mdb-value">${provider.formattedText}</span>
+                        </div>
+                    `;
+                } else {
+                    html += `
+                        <div class="hero-mdb-item" title="${provider.displayName}: ${provider.formattedText}">
+                            <span class="hero-mdb-icon star-emoji">⭐</span>
+                            <span class="hero-mdb-value">${provider.formattedText}</span>
                         </div>
                     `;
                 }
@@ -228,45 +293,11 @@ class HeroCarousel {
     }
 
     /**
-     * Helper to get provider info for MDBList ratings.
+     * Helper to get provider info for MDBList ratings (backward-compatible delegate).
      * @private
      */
-    _getMdbProviderInfo(source, value) {
-        const s = source ? source.toLowerCase() : '';
-        const score = parseFloat(value);
-
-        if (s === 'imdb') {
-            return { assetName: 'IMDb.png' };
-        }
-        if (s === 'tomatoes') {
-            const assetName = score < 60 ? 'Rotten_Tomatoes_rotten.png' : 'Rotten_Tomatoes.png';
-            return { assetName, format: (v) => `${v}%` };
-        }
-        if (s === 'tomatoesaudience' || s === 'popcorn') {
-            const assetName =
-                score < 60 ? 'Rotten_Tomatoes_negative_audience.png' : 'Rotten_Tomatoes_positive_audience.png';
-            return { assetName, format: (v) => `${v}%` };
-        }
-        if (s === 'metacritic') {
-            return { assetName: 'Metacritic.png' };
-        }
-        if (s === 'trakt') {
-            return { assetName: 'Trakt.png', format: (v) => `${Math.round(v)}%` };
-        }
-        if (s === 'tmdb') {
-            return {
-                assetName: 'TMDB.png',
-                format: (v) => {
-                    const num = parseFloat(v);
-                    return (num > 10 ? num / 10 : num).toFixed(1);
-                }
-            };
-        }
-        if (s === 'letterboxd') {
-            return { assetName: 'letterboxd.png', format: (v) => parseFloat(v).toFixed(1) };
-        }
-
-        return { assetName: null };
+    _getMdbProviderInfo(source, value, score = null) {
+        return getMdbProviderInfo(source, value, score);
     }
     /**
      * Initialize the component after it's in the DOM
@@ -275,8 +306,117 @@ class HeroCarousel {
         this._container = el || document.getElementById('hero-carousel-container');
         if (!this._container) return;
 
+        // Flag to prevent accidental detail navigation when completing a swipe gesture
+        this._suppressItemClick = false;
+
         // Enter key handling via native click (FocusManager triggers .click())
-        this._container.addEventListener('click', () => this._onItemClick());
+        this._container.addEventListener('click', (e) => {
+            // Suppress navigation if user just completed a swipe gesture
+            if (this._suppressItemClick) return;
+            // Ignore direct clicks on navigation arrows or indicator dots
+            if (e.target.closest('.hero-arrow') || e.target.closest('.hero-dot')) return;
+            this._onItemClick();
+        });
+
+        // ---------------------------------------------------------------------
+        // Native Touch Swipe & Gesture Tracking (Mobile & Tablet Ergonomics)
+        // ---------------------------------------------------------------------
+        // Implements horizontal swipe physics for touchscreen devices.
+        // Pauses auto-scroll on touch, computes horizontal delta, and triggers
+        // next() or previous() based on swipe direction while cleanly preserving
+        // vertical scrolling for browsing home content rows below.
+        // ---------------------------------------------------------------------
+        let touchStartX = 0;
+        let touchStartY = 0;
+        let touchStartTime = 0;
+        let isSwipingHorizontal = false;
+        let swipeDeltaX = 0;
+
+        const onTouchStart = (e) => {
+            const touch = e.touches ? e.touches[0] : e;
+            touchStartX = touch.clientX;
+            touchStartY = touch.clientY;
+            touchStartTime = Date.now();
+            isSwipingHorizontal = false;
+            swipeDeltaX = 0;
+            // Temporarily pause auto-scroll during user interaction
+            this._stopAutoScroll();
+        };
+
+        const onTouchMove = (e) => {
+            const touch = e.touches ? e.touches[0] : e;
+            const diffX = touch.clientX - touchStartX;
+            const diffY = touch.clientY - touchStartY;
+
+            // Classify dominant axis once movement passes minimum threshold
+            if (!isSwipingHorizontal && Math.abs(diffX) > 10) {
+                if (Math.abs(diffX) > Math.abs(diffY)) {
+                    isSwipingHorizontal = true;
+                }
+            }
+
+            if (isSwipingHorizontal) {
+                swipeDeltaX = diffX;
+            }
+        };
+
+        const onTouchEnd = () => {
+            if (isSwipingHorizontal) {
+                const isRtl = document.documentElement.dir === 'rtl';
+                const timeDiff = Date.now() - touchStartTime;
+                const minDistance = 35; // 35px threshold for deliberate swipe
+                const velocity = Math.abs(swipeDeltaX) / Math.max(1, timeDiff);
+
+                if (Math.abs(swipeDeltaX) >= minDistance || velocity > 0.25) {
+                    // Suppress click so we don't accidentally navigate to details
+                    this._suppressItemClick = true;
+                    setTimeout(() => {
+                        this._suppressItemClick = false;
+                    }, 350);
+
+                    // Navigate according to swipe direction and RTL setting
+                    const isNext = isRtl ? swipeDeltaX > 0 : swipeDeltaX < 0;
+                    if (isNext) {
+                        this.next();
+                    } else {
+                        this.previous();
+                    }
+                }
+            } else {
+                // Resume timer if user just tapped without swiping
+                this._startAutoScroll();
+            }
+
+            isSwipingHorizontal = false;
+            swipeDeltaX = 0;
+        };
+
+        const onTouchCancel = () => {
+            isSwipingHorizontal = false;
+            swipeDeltaX = 0;
+            this._startAutoScroll();
+        };
+
+        this._touchHandlers = { onTouchStart, onTouchMove, onTouchEnd, onTouchCancel };
+        this._container.addEventListener('touchstart', onTouchStart, { passive: true });
+        this._container.addEventListener('touchmove', onTouchMove, { passive: true });
+        this._container.addEventListener('touchend', onTouchEnd, { passive: true });
+        this._container.addEventListener('touchcancel', onTouchCancel, { passive: true });
+
+        // Indicator dots direct tap handling
+        const indicators = this._container.querySelector('.hero-indicators');
+        if (indicators) {
+            indicators.addEventListener('click', (e) => {
+                const dot = e.target.closest('.hero-dot');
+                if (dot && dot.dataset.index !== undefined) {
+                    e.stopPropagation();
+                    const targetIndex = parseInt(dot.dataset.index, 10);
+                    if (!isNaN(targetIndex)) {
+                        this.goTo(targetIndex);
+                    }
+                }
+            });
+        }
 
         // Focus and Blur handling via section change events
         // since native focus is disabled in FocusManager.
@@ -290,20 +430,90 @@ class HeroCarousel {
         };
         eventBus.on('focus:changed', this._onFocusChanged);
 
-        // Register with focus manager.
+        // =========================================================================
+        // Dynamic D-Pad Down Section Linker
+        // =========================================================================
+        // When focused on the hero carousel, pressing D-pad Down leaves the hero
+        // section and enters the content rows below. In asynchronous and cached
+        // environments, rows may finish rendering before, during, or after hero
+        // initialization. Hardcoding leaveDown to null or a static ID causes focus
+        // traps if the target is overwritten or unrendered.
+        // This dynamic resolver evaluates the first live content row in real-time
+        // when the down move is initiated, guaranteeing seamless bidirectional flow.
+        // =========================================================================
+        const dynamicLeaveDown = () => {
+            // Respect any explicitly configured target if it is valid and registered
+            const currentConfig = focusManager.getSectionConfig('home-hero');
+            const explicit = currentConfig?.leaveDown;
+            if (typeof explicit === 'string' && focusManager.getSectionConfig(explicit)) {
+                return explicit;
+            }
+            if (typeof explicit === 'function' && explicit !== dynamicLeaveDown) {
+                const result = explicit();
+                if (result) return result;
+            }
+
+            const container = document.getElementById('home-rows');
+            if (!container) return null;
+
+            // Prioritize the topmost fully rendered (non-skeleton) content row
+            const firstLive = container.querySelector('section[data-row-id]:not(.media-row--skeleton)');
+            if (firstLive) {
+                const rowId = firstLive.getAttribute('data-row-id');
+                const sName = `home-row-${rowId}`;
+                if (focusManager.getSectionConfig(sName)) return sName;
+            }
+
+            // Fallback: search all section elements with data-row-id in DOM order
+            const allSections = container.querySelectorAll('section[data-row-id]');
+            for (let i = 0; i < allSections.length; i++) {
+                const rowId = allSections[i].getAttribute('data-row-id');
+                const sName = `home-row-${rowId}`;
+                if (focusManager.getSectionConfig(sName)) return sName;
+            }
+
+            return null;
+        };
+
+        // Register with focus manager with dynamic leaveDown resolution
+        // Explicitly isolate selector to #hero-carousel-container so internal children
+        // (such as dots, titles, or descriptions) are never targeted as separate focus stops
         focusManager.register('home-hero', this._container.parentElement, {
             orientation: 'horizontal',
+            selector: '#hero-carousel-container',
+            defaultFocusSelector: '#hero-carousel-container',
             onMove: (direction) => this._onMove(direction),
-            leaveDown: null, // Linked dynamically by HomePage
+            leaveDown: dynamicLeaveDown,
             leaveLeft: 'sidebar'
         });
 
-        // Initial check if we are already focused (though unlikely during init)
-        if (this._container.classList.contains('focused')) {
+        // ---------------------------------------------------------------------
+        // Seamless Focus Handover & Restoration
+        // ---------------------------------------------------------------------
+        // When the real hero carousel replaces the initial loading skeleton in
+        // the DOM via innerHTML, any previous focus placed on the skeleton container
+        // becomes detached from the document. We detect if the hero section was
+        // the active section or if focus was orphaned/inside the placeholder, and
+        // immediately re-bind focus to this newly rendered live carousel container.
+        // ---------------------------------------------------------------------
+        const currentActive = focusManager.getActiveSection();
+        const currentFocused = focusManager.getFocused();
+        const isFocusOrphaned =
+            !currentFocused ||
+            !document.contains(currentFocused) ||
+            (this._container.parentElement && this._container.parentElement.contains(currentFocused));
+
+        if (
+            (currentActive === 'home-hero' || isFocusOrphaned || this._container.classList.contains('focused')) &&
+            !focusManager.isTrapped()
+        ) {
+            focusManager.setActiveSection('home-hero', false);
+            focusManager.focusElement(this._container, { instantScroll: true, skipScroll: true });
             this._handleFocus();
         }
 
-        if (platformInfo.isWeb || platformInfo.isWebOS) {
+        // Bind click navigation for mouse/pointer devices (Web browsers, Desktop app, WebOS)
+        if (platformInfo.isWeb || platformInfo.isDesktop || platformInfo.isWebOS) {
             const leftBtn = this._container.querySelector('.hero-arrow-left');
             const rightBtn = this._container.querySelector('.hero-arrow-right');
             if (leftBtn && rightBtn) {
@@ -361,18 +571,15 @@ class HeroCarousel {
             const hash = canvas.dataset.blurhash;
             if (!hash) return;
 
-            // Resolve the backdrop background-image URL
-            const parentHeroItem = canvas.closest('.hero-item');
-            const heroBackdrop = parentHeroItem.querySelector('.hero-backdrop');
+            // Resolve the parent backdrop element
+            const heroBackdrop = canvas.closest('.hero-backdrop');
+            if (!heroBackdrop) return;
 
+            // Resolve the backdrop background-image URL
             const style = heroBackdrop.style.backgroundImage;
             const match = style.match(/url\(['"]?([^'"]+)['"]?\)/);
-            const url = match && match[1];
+            const url = (match && match[1]) || heroBackdrop.dataset.backdrop;
             if (!url) return;
-
-            // Determine slide index for selective preloading
-            const index = parentHeroItem ? parseInt(parentHeroItem.dataset.index, 10) : -1;
-            const isFirstSlide = index === 0;
 
             // Decode blurhash at low resolution asynchronously
             import('../utils/BlurHashDecoder.js')
@@ -389,11 +596,7 @@ class HeroCarousel {
                 })
                 .catch((err) => log.error('Failed to decode hero blurhash', err));
 
-            // Only preload backdrop image for the first (active) slide
-            // Other slides load lazily via _preloadSlide on navigation
-            if (!isFirstSlide) return;
-
-            // Listen for backdrop image to finish preloading
+            // Track image load to cleanly fade out the blurhash canvas placeholder
             const img = new Image();
             img.onload = () => {
                 requestAnimationFrame(() => {
@@ -403,12 +606,80 @@ class HeroCarousel {
                     }, 500);
                 });
             };
+            img.onerror = () => {
+                // If loading fails, remove canvas so it doesn't block underlying display
+                if (canvas && canvas.parentNode) canvas.parentNode.removeChild(canvas);
+            };
             img.src = url;
         });
 
-        // Preload the adjacent slide for smoother initial navigation
+        // ---------------------------------------------------------------------
+        // Viewport Visibility Observer (Off-screen CPU/GPU Suspension)
+        // ---------------------------------------------------------------------
+        // When the user scrolls down into content rows on the home page, the
+        // carousel is no longer visible. Running background auto-scroll transitions
+        // and crossfade animations off-screen steals CPU/GPU cycles and causes
+        // frame drops during vertical row navigation. We suspend the timer when
+        // off-screen and resume instantly when scrolled back into view.
+        // ---------------------------------------------------------------------
+        if ('IntersectionObserver' in window) {
+            this._intersectionObserver = new IntersectionObserver(
+                (entries) => {
+                    for (let i = 0; i < entries.length; i++) {
+                        const entry = entries[i];
+                        const isVisible = entry.isIntersecting && entry.intersectionRatio > 0.15;
+                        if (this._isVisible !== isVisible) {
+                            this._isVisible = isVisible;
+                            if (!isVisible) {
+                                log.debug('Hero carousel off-screen; suspending timer');
+                                this._stopAutoScroll();
+                            } else if (!this._timer && !this._isFocused) {
+                                log.debug('Hero carousel visible; resuming timer');
+                                // Guard against triggering indicator progress animations or timer restarts mid-scroll
+                                if (window.__scrollController && window.__scrollController.isAnimating) {
+                                    if (!this._observerScrollFinishHandler) {
+                                        this._observerScrollFinishHandler = () => {
+                                            this._observerScrollFinishHandler = null;
+                                            if (this._isVisible && !this._timer && !this._isFocused) {
+                                                this._startAutoScroll();
+                                            }
+                                        };
+                                        eventBus.once('scroll:finished', this._observerScrollFinishHandler);
+                                    }
+                                } else {
+                                    this._startAutoScroll();
+                                }
+                            }
+                        }
+                    }
+                },
+                { threshold: [0, 0.15] }
+            );
+            this._intersectionObserver.observe(this._container);
+        }
+
+        // ---------------------------------------------------------------------
+        // Deferred Single-Slide Preload Window
+        // ---------------------------------------------------------------------
+        // Rather than eager-loading all 5-10 slides at mount time, we only preload
+        // the immediate next slide (index 1) after an idle interval. Subsequent
+        // slides are preloaded progressively during transitions.
+        // ---------------------------------------------------------------------
         if (this._items.length > 1) {
-            this._preloadSlide(1);
+            if ('requestIdleCallback' in window) {
+                this._preloadIdleId = window.requestIdleCallback(
+                    () => {
+                        this._preloadSlide(1);
+                        this._preloadIdleId = null;
+                    },
+                    { timeout: 2500 }
+                );
+            } else {
+                this._preloadTimeoutId = setTimeout(() => {
+                    this._preloadSlide(1);
+                    this._preloadTimeoutId = null;
+                }, 1200);
+            }
         }
     }
 
@@ -432,8 +703,35 @@ class HeroCarousel {
             clearTimeout(this._hideTimeoutId);
             this._hideTimeoutId = null;
         }
+        if (this._preloadTimeoutId) {
+            clearTimeout(this._preloadTimeoutId);
+            this._preloadTimeoutId = null;
+        }
+        if (this._preloadIdleId && 'cancelIdleCallback' in window) {
+            window.cancelIdleCallback(this._preloadIdleId);
+            this._preloadIdleId = null;
+        }
+        if (this._intersectionObserver) {
+            this._intersectionObserver.disconnect();
+            this._intersectionObserver = null;
+        }
+        if (this._observerScrollFinishHandler) {
+            eventBus.off('scroll:finished', this._observerScrollFinishHandler);
+            this._observerScrollFinishHandler = null;
+        }
+        if (this._scrollFinishHandler) {
+            eventBus.off('scroll:finished', this._scrollFinishHandler);
+            this._scrollFinishHandler = null;
+        }
         if (this._onFocusChanged) {
             eventBus.off('focus:changed', this._onFocusChanged);
+        }
+        if (this._container && this._touchHandlers) {
+            this._container.removeEventListener('touchstart', this._touchHandlers.onTouchStart);
+            this._container.removeEventListener('touchmove', this._touchHandlers.onTouchMove);
+            this._container.removeEventListener('touchend', this._touchHandlers.onTouchEnd);
+            this._container.removeEventListener('touchcancel', this._touchHandlers.onTouchCancel);
+            this._touchHandlers = null;
         }
         focusManager.unregister('home-hero');
     }
@@ -473,10 +771,15 @@ class HeroCarousel {
         this._stopAutoScroll();
         if (this._items.length <= 1) return;
 
+        // Bypassed if carousel is currently suspended off-screen
+        if (this._isVisible === false) return;
+
         // Reset the visual progress bar to stay in sync with the JS timer
-        // if animations are enabled.
+        // ONLY if animations are enabled AND we are using the 'progress' indicator style.
+        // Static indicators ('lines', 'dots') do not require any animation frames or resets.
+        const indicatorStyle = storage.getItem('pref:heroCarouselIndicatorStyle') || 'dots';
         const isAnimationEnabled = storage.getItem('pref:heroCarouselIndicatorAnimation') !== 'false';
-        if (isAnimationEnabled) {
+        if (indicatorStyle === 'progress' && isAnimationEnabled) {
             this._resetIndicatorAnimation();
         }
 
@@ -510,6 +813,10 @@ class HeroCarousel {
      */
     _resetIndicatorAnimation() {
         if (!this._container) return;
+
+        // Bypassed completely for static indicator styles (Lines and Dots)
+        const indicatorStyle = storage.getItem('pref:heroCarouselIndicatorStyle') || 'dots';
+        if (indicatorStyle !== 'progress') return;
 
         // Retrieve all dot indicators
         const dots = this._container.querySelectorAll('.hero-dot');
@@ -581,6 +888,28 @@ class HeroCarousel {
         const logo = item.querySelector('.hero-logo');
         if (logo && logo.dataset.src && !logo.src) {
             logo.src = logo.dataset.src;
+
+            // Recalculate natural aspect ratio container height once deferred logo loads
+            const adjustLogoHeight = () => {
+                const container = logo.closest('.hero-logo-container');
+                if (container) {
+                    const aspect = logo.naturalWidth / logo.naturalHeight || 1;
+                    const isCompact = storage.getItem('pref:heroCarouselCompact') !== 'false';
+                    const maxW = 400; // max-width of .hero-logo in CSS
+                    const maxHeight = isCompact ? 110 : 130;
+                    const minHeight = isCompact ? 50 : 60;
+
+                    const targetHeight = maxW / aspect;
+                    const containerHeight = Math.min(maxHeight, Math.max(minHeight, Math.round(targetHeight)));
+                    container.style.height = `${containerHeight}px`;
+                }
+            };
+
+            if (logo.complete) {
+                adjustLogoHeight();
+            } else {
+                logo.onload = adjustLogoHeight;
+            }
         }
     }
 
@@ -644,7 +973,7 @@ class HeroCarousel {
         dots[this._currentIndex].classList.add('active');
 
         // After the opacity transition completes, hide the previous slide
-        // from GPU compositing to free memory (30-35MB per slide)
+        // and demote GPU compositing layers to release texture caches
         if (this._hideTimeoutId) clearTimeout(this._hideTimeoutId);
         this._hideTimeoutId = setTimeout(() => {
             prevItem.style.visibility = 'hidden';
@@ -653,8 +982,12 @@ class HeroCarousel {
             if (prevContent) prevContent.style.willChange = 'auto';
             const prevBackdrop = prevItem.querySelector('.hero-backdrop');
             if (prevBackdrop) prevBackdrop.style.willChange = 'auto';
-            // Free the backdrop GPU texture
-            if (prevBackdrop) prevBackdrop.style.backgroundImage = '';
+
+            // Clean up will-change on active item now that transition is settled
+            nextItem.style.willChange = 'auto';
+            if (nextContent) nextContent.style.willChange = 'auto';
+            if (nextBackdrop) nextBackdrop.style.willChange = 'auto';
+
             this._hideTimeoutId = null;
         }, 1050); // Just after the 1000ms opacity transition
 
@@ -688,8 +1021,28 @@ class HeroCarousel {
     _handleFocus() {
         this._isFocused = true;
         this._container.classList.add('focused');
-        // Restart the timer AND resync the progress dot animation
-        this._startAutoScroll();
+
+        // Clean up any pending deferred scroll listener
+        if (this._scrollFinishHandler) {
+            eventBus.off('scroll:finished', this._scrollFinishHandler);
+            this._scrollFinishHandler = null;
+        }
+
+        // If an active vertical scroll animation is in flight (e.g. smooth scrolling from
+        // the first content row up to the hero carousel), defer starting the auto-scroll timer
+        // and restarting progress dot animations until the camera lands cleanly.
+        if (window.__scrollController && window.__scrollController.isAnimating) {
+            this._scrollFinishHandler = () => {
+                this._scrollFinishHandler = null;
+                if (this._isFocused && this._isVisible) {
+                    this._startAutoScroll();
+                }
+            };
+            eventBus.once('scroll:finished', this._scrollFinishHandler);
+        } else {
+            // Restart the timer AND resync the progress dot animation immediately if stationary
+            this._startAutoScroll();
+        }
     }
 
     /**
@@ -705,6 +1058,13 @@ class HeroCarousel {
     _handleBlur() {
         this._isFocused = false;
         this._container.classList.remove('focused');
+
+        // Cancel any pending deferred start from a scroll that was in flight
+        if (this._scrollFinishHandler) {
+            eventBus.off('scroll:finished', this._scrollFinishHandler);
+            this._scrollFinishHandler = null;
+        }
+
         // Pause the timer — don't advance slides while user is elsewhere
         this._stopAutoScroll();
     }

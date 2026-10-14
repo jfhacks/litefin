@@ -2,6 +2,7 @@ import BaseMenu from './BaseMenu.js';
 import { osdIcons } from '../../utils/Icons.js';
 import { logger } from '../../utils/Logger.js';
 import { i18n } from '../../utils/i18n.js';
+import { platformInfo } from '../../utils/PlatformInfo.js';
 
 const log = logger.create('AspectRatioMenu');
 
@@ -9,22 +10,62 @@ export default class AspectRatioMenu extends BaseMenu {
     constructor(osdController) {
         super(osdController);
         this.isModal = true;
+
         // ====================================================================
         // Menu Option Definitions
         // ====================================================================
-        // We define the supported aspect ratios here. Notice we now reference the 
-        // unified osdIcons.aspectRatio and osdIcons.zoomIn properties directly.
-        // The display transition between outline and filled states is handled 
-        // dynamically via CSS rules rather than code-level string swaps.
-        this.options = [
+        // We define supported aspect ratios dynamically per platform backend.
+        // Tizen AVPlay supports calculated Zoom, Auto, Stretch, and native Video Aspect Ratio.
+        this.options = this._getSupportedOptions();
+    }
+
+    /**
+     * Determine supported aspect ratio options based on active device platform and player backend.
+     *
+     * AVPlay Hardware Consideration:
+     * - Tizen AVPlay calculates zoom geometry via setDisplayRect (similar to WebOSPlayer)
+     *   to seamlessly crop letterbox/pillarbox margins without distorting the picture.
+     * - In addition to Auto, Zoom, and Stretch, AVPlay supports native automatic
+     *   aspect ratio handling via 'PLAYER_DISPLAY_MODE_AUTO_ASPECT_RATIO' ('video_aspect_ratio').
+     * - Non-AVPlay platforms (HTML5, ExoPlayer, WebOS) provide standard Auto, Zoom, and Stretch modes.
+     *
+     * @private
+     * @returns {Array<{id: string, label: string, key: string}>}
+     */
+    _getSupportedOptions() {
+        // Detect whether current player backend is Tizen AVPlay via backend type or runtime globals
+        const isAvPlay = this.osd?.player?.backendType === 'tizen' ||
+            platformInfo.isTizen ||
+            (typeof window !== 'undefined' && Boolean(window.webapis?.avplay || window.tizen));
+
+        // When using Samsung AVPlay backend, provide Auto, Zoom, Video Aspect Ratio, and Stretch
+        if (isAvPlay) {
+            return [
+                // Standard letterbox mode preserving geometry with borders
+                { id: 'auto', label: i18n.t('Auto'), key: 'Auto' },
+                // Math-calculated geometric crop zoom filling the screen
+                { id: 'zoom', label: i18n.t('Zoom'), key: 'Zoom' },
+                // AVPlay hardware display mode honoring stream DAR / PAR tags
+                { id: 'video_aspect_ratio', label: i18n.t('VideoAspectRatio') || 'Video Aspect Ratio', key: 'VideoAspectRatio' },
+                // Fullscreen stretch mode filling the physical display panel
+                { id: 'stretch', label: i18n.t('Stretch'), key: 'Stretch' }
+            ];
+        }
+
+        // Standard web, ExoPlayer, and WebOS platforms supporting crop zoom
+        return [
             { id: 'auto', label: i18n.t('Auto'), key: 'Auto' },
             { id: 'zoom', label: i18n.t('Zoom'), key: 'Zoom' },
-            { id: 'stretch', label: i18n.t('Stretch'), key: 'Stretch' } // Reusing icon for now
+            { id: 'stretch', label: i18n.t('Stretch'), key: 'Stretch' }
         ];
     }
 
     open() {
         this.focusIndex = 0;
+
+        // Refresh options in case device platform or player backend has updated
+        this.options = this._getSupportedOptions();
+
         // Pre-select current aspect ratio
         const current = this.osd.player.getAspectRatio();
         const index = this.options.findIndex(opt => opt.id === current);

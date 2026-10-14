@@ -13,6 +13,7 @@
 
 import { api } from '../api/index.js';
 import { logger } from '../utils/Logger.js';
+import { PlayerSettings } from '../utils/PlayerSettings.js';
 
 const log = logger.create('PlayQueue');
 
@@ -53,6 +54,12 @@ class PlayQueue {
         // Shuffle / Repeat state
         this._repeatMode = 'RepeatNone'; // 'RepeatNone' | 'RepeatAll' | 'RepeatOne'
         this._shuffleMode = false;
+
+        // Dynamic TV Series Episode Queue window tracking
+        this._episodeSeriesId = null;
+        this._seriesAllEpisodes = null;
+        this._seriesWindowStartIndex = 0;
+        this._isLoadingMore = false;
     }
 
     /**
@@ -307,6 +314,12 @@ class PlayQueue {
         this._isInitialized = false;
         this._contextType = null;
         this._contextId = null;
+
+        // Reset dynamic episode queue window state
+        this._episodeSeriesId = null;
+        this._seriesAllEpisodes = null;
+        this._seriesWindowStartIndex = 0;
+        this._isLoadingMore = false;
         // Should NOT clear RepeatMode and ShuffleMode - they are user preferences
     }
 
@@ -451,26 +464,44 @@ class PlayQueue {
 
     /**
      * Check if there is a next item
+     * Handles both loaded queue items and series boundary expansions
      * @returns {boolean}
      */
     hasNext() {
-        if (this._queue.length <= 1) return false;
+        if (this._queue.length === 0) return false;
         if (this._repeatMode === 'RepeatAll') return true;
-        return this._currentIndex < this._queue.length - 1;
+        if (this._currentIndex < this._queue.length - 1) return true;
+
+        // If at the end of the loaded slice, check if more series episodes remain in the manifest
+        if (this._episodeSeriesId && this._seriesAllEpisodes?.length) {
+            const nextWindowEnd = this._seriesWindowStartIndex + this._queue.length;
+            if (nextWindowEnd < this._seriesAllEpisodes.length) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
      * Check if there is a previous item
+     * Handles both loaded queue items and series boundary expansions
      * @returns {boolean}
      */
     hasPrevious() {
-        if (this._queue.length <= 1) return false;
+        if (this._queue.length === 0) return false;
         if (this._repeatMode === 'RepeatAll') return true;
-        return this._currentIndex > 0;
+        if (this._currentIndex > 0) return true;
+
+        // If at index 0 of the loaded slice, check if earlier series episodes exist in the manifest
+        if (this._episodeSeriesId && this._seriesWindowStartIndex > 0) {
+            return true;
+        }
+        return false;
     }
 
     /**
      * Get the next item without moving the index
+     * Automatically requests background queue expansion when nearing the window boundary
      * @returns {Object|null}
      */
     peekNext() {
@@ -480,11 +511,16 @@ class PlayQueue {
         if (nextIndex >= this._queue.length && this._repeatMode === 'RepeatAll') {
             nextIndex = 0; // Wrap around
         }
-        return this._queue[nextIndex];
+
+        // Trigger dynamic preload ahead of time so the next batch is ready before playback ends
+        this._maybeExpandQueue('next');
+
+        return this._queue[nextIndex] || null;
     }
 
     /**
      * Get the previous item without moving the index
+     * Automatically requests background queue expansion when nearing the start boundary
      * @returns {Object|null}
      */
     peekPrevious() {
@@ -494,11 +530,16 @@ class PlayQueue {
         if (prevIndex < 0 && this._repeatMode === 'RepeatAll') {
             prevIndex = this._queue.length - 1; // Wrap around
         }
-        return this._queue[prevIndex];
+
+        // Trigger dynamic preload ahead of time
+        this._maybeExpandQueue('previous');
+
+        return this._queue[prevIndex] || null;
     }
 
     /**
      * Advance to next item
+     * Automatically preloads next batch of episodes if approaching queue boundary
      * @returns {Object|null} The new item, or null if end of queue
      */
     advance() {
@@ -509,11 +550,15 @@ class PlayQueue {
             this._currentIndex = 0; // Wrap around
         }
 
+        // Trigger dynamic preloading if approaching window boundary
+        this._maybeExpandQueue('next');
+
         return this._queue[this._currentIndex];
     }
 
     /**
      * Go back to previous item
+     * Automatically preloads previous batch of episodes if approaching queue boundary
      * @returns {Object|null} The new item, or null if start of queue
      */
     goBack() {
@@ -524,49 +569,280 @@ class PlayQueue {
             this._currentIndex = this._queue.length - 1; // Wrap around
         }
 
+        // Trigger dynamic preloading if approaching window boundary
+        this._maybeExpandQueue('previous');
+
         return this._queue[this._currentIndex];
     }
 
     getCurrentItem() {
         if (this._currentIndex === -1) return null;
+
+        // Proactively verify if current position is near window edges to preload seamlessly
+        if (this._episodeSeriesId) {
+            const remainingAhead = this._queue.length - 1 - this._currentIndex;
+            if (remainingAhead <= 5) {
+                this._maybeExpandQueue('next');
+            }
+            if (this._currentIndex <= 5) {
+                this._maybeExpandQueue('previous');
+            }
+        }
+
         return this._queue[this._currentIndex];
+    }
+
+    /**
+     * Public helper to guarantee an item possesses a session-unique PlaylistItemId.
+     * Stamping items prior to reporting prevents desynchronization with the server's
+     * session manager and ensures parity with jellyfin-web playlist tracking.
+     *
+     * @param {Object} item - Media item candidate
+     * @returns {string|null} The resolved PlaylistItemId
+     */
+    stampPlaylistItemId(item) {
+        if (!item) return null;
+        _stampPlaylistItemId(item);
+        return item.PlaylistItemId;
     }
 
     // ========================================================================
     // Internal Queue Builders
     // ========================================================================
 
+    /**
+     * ========================================================================
+     * Dynamic Episode Queue Builder (Series Playback)
+     * ========================================================================
+     * Builds an optimized playback queue centered around the target episode.
+     * Instead of naively retrieving all 500+ or 1,000+ episodes with heavy metadata
+     * (chapters, media sources, trickplay, overview), which saturates memory
+     * and crashes on constrained TV hardware, this implementation:
+     *
+     * 1. Fetches a lightweight series episode manifest (minimal fields).
+     * 2. Locates the active episode index in the entire series sequence.
+     * 3. Calculates a dynamic sliding window: [currentIndex - limit, currentIndex + limit].
+     * 4. Fetches full metadata only for the windowed subset.
+     * 5. Enables automated background expansion when approaching window boundaries.
+     *
+     * @param {Object} currentItem - The starting episode item
+     * @private
+     */
     async _initEpisodeQueue(currentItem) {
-        log.debug('Building episode queue for series:', currentItem.SeriesId);
+        log.debug('Building dynamic episode queue for series:', currentItem.SeriesId);
 
-        // Fetch the ENTIRE series episode list (all seasons, all episodes).
-        // We do NOT pass StartItemId so we get every episode, including those
-        // before the one the user clicked — that way the Previous button works
-        // correctly across season boundaries.
-        const response = await api.getEpisodes(currentItem.SeriesId, {
-            Limit: 500, // large enough for any series
-            Fields: 'Overview,Chapters,MediaSources,Trickplay'
-        });
+        // Retrieve configured episode window limit (default: 50 before, 50 after)
+        const windowLimit = Math.max(10, PlayerSettings.get('playQueueEpisodeLimit') || 50);
 
-        log.info(
-            `[PlayQueue] getEpisodes response: Total=${response.TotalRecordCount}, Count=${response.Items?.length}`
-        );
+        try {
+            // Step 1: Fetch lightweight manifest of all episodes across all seasons
+            // Request minimal fields to ensure ultra-low network payload (~30KB for 1,000 episodes)
+            const manifestResponse = await api.getEpisodes(currentItem.SeriesId, {
+                Limit: 10000,
+                Fields: 'Id,SeriesId,SeasonId,IndexNumber,ParentIndexNumber'
+            });
 
-        const allEpisodes = response.Items || [];
+            const allSeriesEpisodes = manifestResponse?.Items || [];
+            log.info(`[PlayQueue] Series manifest retrieved: Total=${allSeriesEpisodes.length} episodes`);
 
-        // Stamp a PlaylistItemId onto every episode in the queue
-        allEpisodes.forEach(_stampPlaylistItemId);
+            // Step 2: Locate the active episode within the series sequence
+            let currentIdx = allSeriesEpisodes.findIndex((e) => e.Id === currentItem.Id);
 
-        this._queue = allEpisodes;
+            // If the series has no episodes or the item could not be found in the manifest,
+            // fall back gracefully to a single-item queue to keep playback running.
+            if (allSeriesEpisodes.length === 0 || currentIdx === -1) {
+                log.warn('[PlayQueue] Item not found in series manifest. Falling back to single-item queue.');
+                _stampPlaylistItemId(currentItem);
+                this._queue = [currentItem];
+                this._currentIndex = 0;
+                return;
+            }
 
-        // Locate the starting episode — this is our current _currentIndex
-        this._currentIndex = this._queue.findIndex((e) => e.Id === currentItem.Id);
+            // Step 3: Handle Shuffle vs Sequential playback
+            if (this._shuffleMode) {
+                // For shuffle mode across massive series, shuffle the full manifest order
+                // while locking the currently selected item at the front.
+                const remainingManifest = allSeriesEpisodes.filter((e) => e.Id !== currentItem.Id);
+                for (let i = remainingManifest.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [remainingManifest[i], remainingManifest[j]] = [remainingManifest[j], remainingManifest[i]];
+                }
+                this._seriesAllEpisodes = [allSeriesEpisodes[currentIdx], ...remainingManifest];
+                this._seriesWindowStartIndex = 0;
+                currentIdx = 0;
+            } else {
+                // Store natural chronological series sequence
+                this._seriesAllEpisodes = allSeriesEpisodes;
+            }
 
-        // Fallback: if not found (API weirdness), prepend the current item
-        if (this._currentIndex === -1) {
+            this._episodeSeriesId = currentItem.SeriesId;
+
+            // Step 4: Compute sliding window boundaries
+            // We want [currentIdx - windowLimit] to [currentIdx + windowLimit]
+            const startIndex = Math.max(0, currentIdx - windowLimit);
+            const endIndex = Math.min(this._seriesAllEpisodes.length - 1, currentIdx + windowLimit);
+            const countToFetch = endIndex - startIndex + 1;
+
+            this._seriesWindowStartIndex = startIndex;
+
+            log.info(
+                `[PlayQueue] Fetching window: startIndex=${startIndex}, count=${countToFetch}, total=${this._seriesAllEpisodes.length}`
+            );
+
+            // Step 5: Fetch full rich metadata ONLY for the windowed slice
+            let windowItems = [];
+            if (this._shuffleMode) {
+                // For shuffled order, fetch by IDs or batch
+                const windowIds = this._seriesAllEpisodes.slice(startIndex, startIndex + countToFetch).map((e) => e.Id);
+                const itemsResponse = await api.getItems({
+                    Ids: windowIds.join(','),
+                    Fields: 'Overview,RunTimeTicks,Chapters,MediaSources,Trickplay'
+                });
+                const fetchedMap = new Map((itemsResponse?.Items || []).map((i) => [i.Id, i]));
+                windowItems = windowIds.map((id) => fetchedMap.get(id)).filter(Boolean);
+            } else {
+                // For sequential order, standard StartIndex + Limit is optimal and fast
+                const fullResponse = await api.getEpisodes(currentItem.SeriesId, {
+                    StartIndex: startIndex,
+                    Limit: countToFetch,
+                    Fields: 'Overview,RunTimeTicks,Chapters,MediaSources,Trickplay'
+                });
+                windowItems = fullResponse?.Items || [];
+            }
+
+            // Step 6: Stamp session-unique PlaylistItemId onto each episode
+            windowItems.forEach(_stampPlaylistItemId);
+            this._queue = windowItems;
+
+            // Step 7: Resolve the exact current index inside our windowed queue
+            this._currentIndex = this._queue.findIndex((e) => e.Id === currentItem.Id);
+
+            // Safety check: if currentItem was missing from window response, prepend it
+            if (this._currentIndex === -1) {
+                _stampPlaylistItemId(currentItem);
+                this._queue.unshift(currentItem);
+                this._currentIndex = 0;
+            }
+
+            log.info(
+                `[PlayQueue] Dynamic queue ready: windowSize=${this._queue.length}, currentIndex=${this._currentIndex}`
+            );
+        } catch (error) {
+            log.error('[PlayQueue] Failed to build dynamic episode queue:', error);
             _stampPlaylistItemId(currentItem);
-            this._queue.unshift(currentItem);
+            this._queue = [currentItem];
             this._currentIndex = 0;
+        }
+    }
+
+    /**
+     * Dynamically expand the queue in either direction ('next' or 'previous')
+     * when the playback cursor approaches either boundary of the loaded window.
+     * @param {'next'|'previous'} direction
+     * @private
+     */
+    async _maybeExpandQueue(direction) {
+        if (!this._episodeSeriesId || !this._seriesAllEpisodes?.length || this._isLoadingMore) {
+            return;
+        }
+
+        const windowLimit = Math.max(10, PlayerSettings.get('playQueueEpisodeLimit') || 50);
+        const threshold = Math.min(5, Math.floor(windowLimit / 4));
+
+        if (direction === 'next') {
+            const remainingAhead = this._queue.length - 1 - this._currentIndex;
+            const currentWindowEnd = this._seriesWindowStartIndex + this._queue.length;
+
+            if (remainingAhead <= threshold && currentWindowEnd < this._seriesAllEpisodes.length) {
+                this._isLoadingMore = true;
+                try {
+                    const fetchCount = Math.min(windowLimit, this._seriesAllEpisodes.length - currentWindowEnd);
+                    log.info(`[PlayQueue] Preloading next ${fetchCount} episodes...`);
+
+                    let newItems = [];
+                    if (this._shuffleMode) {
+                        const nextIds = this._seriesAllEpisodes
+                            .slice(currentWindowEnd, currentWindowEnd + fetchCount)
+                            .map((e) => e.Id);
+                        const res = await api.getItems({
+                            Ids: nextIds.join(','),
+                            Fields: 'Overview,RunTimeTicks,Chapters,MediaSources,Trickplay'
+                        });
+                        const map = new Map((res?.Items || []).map((i) => [i.Id, i]));
+                        newItems = nextIds.map((id) => map.get(id)).filter(Boolean);
+                    } else {
+                        const res = await api.getEpisodes(this._episodeSeriesId, {
+                            StartIndex: currentWindowEnd,
+                            Limit: fetchCount,
+                            Fields: 'Overview,RunTimeTicks,Chapters,MediaSources,Trickplay'
+                        });
+                        newItems = res?.Items || [];
+                    }
+
+                    if (newItems.length > 0) {
+                        newItems.forEach(_stampPlaylistItemId);
+                        this._queue.push(...newItems);
+                        log.info(`[PlayQueue] Appended ${newItems.length} episodes. Queue size: ${this._queue.length}`);
+                        eventBus.emit('playqueue:updated', {
+                            queue: this._queue,
+                            currentIndex: this._currentIndex,
+                            repeatMode: this._repeatMode,
+                            shuffleMode: this._shuffleMode
+                        });
+                    }
+                } catch (err) {
+                    log.warn('[PlayQueue] Failed to preload next episodes:', err);
+                } finally {
+                    this._isLoadingMore = false;
+                }
+            }
+        } else if (direction === 'previous') {
+            if (this._currentIndex <= threshold && this._seriesWindowStartIndex > 0) {
+                this._isLoadingMore = true;
+                try {
+                    const fetchCount = Math.min(windowLimit, this._seriesWindowStartIndex);
+                    const prevStartIndex = this._seriesWindowStartIndex - fetchCount;
+                    log.info(`[PlayQueue] Preloading previous ${fetchCount} episodes...`);
+
+                    let prevItems = [];
+                    if (this._shuffleMode) {
+                        const prevIds = this._seriesAllEpisodes
+                            .slice(prevStartIndex, prevStartIndex + fetchCount)
+                            .map((e) => e.Id);
+                        const res = await api.getItems({
+                            Ids: prevIds.join(','),
+                            Fields: 'Overview,RunTimeTicks,Chapters,MediaSources,Trickplay'
+                        });
+                        const map = new Map((res?.Items || []).map((i) => [i.Id, i]));
+                        prevItems = prevIds.map((id) => map.get(id)).filter(Boolean);
+                    } else {
+                        const res = await api.getEpisodes(this._episodeSeriesId, {
+                            StartIndex: prevStartIndex,
+                            Limit: fetchCount,
+                            Fields: 'Overview,RunTimeTicks,Chapters,MediaSources,Trickplay'
+                        });
+                        prevItems = res?.Items || [];
+                    }
+
+                    if (prevItems.length > 0) {
+                        prevItems.forEach(_stampPlaylistItemId);
+                        this._queue.unshift(...prevItems);
+                        this._seriesWindowStartIndex = prevStartIndex;
+                        this._currentIndex += prevItems.length;
+                        log.info(`[PlayQueue] Prepended ${prevItems.length} episodes. Queue size: ${this._queue.length}`);
+                        eventBus.emit('playqueue:updated', {
+                            queue: this._queue,
+                            currentIndex: this._currentIndex,
+                            repeatMode: this._repeatMode,
+                            shuffleMode: this._shuffleMode
+                        });
+                    }
+                } catch (err) {
+                    log.warn('[PlayQueue] Failed to preload previous episodes:', err);
+                } finally {
+                    this._isLoadingMore = false;
+                }
+            }
         }
     }
 
@@ -585,6 +861,11 @@ class PlayQueue {
         // Fetch movies, episodes, and audio separately to maintain UI-like ordering.
         // All three fetches share the same sort field so the full queue is consistent
         // with whatever Display Order the user has chosen for this collection.
+        /*
+         * Request RunTimeTicks for movies, episodes, and audio in BoxSet queues.
+         * This ensures any queued successor item retains duration metadata needed
+         * for server scrobbling and playback completion overrides.
+         */
         const [moviesResponse, episodesResponse, audioResponse] = await Promise.all([
             api.getItems({
                 ParentId: parentId,
@@ -593,7 +874,7 @@ class PlayQueue {
                 SortBy: sortBy,
                 SortOrder: 'Ascending',
                 Limit: 100,
-                Fields: 'Trickplay'
+                Fields: 'RunTimeTicks,Trickplay'
             }),
             api.getItems({
                 ParentId: parentId,
@@ -602,21 +883,57 @@ class PlayQueue {
                 SortBy: sortBy,
                 SortOrder: 'Ascending',
                 Limit: 100,
-                Fields: 'Trickplay'
+                Fields: 'RunTimeTicks,Trickplay'
             }),
             api.getItems({
                 ParentId: parentId,
                 Recursive: true,
                 IncludeItemTypes: 'Audio',
-                SortBy: sortBy,
+                SortBy: (this._contextType === 'music' || currentItem.Type === 'Audio')
+                    ? 'ParentIndexNumber,IndexNumber,SortName'
+                    : sortBy,
                 SortOrder: 'Ascending',
-                Limit: 100
+                Limit: 100,
+                Fields: 'RunTimeTicks'
             })
         ]);
 
+        let audios = audioResponse.Items || [];
+
+        // Fallback for virtual music albums or artist collections where tracks
+        // are linked by AlbumId or ArtistIds rather than folder-level ParentId
+        if (audios.length === 0 && (this._contextType === 'music' || currentItem.Type === 'Audio')) {
+            const albumAudioRes = await api.getItems({
+                AlbumIds: parentId,
+                Recursive: true,
+                IncludeItemTypes: 'Audio',
+                SortBy: 'ParentIndexNumber,IndexNumber,SortName',
+                SortOrder: 'Ascending',
+                Limit: 100,
+                Fields: 'RunTimeTicks'
+            });
+
+            if (albumAudioRes?.Items?.length > 0) {
+                audios = albumAudioRes.Items;
+            } else {
+                // Check if the container is an Artist
+                const artistAudioRes = await api.getItems({
+                    ArtistIds: parentId,
+                    Recursive: true,
+                    IncludeItemTypes: 'Audio',
+                    SortBy: 'ParentIndexNumber,IndexNumber,SortName',
+                    SortOrder: 'Ascending',
+                    Limit: 100,
+                    Fields: 'RunTimeTicks'
+                });
+                if (artistAudioRes?.Items?.length > 0) {
+                    audios = artistAudioRes.Items;
+                }
+            }
+        }
+
         const movies = moviesResponse.Items || [];
         const episodes = episodesResponse.Items || [];
-        const audios = audioResponse.Items || [];
 
         // Combine: Movies first, then Episodes, then Audio, and stamp each with a PlaylistItemId
         this._queue = [...movies, ...episodes, ...audios];
@@ -637,9 +954,13 @@ class PlayQueue {
         log.debug('Building Season queue for:', seasonId);
 
         // Fetch only episodes for this specific season
+        /*
+         * Fetch season episodes with RunTimeTicks included in the requested fields
+         * to guarantee accurate playback duration on consecutive episodes.
+         */
         const response = await api.getEpisodes(currentItem.SeriesId, {
             SeasonId: seasonId,
-            Fields: 'Overview,Chapters,MediaSources,Trickplay'
+            Fields: 'Overview,RunTimeTicks,Chapters,MediaSources,Trickplay'
         });
 
         const episodes = response.Items || [];

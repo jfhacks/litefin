@@ -71,6 +71,9 @@ class Page extends Component {
     init(params = {}) {
         this.params = params;
 
+        // Record mount/init timestamp to detect user manual navigation during async loading
+        this._initTimestamp = Date.now();
+
         // Get main container
         this.container = document.getElementById('page-container') || document.getElementById('app');
 
@@ -173,6 +176,18 @@ class Page extends Component {
     registerFocusSection(name, container, options = {}) {
         focusManager.register(name, container, options);
         this._focusSections.push(name);
+    }
+
+    /**
+     * Unregister a focus section
+     * @param {string} name - Section identifier
+     */
+    unregisterFocusSection(name) {
+        focusManager.unregister(name);
+        const idx = this._focusSections.indexOf(name);
+        if (idx !== -1) {
+            this._focusSections.splice(idx, 1);
+        }
     }
 
     /**

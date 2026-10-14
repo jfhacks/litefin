@@ -56,19 +56,19 @@ class ProfilesPage extends Page {
                     <!-- Populated in onMounted -->
                 </div>
 
-                <!-- Bottom bar: Sign Out + Switch Server -->
+                <!-- Bottom bar: Forget Server + Switch Server -->
                 <div class="profiles-bottom">
-                    <!-- Sign out the currently active user session only -->
+                    <!-- Forget Server button: wipes all stored user credentials and unlinks this server -->
                     <button
                         class="profiles-sign-out-btn focusable"
                         id="profiles-sign-out"
                         tabindex="0"
-                        data-i18n="ButtonSignOut"
+                        data-i18n="ForgetServer"
                     >
-                        ${i18n.t('ButtonSignOut')}
+                        ${i18n.t('ForgetServer')}
                     </button>
 
-                    <!-- Disconnect from the current server (sessions preserved) -->
+                    <!-- Disconnect from the current server (saved sessions preserved for fast switching) -->
                     <button
                         class="profiles-switch-server-btn focusable"
                         id="profiles-switch-server"
@@ -82,16 +82,19 @@ class ProfilesPage extends Page {
                 <!-- Confirmation dialog overlay (hidden by default) -->
                 <div class="modal-overlay profiles-dialog-overlay" id="profiles-dialog-overlay">
                     <div class="settings-modal profiles-dialog" id="profiles-dialog" role="dialog" aria-modal="true">
+                        <!-- Dialog title header -->
                         <div class="modal-header">
-                            <h2 class="profiles-dialog-title" data-i18n="SignOutConfirmTitle">
-                                ${i18n.t('SignOutConfirmTitle')}
+                            <h2 class="profiles-dialog-title" data-i18n="ForgetServerConfirmTitle">
+                                ${i18n.t('ForgetServerConfirmTitle')}
                             </h2>
                         </div>
+                        <!-- Dialog explanation text -->
                         <div class="modal-options">
-                            <p class="profiles-dialog-body" data-i18n="SignOutConfirmMessage">
-                                ${i18n.t('SignOutConfirmMessage')}
+                            <p class="profiles-dialog-body" data-i18n="ForgetServerConfirmMessage">
+                                ${i18n.t('ForgetServerConfirmMessage')}
                             </p>
                         </div>
+                        <!-- Dialog action buttons: Cancel (safe default) and Confirm -->
                         <div class="modal-actions profiles-dialog-actions">
                             <button
                                 class="profiles-dialog-btn profiles-dialog-cancel focusable"
@@ -243,10 +246,13 @@ class ProfilesPage extends Page {
             });
         }
 
-        // "Sign Out" button — opens confirmation dialog
-        const signOutBtn = this.$('#profiles-sign-out');
-        if (signOutBtn) {
-            signOutBtn.addEventListener('click', () => this._showDialog());
+        /*
+         * "Forget Server" button — triggers the confirmation modal before clearing out
+         * all credentials, cached profiles, and tokens tied to the active server.
+         */
+        const forgetServerBtn = this.$('#profiles-sign-out');
+        if (forgetServerBtn) {
+            forgetServerBtn.addEventListener('click', () => this._showDialog());
         }
 
         // "Switch Server" button — disconnects immediately (sessions for ALL servers preserved)
@@ -386,7 +392,7 @@ class ProfilesPage extends Page {
     }
 
     // ========================================================================
-    // Switch Server confirmation dialog
+    // Forget Server confirmation dialog
     // ========================================================================
 
     _showDialog() {

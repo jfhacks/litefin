@@ -242,17 +242,33 @@ function _buildMinimalProfile(caps) {
 export function buildJellyfinProfile(options = {}) {
     const manualBitrateOverride = typeof options === 'number' ? options : options.manualBitrate;
     const playbackMode = typeof options === 'object' ? options.playbackMode || 'auto' : 'auto';
+    const backend = typeof options === 'object' ? options.backend : null;
+    const isMovi = backend === 'movi';
 
     const caps = getDeviceCapabilities();
 
+    // When running under the MoviPlayer backend, WebCodecs and software WASM fallbacks
+    // (dav1d for AV1, de265 for HEVC) provide universal format support out of the box.
     const hevcSetting = PlayerSettings.get('enableHEVC');
-    const enableHEVC = hevcSetting === 'enable' ? true : hevcSetting === 'disable' ? false : caps.hevc;
+    const enableHEVC = hevcSetting === 'enable'
+        ? true
+        : hevcSetting === 'disable'
+            ? false
+            : (isMovi ? true : caps.hevc);
 
     const av1Setting = PlayerSettings.get('enableAV1');
-    const enableAV1 = av1Setting === 'enable' ? true : av1Setting === 'disable' ? false : caps.av1;
+    const enableAV1 = av1Setting === 'enable'
+        ? true
+        : av1Setting === 'disable'
+            ? false
+            : (isMovi ? true : caps.av1);
 
     const vp9Setting = PlayerSettings.get('enableVP9');
-    const enableVP9 = vp9Setting === 'enable' ? true : vp9Setting === 'disable' ? false : caps.vp9;
+    const enableVP9 = vp9Setting === 'enable'
+        ? true
+        : vp9Setting === 'disable'
+            ? false
+            : (isMovi ? true : caps.vp9);
 
     // Hybrid HDR: Default to hardware capability unless the user explicitly flipped the setting
     const hdrSetting = PlayerSettings.get('enableHDR');
@@ -275,28 +291,48 @@ export function buildJellyfinProfile(options = {}) {
             (caps.uhd8K ? 120000000 : caps.uhd ? 120000000 : 40000000);
     }
 
-    // Resolve user's maximum audio channels setting (-1 = all/auto hardware capability)
-    const userMaxChannels = PlayerSettings.get('allowedAudioChannels');
-    const maxAudioChannels = String((userMaxChannels && userMaxChannels > 0) ? userMaxChannels : caps.maxAudioChannels);
-
+    // High-fidelity audio codecs (DTS, TrueHD) decoded natively via Movi's WASM audio decoders
     const dtsSetting = PlayerSettings.get('enableDts');
-    const enableDts = dtsSetting === 'enable' ? true : dtsSetting === 'disable' ? false : caps.dts;
+    const enableDts = dtsSetting === 'enable'
+        ? true
+        : dtsSetting === 'disable'
+            ? false
+            : (isMovi ? true : caps.dts);
 
     const trueHdSetting = PlayerSettings.get('enableTrueHd');
-    const enableTrueHd = trueHdSetting === 'enable' ? true : trueHdSetting === 'disable' ? false : caps.truehd;
+    const enableTrueHd = trueHdSetting === 'enable'
+        ? true
+        : trueHdSetting === 'disable'
+            ? false
+            : (isMovi ? true : caps.truehd);
 
     const mp2Setting = PlayerSettings.get('enableMp2') || 'auto';
     const enableMp2 = mp2Setting === 'enable' ? true : mp2Setting === 'disable' ? false : caps.mp2;
 
+    const userMaxChannels = PlayerSettings.get('allowedAudioChannels');
+    // When DTS or TrueHD passthrough is enabled, systems support full 7.1 (8-channel) audio.
+    const defaultMaxChannels = (enableDts || enableTrueHd || isMovi) ? 8 : caps.maxAudioChannels;
+    const maxAudioChannels = String((userMaxChannels && userMaxChannels > 0) ? userMaxChannels : defaultMaxChannels);
+
+    // -------------------------------------------------------------------------
+    // Transcode Maximum Audio Channels Resolution
+    // -------------------------------------------------------------------------
+    // Dedicated channel limit for server transcodes (-1 = follow Direct Play cap).
+    // -------------------------------------------------------------------------
+    const userTransChannels = PlayerSettings.get('transcodeMaxAudioChannels');
+    const transMaxAudioChannels = String((userTransChannels && userTransChannels > 0)
+        ? userTransChannels
+        : maxAudioChannels);
+
     // Standard web audio. Place EAC3 and AC3 first so they are preferred
     // over AAC in the DirectPlay lists when supported or force-enabled.
     const audioCodecs = [];
-    if (caps.eac3) audioCodecs.push('eac3');
-    if (caps.ac3) audioCodecs.push('ac3');
+    if (caps.eac3 || isMovi) audioCodecs.push('eac3');
+    if (caps.ac3 || isMovi) audioCodecs.push('ac3');
     audioCodecs.push('aac', 'mp3');
     if (enableMp2) audioCodecs.push('mp2');
     audioCodecs.push('flac', 'opus', 'vorbis', 'pcm', 'wav');
-    if (enableDts) audioCodecs.push('dts', 'dca');
+    if (enableDts) audioCodecs.push('dts', 'dca', 'dtshd', 'dts-hd', 'dts-ma', 'dts-x');
     if (enableTrueHd) audioCodecs.push('truehd');
 
     const audioCodecString = audioCodecs.join(',');
@@ -306,7 +342,8 @@ export function buildJellyfinProfile(options = {}) {
     if (enableVP9) generalVideoCodecs.push('vp9');
     if (caps.vp8) generalVideoCodecs.push('vp8');
     if (enableAV1) generalVideoCodecs.push('av1');
-    if (caps.mpeg2video) generalVideoCodecs.push('mpeg2video');
+    // Movi's FFmpeg-WASM pipeline decodes MPEG-2 (broadcast Live TV) without server help
+    if (caps.mpeg2video || isMovi) generalVideoCodecs.push('mpeg2video');
 
     const webmVideoCodecs = [];
     if (caps.vp8) webmVideoCodecs.push('vp8');
@@ -319,6 +356,18 @@ export function buildJellyfinProfile(options = {}) {
     // transcodeVideo / transcodeAudio both bypass direct play entirely.
     if (playbackMode !== 'transcode' && playbackMode !== 'remux' &&
         playbackMode !== 'transcodeVideo' && playbackMode !== 'transcodeAudio') {
+        // MoviPlayer backend handles MKV containers directly via libavformat WASM demuxer.
+        // Advertise MKV first with all supported video and audio codecs to unlock direct play!
+        if (isMovi) {
+            directPlayProfiles.push({
+                // 'mpegts' is the container name Jellyfin reports for Live TV streams
+                Container: 'mkv,mp4,m4v,mov,webm,ts,mpegts',
+                Type: 'Video',
+                VideoCodec: generalVideoCodecs.join(','),
+                AudioCodec: audioCodecString
+            });
+        }
+
         // MP4 / M4V / MOV
         directPlayProfiles.push({
             Container: 'mp4,m4v,mov',
@@ -327,13 +376,15 @@ export function buildJellyfinProfile(options = {}) {
             AudioCodec: audioCodecString
         });
 
-        // MKV is technically playable by some browsers but generally safer to assume MP4/WEBM
-        directPlayProfiles.push({
-            Container: 'mkv',
-            Type: 'Video',
-            VideoCodec: generalVideoCodecs.join(','),
-            AudioCodec: audioCodecString
-        });
+        // MKV profile for standard web fallback
+        if (!isMovi) {
+            directPlayProfiles.push({
+                Container: 'mkv',
+                Type: 'Video',
+                VideoCodec: generalVideoCodecs.join(','),
+                AudioCodec: audioCodecString
+            });
+        }
 
         if (webmVideoCodecs.length > 0) {
             directPlayProfiles.push({
@@ -384,32 +435,48 @@ export function buildJellyfinProfile(options = {}) {
     const preferredTranscodeCodec = PlayerSettings.get('transcodeAudioCodec') || 'auto';
     const transAudioCodecsArr = [];
 
+    // =========================================================================
+    // Transcode Target Codec Resolution
+    // =========================================================================
+    // Jellyfin server's StreamBuilder evaluates TranscodingProfiles using a
+    // priority-based search. When higher-ranking codecs (e.g. EAC3) are present
+    // in TranscodingProfiles alongside AAC, the server will select EAC3 whenever
+    // the source audio has EAC3 or exceeds AAC's channel conditions in CodecProfiles.
+    //
+    // Therefore, when the user explicitly requests 'prefer_aac' or 'prefer_ac3',
+    // conflicting higher-priority codecs must NOT be advertised in TranscodingProfiles.
+    // =========================================================================
     if (preferredTranscodeCodec === 'auto') {
-        // Auto (Prefer E-AC3)
+        // Auto (Prefer E-AC3) -> E-AC3 first, then AC3, then AAC/MP3 fallback
         if (caps.eac3) transAudioCodecsArr.push('eac3');
         if (caps.ac3) transAudioCodecsArr.push('ac3');
-        transAudioCodecsArr.push('aac');
+        transAudioCodecsArr.push('aac', 'mp3');
         if (enableMp2) transAudioCodecsArr.push('mp2');
     } else if (preferredTranscodeCodec === 'prefer_ac3') {
-        // Prefer AC3
+        // Prefer AC3 (with AAC fallback) -> AC3 first, then AAC/MP3 fallback.
+        // EAC3 is strictly excluded so the server never upgrades to E-AC3.
         if (caps.ac3) transAudioCodecsArr.push('ac3');
-        if (caps.eac3) transAudioCodecsArr.push('eac3');
-        transAudioCodecsArr.push('aac');
+        transAudioCodecsArr.push('aac', 'mp3');
         if (enableMp2) transAudioCodecsArr.push('mp2');
     } else if (preferredTranscodeCodec === 'prefer_aac') {
-        // Prefer AAC
-        transAudioCodecsArr.push('aac');
+        // Prefer AAC -> AAC first, then MP3/MP2 fallback.
+        // EAC3 and AC3 are strictly excluded so the server honors the user's AAC preference.
+        transAudioCodecsArr.push('aac', 'mp3');
         if (enableMp2) transAudioCodecsArr.push('mp2');
-        if (caps.eac3) transAudioCodecsArr.push('eac3');
-        if (caps.ac3) transAudioCodecsArr.push('ac3');
     } else if (preferredTranscodeCodec === 'force_eac3') {
-        // Only E-AC3
+        // Force/Only E-AC3
         transAudioCodecsArr.push('eac3');
     } else if (preferredTranscodeCodec === 'force_ac3') {
-        // Only AC3
+        // Force/Only AC3
         transAudioCodecsArr.push('ac3');
+    } else if (preferredTranscodeCodec === 'force_aac') {
+        // Force/Only AAC
+        transAudioCodecsArr.push('aac');
+    } else if (preferredTranscodeCodec === 'force_mp3') {
+        // Force/Only MP3
+        transAudioCodecsArr.push('mp3');
     } else {
-        // Only AAC (force_aac)
+        // Universal fallback
         transAudioCodecsArr.push('aac');
     }
 
@@ -446,38 +513,97 @@ export function buildJellyfinProfile(options = {}) {
 
     const transcodingProfiles = [];
 
-    // Primary HLS video transcoding profile (one for each codec in transAudioCodecsArr)
+    // -------------------------------------------------------------------------
+    // Direct Stream / Remux Video Detection
+    // -------------------------------------------------------------------------
+    // When video is passed through without re-encoding (remux or audio-only transcode),
+    // FFmpeg is in stream-copy mode (-c:v copy) and CANNOT cut segments on arbitrary
+    // non-keyframes. If the client forces a short SegmentLength (e.g. 2s), the server
+    // generates an HLS playlist declaring 2s durations while FFmpeg produces 10s GOP
+    // segments. This mismatch causes massive 7-8s buffer holes, continuous
+    // bufferSeekOverHole events, and severe audio/video desynchronization.
+    // By leaving SegmentLength undefined during remux/copy, Jellyfin server
+    // dynamically falls back to its adaptive 6s default that aligns with keyframes.
+    // -------------------------------------------------------------------------
+    const isVideoDirectStream = playbackMode === 'remux' || playbackMode === 'transcodeAudio';
+    const effectiveSegmentLength = isVideoDirectStream
+        ? undefined
+        : String(PlayerSettings.get('html5SegmentLength') || 2);
+
+    // -------------------------------------------------------------------------
+    // fMP4 HLS Preference Resolution (Aligned with TizenProfile & WebOSProfile)
+    // -------------------------------------------------------------------------
+    // enableFmp4HlsContainer = master switch from PlayerSettings (defaults false).
+    // forceFmp4HlsContainer  = promotes fMP4 to primary HLS container.
+    //
+    // Technical Rationale:
+    // In DirectStream / video-copy remuxing (-c:v copy), FFmpeg's fMP4 segmenter
+    // creates GOP-boundary buffer holes (~140ms) and introduces a cumulative
+    // timeline drift between fMP4 tfdt decode timestamps and external subtitle cues.
+    // MPEG-TS preserves continuous 90kHz presentation timestamps without boundary
+    // holes, ensuring perfect subtitle sync and smooth resume transitions.
+    // -------------------------------------------------------------------------
+    const enableFmp4Hls = PlayerSettings.get('enableFmp4HlsContainer');
+    const forceFmp4Hls = enableFmp4Hls && PlayerSettings.get('forceFmp4HlsContainer');
+    const primaryHlsContainer = forceFmp4Hls ? 'mp4' : 'ts';
+
+    // 1. Primary HLS video transcoding profile (one for each codec in transAudioCodecsArr)
     for (const audioCodec of transAudioCodecsArr) {
         transcodingProfiles.push({
-            Container: 'mp4',
+            Container: primaryHlsContainer,
             Type: 'Video',
             AudioCodec: audioCodec,
-            VideoCodec: broadTransVideo,
+            // When forced fMP4, include AV1/VP9; for MPEG-TS, restrict to TS-safe codecs
+            VideoCodec: forceFmp4Hls ? broadTransVideo : transVideoCodecs,
             Context: 'Streaming',
             Protocol: 'hls',
-            MaxAudioChannels: maxAudioChannels,
-            MinSegments: '2',
-            SegmentLength: String(PlayerSettings.get('html5SegmentLength') || 2),
-            BreakOnNonKeyFrames: playbackMode !== 'remux',
+            MaxAudioChannels: transMaxAudioChannels,
+            // Use 1 segment minimum to accelerate playback startup and reduce initial stall risk
+            MinSegments: '1',
+            // Omitted for video copy mode to allow adaptive keyframe-aligned cuts
+            SegmentLength: effectiveSegmentLength,
+            // BreakOnNonKeyFrames MUST be true for HTML5/HLS.js (matching official jellyfin-web)
+            BreakOnNonKeyFrames: true,
             EnableAudioVbrEncoding: !PlayerSettings.get('disableVbrAudio')
         });
     }
 
-    // Secondary HLS video transcoding profile (one for each codec in transAudioCodecsArr)
-    for (const audioCodec of transAudioCodecsArr) {
-        transcodingProfiles.push({
-            Container: 'ts',
-            Type: 'Video',
-            AudioCodec: audioCodec,
-            VideoCodec: transVideoCodecs,
-            Context: 'Streaming',
-            Protocol: 'hls',
-            MaxAudioChannels: maxAudioChannels,
-            MinSegments: '2',
-            SegmentLength: String(PlayerSettings.get('html5SegmentLength') || 2),
-            BreakOnNonKeyFrames: playbackMode !== 'remux',
-            EnableAudioVbrEncoding: !PlayerSettings.get('disableVbrAudio')
-        });
+    // 2. Secondary HLS video transcoding profile (fallback container)
+    // If primary was TS, push fMP4 (mp4) secondary so modern web codecs (AV1, VP9)
+    // can still be played via HLS direct stream when requested.
+    if (!forceFmp4Hls) {
+        for (const audioCodec of transAudioCodecsArr) {
+            transcodingProfiles.push({
+                Container: 'mp4',
+                Type: 'Video',
+                AudioCodec: audioCodec,
+                VideoCodec: broadTransVideo,
+                Context: 'Streaming',
+                Protocol: 'hls',
+                MaxAudioChannels: transMaxAudioChannels,
+                MinSegments: '1',
+                SegmentLength: effectiveSegmentLength,
+                BreakOnNonKeyFrames: true,
+                EnableAudioVbrEncoding: !PlayerSettings.get('disableVbrAudio')
+            });
+        }
+    } else {
+        // If fMP4 was primary, keep MPEG-TS as secondary fallback
+        for (const audioCodec of transAudioCodecsArr) {
+            transcodingProfiles.push({
+                Container: 'ts',
+                Type: 'Video',
+                AudioCodec: audioCodec,
+                VideoCodec: transVideoCodecs,
+                Context: 'Streaming',
+                Protocol: 'hls',
+                MaxAudioChannels: transMaxAudioChannels,
+                MinSegments: '1',
+                SegmentLength: effectiveSegmentLength,
+                BreakOnNonKeyFrames: true,
+                EnableAudioVbrEncoding: !PlayerSettings.get('disableVbrAudio')
+            });
+        }
     }
 
     // Pure Audio transcoding profiles
@@ -565,6 +691,25 @@ export function buildJellyfinProfile(options = {}) {
                 bitrateCondition
             ]
         },
+        // ---------------------------------------------------------------------
+        // Video Audio Channel Cap Condition
+        // ---------------------------------------------------------------------
+        // Enforce maximum audio channels on audio streams inside video files.
+        // ---------------------------------------------------------------------
+        {
+            Type: 'VideoAudio',
+            Conditions: [
+                {
+                    Condition: 'LessThanEqual',
+                    Property: 'AudioChannels',
+                    Value: maxAudioChannels,
+                    IsRequired: false
+                }
+            ]
+        },
+        // ---------------------------------------------------------------------
+        // Standalone Audio Channel Cap Condition
+        // ---------------------------------------------------------------------
         {
             Type: 'Audio',
             Conditions: [
@@ -632,7 +777,9 @@ export function buildJellyfinProfile(options = {}) {
     }
 
     return {
-        Name: `Litefin Web (HTML5)${playbackMode !== 'auto' ? ` (${playbackMode})` : ''}`,
+        Name: isMovi
+            ? `Litefin Desktop (MoviPlayer)${playbackMode !== 'auto' ? ` (${playbackMode})` : ''}`
+            : `Litefin Web (HTML5)${playbackMode !== 'auto' ? ` (${playbackMode})` : ''}`,
         MaxStreamingBitrate: maxBitrate,
         MaxStaticBitrate: maxBitrate,
         MaxStaticMusicBitrate: 40000000,

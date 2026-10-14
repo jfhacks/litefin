@@ -23,17 +23,22 @@ import { storage } from '../utils/StorageService.js';
 import { logger } from '../utils/Logger.js';
 import { i18n } from '../utils/i18n.js';
 import { availableLanguages } from '../locales/languages.js';
+import { languageManager } from '../utils/LanguageManager.js';
 import { pluginManager } from '../plugins/PluginManager.js';
 import { platformInfo } from '../utils/PlatformInfo.js';
 import { homeLayoutManager } from '../utils/HomeLayoutManager.js';
 import { sidebarLayoutManager } from '../utils/SidebarLayoutManager.js';
+import { AUDIO_FALLBACK_SLOTS, isAudioFallbackSelect } from '../utils/AudioFallbackConfig.js';
 import { eventBus } from '../core/EventBus.js';
 import { versionChecker } from '../utils/VersionChecker.js';
 import { settingsIcons, setIconStyle, getSupportedStyles } from '../utils/Icons.js';
+import { toast } from '../ui/Toast.js';
 import { pinManager } from '../utils/PinManager.js';
 import { pinDialog } from '../ui/PinDialog.js';
 import { seerr } from '../api/seerrClient.js';
 import { escapeHtml } from '../utils/Utils.js';
+import { watchProviderRegion, watchProviderRegionName } from '../utils/WatchProviders.js';
+import CardRenderer from '../utils/CardRenderer.js';
 
 const log = logger.create('SettingsPage');
 
@@ -51,6 +56,13 @@ class SettingsPage extends Page {
 
         // Preference Languages (Audio/Subtitle) - fetched from server
         this.prefLanguages = cachedCultures || [{ value: 'Default', label: i18n.t('Default') }];
+
+        // Mobile portrait 2-page navigation state
+        // When false, the full category list is displayed; when true, the active tab details are shown.
+        this._mobileDetailOpen = false;
+
+        // Bound viewport resize listener for orientation transitions
+        this._onResize = null;
     }
 
     async onInit() {
@@ -58,19 +70,27 @@ class SettingsPage extends Page {
         if (!cachedCultures) {
             try {
                 const cultures = await api.getCultures();
-                // Map to dropdown format and sort alphabetically by display name
-                cachedCultures = cultures
-                    .map((c) => ({
-                        value: c.ThreeLetterISOLanguageName,
-                        label: i18n.ensureBiDi(c.DisplayName)
-                    }))
-                    .sort((a, b) => a.label.localeCompare(b.label));
+                if (cultures && Array.isArray(cultures)) {
+                    // Register dynamic culture mappings in LanguageManager for O(1) matching
+                    languageManager.registerCultures(cultures);
 
-                this.prefLanguages = cachedCultures;
+                    // Map to dropdown format and sort alphabetically by display name
+                    cachedCultures = cultures
+                        .map((c) => ({
+                            value: c.ThreeLetterISOLanguageName || c.Name,
+                            label: i18n.ensureBiDi(c.DisplayName),
+                            ThreeLetterISOLanguageName: c.ThreeLetterISOLanguageName,
+                            TwoLetterISOLanguageName: c.TwoLetterISOLanguageName,
+                            DisplayName: c.DisplayName
+                        }))
+                        .sort((a, b) => a.label.localeCompare(b.label));
 
-                // Re-render if we are on a tab that uses these languages
-                if (this.activeTab === 'player' || this.activeTab === 'subtitles') {
-                    this._switchTab(this.activeTab, true);
+                    this.prefLanguages = cachedCultures;
+
+                    // Re-render if we are on a tab that uses these languages
+                    if (this.activeTab === 'player' || this.activeTab === 'subtitles') {
+                        this._switchTab(this.activeTab, true);
+                    }
                 }
             } catch (error) {
                 log.error('Failed to fetch cultures:', error);
@@ -80,102 +100,189 @@ class SettingsPage extends Page {
         this.markReady();
     }
 
-    render() {
+    /**
+     * Determines whether the settings interface is viewed in a portrait orientation.
+     * Aligns directly with CSS @media (orientation: portrait) rules.
+     * @returns {boolean} True if in portrait mode
+     * @private
+     */
+    _isPortraitMode() {
+        if (typeof window === 'undefined') return false;
+
+        // Priority 1: Direct portrait marker attribute applied by display scaler
+        if (typeof document !== 'undefined' && document.documentElement?.hasAttribute('data-litefin-portrait')) {
+            return true;
+        }
+
+        // Priority 2: CSS orientation media query and viewport dimension check
+        const isPortraitMedia = window.matchMedia && window.matchMedia('(orientation: portrait)').matches;
+        const isVerticalDim = window.innerHeight > window.innerWidth;
+
+        return Boolean(isPortraitMedia || isVerticalDim);
+    }
+
+    /**
+     * Assembles setting category tab descriptors with localized titles, descriptions, and icons.
+     * In mobile portrait, the descriptive summaries are rendered directly under each category title.
+     * @returns {Array<Object>} List of setting tab configurations
+     * @private
+     */
+    _getTabs() {
+        // Base category catalogue spanning core visual and playback subsystems
         const tabs = [
             {
                 id: 'appearance',
                 label: i18n.t('Display'),
+                desc: i18n.t('SettingsDescAppearance') || 'Themes, accent colors, background styles, and visuals',
                 icon: settingsIcons.appearance
             },
             {
                 id: 'layout',
                 label: i18n.t('Layout') || 'Layout',
+                desc: i18n.t('SettingsDescLayout') || 'Display density, media cards, poster styles, and scaling',
                 icon: settingsIcons.layout
             },
             {
                 id: 'home',
                 label: i18n.t('Home') || 'Home',
+                desc: i18n.t('SettingsDescHome') || 'Hero carousel, section ordering, and row visibility',
                 icon: settingsIcons.home
             },
             {
                 id: 'sidebar',
                 label: i18n.t('Sidebar') || 'Sidebar',
+                desc: i18n.t('SettingsDescSidebar') || 'Sidebar display modes, collapsed behavior, and shortcuts',
                 icon: settingsIcons.sidebar
             },
             {
                 id: 'player',
                 label: i18n.t('TitlePlayback'),
+                desc: i18n.t('SettingsDescPlayer') || 'Video player engine, playback quality, and audio tracks',
                 icon: settingsIcons.player
             },
             {
                 id: 'subtitles',
                 label: i18n.t('Subtitles'),
+                desc: i18n.t('SettingsDescSubtitles') || 'Subtitle appearance, size, styling, and language rules',
                 icon: settingsIcons.subtitles
             },
             {
                 id: 'performance',
                 label: i18n.t('Performance') || 'Performance',
+                desc: i18n.t('SettingsDescPerformance') || 'Rendering optimization, animations, and image cache',
                 icon: settingsIcons.performance
             },
             {
                 id: 'controls',
                 label: i18n.t('Controls') || 'Controls',
+                desc: i18n.t('SettingsDescControls') || 'Keyboard bindings, remote shortcuts, and gestures',
                 icon: settingsIcons.controls
             },
             {
                 id: 'plugins',
                 label: i18n.t('Plugins'),
+                desc: i18n.t('SettingsDescPlugins') || 'Seerr media discovery and external extensions',
                 icon: settingsIcons.plugins
             },
             {
                 id: 'account',
                 label: i18n.t('Account'),
+                desc: i18n.t('SettingsDescAccount') || 'Active profile, server connections, and credentials',
                 icon: settingsIcons.account
             },
             {
                 id: 'backup',
                 label: i18n.t('BackupRestore') || 'Backup & Restore',
+                desc: i18n.t('SettingsDescBackup') || 'Export and restore your app configuration and preferences',
                 icon: settingsIcons.backup
             },
             {
                 id: 'about',
                 label: i18n.t('About'),
+                desc: i18n.t('SettingsDescAbout') || 'Version information, device details, and open-source licenses',
                 icon: settingsIcons.about
             },
             {
                 id: 'debug',
                 label: i18n.t('Debug'),
+                desc: i18n.t('SettingsDescDebug') || 'Diagnostic logs, storage usage breakdown, and testing tools',
                 icon: settingsIcons.debug
             }
         ];
 
+        /*
+         * Admin Feature: Add Libraries management tab for server administrators.
+         * Allows admins to trigger global library scans and individual metadata refreshes.
+         */
+        const user = auth.getCurrentUser();
+        const isAdmin = Boolean(user?.Policy?.IsAdministrator);
+        if (isAdmin) {
+            // Position the Libraries management tab right before backup
+            const backupIndex = tabs.findIndex((t) => t.id === 'backup');
+            const libraryTab = {
+                id: 'libraries',
+                label: i18n.t('Libraries') || 'Libraries',
+                desc: i18n.t('SettingsDescLibraries') || 'Server media library scanning, refreshes, and metadata',
+                icon: settingsIcons.libraries
+            };
+            if (backupIndex !== -1) {
+                tabs.splice(backupIndex, 0, libraryTab);
+            } else {
+                tabs.push(libraryTab);
+            }
+        }
+
+        return tabs;
+    }
+
+    render() {
+        const tabs = this._getTabs();
+
         return `
             <div class="page settings-page">
-
-                
                 <!-- Split View Container -->
                 <div class="settings-split-view">
-                    <!-- Sidebar -->
+                    <!-- Sidebar (Screen 1: Category Selection in Portrait) -->
                     <aside class="settings-sidebar" id="settings-sidebar">
                         <div class="settings-sidebar-header">
                             <h2 data-i18n="Settings">${i18n.t('Settings')}</h2>
+                            <p class="settings-sidebar-subtitle" data-i18n="SettingsPreferencesSubtitle">${i18n.t('SettingsPreferencesSubtitle') || 'Preferences & Configuration'}</p>
                         </div>
+
+                        <!-- Category Navigation Cards -->
+                        <div class="settings-menu-list">
                         ${tabs
                 .map(
                     (tab) => `
                             <button class="settings-menu-btn ${this.activeTab === tab.id ? 'active' : ''}" 
                                     data-tab="${tab.id}" tabindex="0">
                                 <span class="menu-icon">${tab.icon}</span>
-                                <span class="menu-label">${tab.label}</span>
+                                <div class="menu-text-wrap">
+                                    <span class="menu-label">${tab.label}</span>
+                                    <span class="menu-desc">${tab.desc}</span>
+                                </div>
+                                <span class="menu-chevron" aria-hidden="true">
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M9 18l6-6-6-6"/>
+                                    </svg>
+                                </span>
                             </button>
                         `
                 )
                 .join('')}
+                            <!-- Bottom scrolling buffer so mobile navigation bar never obstructs the last category -->
+                            <div class="settings-bottom-spacer" aria-hidden="true"></div>
+                        </div>
                     </aside>
 
-                    <!-- Content Panel -->
+                    <!-- Content Panel (Screen 2: Tab Detail in Portrait) -->
                     <main class="settings-content-panel page-content" id="settings-content-panel">
-                        ${this._renderActiveTabContent()}
+                        <!-- Tab Settings Body -->
+                        <div class="settings-tab-body" id="settings-tab-body">
+                            ${this._renderActiveTabContent()}
+                            <!-- Bottom scrolling buffer so mobile navigation bar never obstructs the last setting control -->
+                            <div class="settings-bottom-spacer" aria-hidden="true"></div>
+                        </div>
                     </main>
                 </div>
                 
@@ -205,6 +312,8 @@ class SettingsPage extends Page {
                 return this._renderControlsTab();
             case 'plugins':
                 return this._renderPluginsTab();
+            case 'libraries':
+                return this._renderLibrariesTab();
             case 'account':
                 return this._renderAccountTab();
             case 'backup':
@@ -216,6 +325,68 @@ class SettingsPage extends Page {
             default:
                 return this._renderAppearanceTab();
         }
+    }
+
+    /**
+     * Render the admin-only Libraries management tab.
+     * Includes a global library scan button and a live list of server libraries
+     * with individual metadata refresh options.
+     * @returns {string} HTML markup for the tab
+     */
+    _renderLibrariesTab() {
+        // Enforce admin permission guard directly in template
+        const user = auth.getCurrentUser();
+        if (!user?.Policy?.IsAdministrator) {
+            return `
+                <div class="settings-tab-content">
+                    <h2 class="content-title" data-i18n="AccessDenied">${i18n.t('AccessDenied') || 'Access Denied'}</h2>
+                    <p class="content-subtitle" data-i18n="AdminOnlyFeature">
+                        ${i18n.t('AdminOnlyFeature') || 'This section requires administrator privileges.'}
+                    </p>
+                </div>
+            `;
+        }
+
+        return `
+            <div class="settings-tab-content">
+                <h2 class="content-title" data-i18n="Libraries">${i18n.t('Libraries') || 'Libraries'}</h2>
+                <p class="content-subtitle" data-i18n="LibrariesAdminDescription">
+                    ${i18n.t('LibrariesAdminDescription') || 'Manage server media libraries, trigger global library scans, and refresh metadata.'}
+                </p>
+
+                <div class="libraries-tab-container">
+                    <!-- Global Actions Row (Scan All Libraries) using standard setting-item layout -->
+                    <div class="setting-item">
+                        <div class="setting-label">
+                            <span class="setting-name" data-i18n="ScanAllLibraries">${i18n.t('ScanAllLibraries') || 'Scan All Libraries'}</span>
+                            <span class="setting-description" data-i18n="ScanAllLibrariesDescription">
+                                ${i18n.t('ScanAllLibrariesDescription') || 'Trigger a comprehensive scan across all media libraries to discover newly added files.'}
+                            </span>
+                        </div>
+                        <div class="setting-control">
+                            <button class="btn btn-option btn-scan-all-libraries" id="btn-scan-all-libraries" tabindex="0" data-focusable="true">
+                                <svg class="icon-outline btn-icon-svg" viewBox="0 0 24 24"><path fill="currentColor" d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6c0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6c0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4l-4-4v3z"/></svg>
+                                <svg class="icon-filled btn-icon-svg" viewBox="0 0 24 24"><path fill="currentColor" d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6c0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6c0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4l-4-4v3z"/></svg>
+                                <span class="btn-label" data-i18n="ScanAll">${i18n.t('ScanAll') || 'Scan All'}</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Individual Libraries Section Header -->
+                    <div class="library-list-section-header">
+                        <span class="library-list-section-title" data-i18n="MediaLibraries">${i18n.t('MediaLibraries') || 'Media Libraries'}</span>
+                        <span class="library-list-count-badge" id="libraries-count-badge">...</span>
+                    </div>
+
+                    <!-- Dynamic Library Items List Container -->
+                    <div class="library-items-list" id="libraries-admin-list">
+                        <div class="library-admin-loading" data-i18n="LoadingLibraries">
+                            ${i18n.t('LoadingLibraries') || 'Loading libraries...'}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
     }
 
     _renderPluginsTab() {
@@ -284,11 +455,12 @@ class SettingsPage extends Page {
                 <div class="setting-item" id="seerr-status-card">
                     <div class="setting-label">
                         <span class="setting-name">
-                            ${i18n.t('SeerrStatusLabel', ['Seerr Integration State'])}
-                            <span id="seerr-status-badge" class="plugin-status plugin-status--pending">Probing...</span>
+                            ${i18n.t('LitefinAndSeerrStatusLabel', ['Litefin Plugin & Seerr State'])}
+                            <span id="litefin-plugin-status-badge" class="plugin-status plugin-status--pending">Probing...</span>
+                            <span id="seerr-status-badge" class="plugin-status plugin-status--pending" style="display: none;">Probing...</span>
                         </span>
                         <span class="setting-description" id="seerr-status-description">
-                            Probing server plugin status...
+                            Probing server companion plugin and Seerr status...
                         </span>
                     </div>
                 </div>
@@ -299,36 +471,88 @@ class SettingsPage extends Page {
         `;
     }
 
-    /** Queries the Litefin server plugin to reflect the Seerr integration state in the Plugins tab. */
+    /** Queries the Litefin server companion plugin to reflect Litefin plugin and Seerr integration state in the Plugins tab. */
     async _refreshSeerrStatus() {
-        const badgeEl = this.$('#seerr-status-badge');
+        const litefinBadgeEl = this.$('#litefin-plugin-status-badge');
+        const seerrBadgeEl = this.$('#seerr-status-badge');
         const descEl = this.$('#seerr-status-description');
-        if (!badgeEl || !descEl) return;
+        if (!descEl) return;
 
         try {
+            // Check whether the Litefin companion server plugin is installed and active on the Jellyfin server
+            const isLitefinAvailable = await api.isLitefinPluginAvailable(true);
+
+            if (!isLitefinAvailable) {
+                if (litefinBadgeEl) {
+                    litefinBadgeEl.className = 'plugin-status plugin-status--disabled';
+                    litefinBadgeEl.textContent = i18n.t('LitefinPluginMissing', ['Litefin Plugin: Missing']);
+                }
+                if (seerrBadgeEl) {
+                    seerrBadgeEl.style.display = 'none';
+                }
+                descEl.textContent = i18n.t('LitefinPluginMissingDesc', [
+                    'Litefin companion plugin is not installed on the Jellyfin server. Seerr integration, batch queries, and server backups are disabled.'
+                ]);
+                return;
+            }
+
+            // Litefin server plugin is installed & active
+            if (litefinBadgeEl) {
+                litefinBadgeEl.className = 'plugin-status plugin-status--active';
+                litefinBadgeEl.textContent = i18n.t('LitefinPluginActive', ['Litefin Plugin: Active']);
+            }
+
+            // Query Seerr configuration & connectivity through the Litefin server plugin
             const status = await seerr.status(true);
+            if (seerrBadgeEl) {
+                seerrBadgeEl.style.display = '';
+            }
+
             if (status.configured && status.available) {
-                badgeEl.className = 'plugin-status plugin-status--active';
-                badgeEl.textContent = i18n.t('ConfiguredAndConnected', ['Configured & Connected']);
-                descEl.textContent = i18n.t('SeerrStatusConnectedDesc', ['Litefin plugin is installed on the Jellyfin server and connected to Seerr.']);
+                if (seerrBadgeEl) {
+                    seerrBadgeEl.className = 'plugin-status plugin-status--active';
+                    seerrBadgeEl.textContent = i18n.t('SeerrStatusConnected', ['Seerr: Connected']);
+                }
+                descEl.textContent = i18n.t('SeerrStatusConnectedDesc', [
+                    'Litefin companion plugin is active and successfully connected to Seerr.'
+                ]);
             } else if (status.configured && !status.available) {
-                badgeEl.className = 'plugin-status plugin-status--disabled';
-                badgeEl.textContent = i18n.t('ServerUnreachable', ['Server Unreachable']);
-                descEl.textContent = i18n.t('SeerrStatusUnreachableDesc', ['Seerr is configured in the Litefin plugin, but the Jellyfin server cannot reach the Seerr server instance.']);
+                if (seerrBadgeEl) {
+                    seerrBadgeEl.className = 'plugin-status plugin-status--disabled';
+                    seerrBadgeEl.textContent = i18n.t('SeerrStatusUnreachable', ['Seerr: Unreachable']);
+                }
+                descEl.textContent = i18n.t('SeerrStatusUnreachableDesc', [
+                    'Litefin plugin is installed, but the Jellyfin server cannot reach the configured Seerr instance.'
+                ]);
             } else if (!status.configured && status.available) {
-                badgeEl.className = 'plugin-status plugin-status--pending';
-                badgeEl.textContent = i18n.t('NotConfigured', ['Not Configured']);
-                descEl.textContent = i18n.t('SeerrStatusNotConfiguredDesc', ['Litefin plugin is installed on the Jellyfin server, but Seerr URL or API key is not configured in the Litefin plugin settings.']);
+                if (seerrBadgeEl) {
+                    seerrBadgeEl.className = 'plugin-status plugin-status--pending';
+                    seerrBadgeEl.textContent = i18n.t('SeerrStatusNotConfigured', ['Seerr: Not Configured']);
+                }
+                descEl.textContent = i18n.t('SeerrStatusNotConfiguredDesc', [
+                    'Litefin companion plugin is active, but Seerr URL or API key is not configured in the plugin settings.'
+                ]);
             } else {
-                badgeEl.className = 'plugin-status plugin-status--disabled';
-                badgeEl.textContent = i18n.t('NotConfigured', ['Not Configured / Missing']);
-                descEl.textContent = i18n.t('SeerrStatusMissingDesc', ['Seerr is not configured in the Litefin plugin or the server cannot reach Seerr.']);
+                if (seerrBadgeEl) {
+                    seerrBadgeEl.className = 'plugin-status plugin-status--disabled';
+                    seerrBadgeEl.textContent = i18n.t('SeerrStatusDisabled', ['Seerr: Disabled']);
+                }
+                descEl.textContent = i18n.t('SeerrStatusMissingDesc', [
+                    'Litefin companion plugin is active on the server, but Seerr integration is not configured.'
+                ]);
             }
         } catch (err) {
-            log.warn('Seerr server integration status check failed', err);
-            badgeEl.className = 'plugin-status plugin-status--disabled';
-            badgeEl.textContent = i18n.t('PluginMissing', ['Plugin Missing / Unreachable']);
-            descEl.textContent = i18n.t('SeerrStatusPluginMissingDesc', ['Litefin plugin is not installed on the Jellyfin server.']);
+            log.warn('Litefin & Seerr server integration status check failed', err);
+            if (litefinBadgeEl) {
+                litefinBadgeEl.className = 'plugin-status plugin-status--disabled';
+                litefinBadgeEl.textContent = i18n.t('PluginMissing', ['Plugin Missing / Unreachable']);
+            }
+            if (seerrBadgeEl) {
+                seerrBadgeEl.style.display = 'none';
+            }
+            descEl.textContent = i18n.t('SeerrStatusPluginMissingDesc', [
+                'Litefin companion plugin is not reachable on the Jellyfin server.'
+            ]);
         }
     }
 
@@ -350,6 +574,76 @@ class SettingsPage extends Page {
             'app-language-select',
             this.uiLanguages,
             storage.getItem('app_language') || 'en-us'
+        )}
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="FavoriteLanguages">${i18n.t('FavoriteLanguages') || 'Favorite Languages'}</span>
+                        <span class="setting-description" data-i18n="FavoriteLanguagesDescription">${i18n.t('FavoriteLanguagesDescription') || 'Limit language dropdowns and media tracks across the app to your favorite languages.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="setting-action-btn select-btn" id="btn-manage-favorite-languages" tabindex="0" data-focusable="true">
+                            <span class="btn-label" id="favorite-languages-count-label">
+                                ${languageManager.hasFavorites() ? i18n.t('LanguagesSelected', [languageManager.getFavorites().length]) : (i18n.t('AllLanguages') || 'All Languages')}
+                            </span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="DisplayScale">${i18n.t('DisplayScale') || 'Display Scale'}</span>
+                        <span class="setting-description" data-i18n="DisplayScaleDescription">${i18n.t('DisplayScaleDescription') || 'Adjust overall interface scaling. "Auto" dynamically fits the layout to 1080p canvas proportions.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+            'display-scale-select',
+            [
+                { value: 'auto', label: i18n.t('DisplayScaleAuto') || 'Auto (Fit 1080p)' },
+                { value: '0.67', label: '67%' },
+                { value: '0.75', label: '75%' },
+                { value: '0.8', label: '80%' },
+                { value: '0.85', label: '85%' },
+                { value: '0.9', label: '90%' },
+                { value: '0.95', label: '95%' },
+                { value: '1', label: '100% (Native / TV)' },
+                { value: '1.05', label: '105%' },
+                { value: '1.1', label: '110%' },
+                { value: '1.15', label: '115%' },
+                { value: '1.2', label: '120%' }
+            ],
+            layoutManager.getDisplayScale().toString()
+        )}
+                    </div>
+                </div>
+
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="TextScale">${i18n.t('TextScale') || 'Text scale'}</span>
+                        <span class="setting-description" data-i18n="TextScaleDescription">${i18n.t('TextScaleDescription') || 'Adjust the size of all text and UI elements proportionally'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+            'text-scale-select',
+            [
+                { value: '0.8', label: '80%' },
+                { value: '0.85', label: '85%' },
+                { value: '0.9', label: '90%' },
+                { value: '0.95', label: '95%' },
+                { value: '1', label: 'Normal (100%)' },
+                { value: '1.05', label: '105%' },
+                { value: '1.1', label: '110%' },
+                { value: '1.15', label: '115%' },
+                { value: '1.2', label: '120%' },
+                { value: '1.25', label: '125%' },
+                { value: '1.3', label: '130%' },
+                { value: '1.35', label: '135%' },
+                { value: '1.4', label: '140%' }
+            ],
+            layoutManager.getTextScale().toString()
         )}
                     </div>
                 </div>
@@ -412,7 +706,8 @@ class SettingsPage extends Page {
                     label: i18n.t('FontZenKakuGothicNew') || 'Zen Kaku Gothic New'
                 },
                 { value: 'opendyslexic', label: i18n.t('FontOpenDyslexic') || 'OpenDyslexic' },
-                { value: 'atkinson', label: i18n.t('FontAtkinson') || 'Atkinson Hyperlegible' }
+                { value: 'atkinson', label: i18n.t('FontAtkinson') || 'Atkinson Hyperlegible' },
+                { value: 'manrope', label: i18n.t('FontManrope') || 'Manrope' }
             ],
             layoutManager.getUiFont()
         )}
@@ -429,34 +724,6 @@ class SettingsPage extends Page {
             'jellyfin-fallback-font-select',
             [],
             storage.getItem('pref:jellyfinFallbackFont') || ''
-        )}
-                    </div>
-                </div>
-
-                <div class="setting-item">
-                    <div class="setting-label">
-                        <span class="setting-name" data-i18n="TextScale">${i18n.t('TextScale') || 'Text scale'}</span>
-                        <span class="setting-description" data-i18n="TextScaleDescription">${i18n.t('TextScaleDescription') || 'Adjust the size of all text and UI elements proportionally'}</span>
-                    </div>
-                    <div class="setting-control">
-                        ${this._renderDropdown(
-            'text-scale-select',
-            [
-                { value: '0.8', label: '80%' },
-                { value: '0.85', label: '85%' },
-                { value: '0.9', label: '90%' },
-                { value: '0.95', label: '95%' },
-                { value: '1', label: 'Normal (100%)' },
-                { value: '1.05', label: '105%' },
-                { value: '1.1', label: '110%' },
-                { value: '1.15', label: '115%' },
-                { value: '1.2', label: '120%' },
-                { value: '1.25', label: '125%' },
-                { value: '1.3', label: '130%' },
-                { value: '1.35', label: '135%' },
-                { value: '1.4', label: '140%' }
-            ],
-            layoutManager.getTextScale().toString()
         )}
                     </div>
                 </div>
@@ -704,6 +971,9 @@ class SettingsPage extends Page {
                     // Tinted background theme mapping closely with specific selected colors.
                     { value: 'tinted', label: i18n.t('ThemeTinted') || 'Tinted' },
 
+                    // Light Tinted theme providing a luminous, warm tinted base derived from accent color.
+                    { value: 'tinted-light', label: i18n.t('ThemeTintedLight') || 'Light Tinted' },
+
                     // Black OLED theme for extreme battery saving and deep contrast profiles.
                     { value: 'black', label: i18n.t('ThemeBlack') || 'Black (OLED)' },
 
@@ -740,6 +1010,57 @@ class SettingsPage extends Page {
                                         title="${matched.name}">
                                     <span class="theme-color-swatch-badge" style="background-color: ${matched.hex};"></span>
                                     <span class="btn-label" id="theme-color-btn-label">${escapeHtml(matched.name)}</span>
+                                </button>
+                            `;
+            })()}
+                    </div>
+                </div>
+
+                <!-- Lighter Background Mode (Tinted and Classic themes only) -->
+                <div class="setting-item ${!['tinted', 'tinted-light', 'classic-dark', 'classic-light'].includes(layoutManager.getThemeMode()) ? 'hidden' : ''}" id="lighter-background-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LighterBackground">${i18n.t('LighterBackground') || 'Lighter Background'}</span>
+                        <span class="setting-description" data-i18n="LighterBackgroundDescription">${i18n.t('LighterBackgroundDescription') || 'Swap the primary background with the alternate background for a lighter shade.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${layoutManager.getLighterBackground() ? 'active' : ''}" 
+                                id="toggle-lighter-background" 
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Loading Indicator Style Selection -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelLoaderStyle">${i18n.t('LabelLoaderStyle') || 'Loading Indicator Style'}</span>
+                        <span class="setting-description" data-i18n="LoaderStyleDescription">${i18n.t('LoaderStyleDescription') || 'Choose the visual animation style for loading spinners and indicators across the app.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${(() => {
+                const currentStyle = layoutManager.getLoaderStyle() || 'dots';
+                const styleNames = {
+                    'dots': i18n.t('LoaderStyleDots') || 'Pulsing Dots',
+                    'ring': i18n.t('LoaderStyleRing') || 'Rotating Ring',
+                    'dual-ring': i18n.t('LoaderStyleDualRing') || 'Dual Ring',
+                    'orbit': i18n.t('LoaderStyleOrbit') || 'Orbital Bead',
+                    'satellite': i18n.t('LoaderStyleSatellite') || 'Satellite Ring',
+                    'triple-ring': i18n.t('LoaderStyleTripleRing') || 'Triple Gyro',
+                    'dotted-ring': i18n.t('LoaderStyleDottedRing') || 'Dotted Eclipse',
+                    'eclipse-sweep': i18n.t('LoaderStyleEclipseSweep') || 'Crescent Sweep',
+                    'sonar-ring': i18n.t('LoaderStyleSonarRing') || 'Sonar Aperture',
+                    'push-pulse': i18n.t('LoaderStylePushPulse') || 'Push Pulse',
+                    'horizontal-dots': i18n.t('LoaderStyleHorizontalDots') || 'Fading Trio',
+                    'pulsing-grid': i18n.t('LoaderStylePulsingGrid') || 'Morphing Grid'
+                };
+                const activeName = styleNames[currentStyle] || 'Pulsing Dots';
+                return `
+                                <button class="setting-action-btn loader-style-select-btn" 
+                                        id="btn-loader-style-picker" 
+                                        tabindex="0"
+                                        data-focusable="true"
+                                        title="${escapeHtml(activeName)}">
+                                    <span class="btn-label" id="loader-style-btn-label">${escapeHtml(activeName)}</span>
                                 </button>
                             `;
             })()}
@@ -1286,7 +1607,7 @@ class SettingsPage extends Page {
         )}
                     </div>
                 </div>
-             
+
                 <div class="setting-item">
                     <div class="setting-label">
                         <span class="setting-name" data-i18n="OsdLayout">${i18n.t('OsdLayout') || 'OSD Layout'}</span>
@@ -1297,7 +1618,8 @@ class SettingsPage extends Page {
             'osd-layout-select',
             [
                 { value: 'left', label: i18n.t('OsdLayoutLeft') || 'Left Aligned (Default)' },
-                { value: 'centered', label: i18n.t('OsdLayoutCentered') || 'Centered' }
+                { value: 'centered', label: i18n.t('OsdLayoutCentered') || 'Centered' },
+                { value: 'hidden', label: i18n.t('OsdLayoutHidden') || 'Stealth / Anti-Spoiler (Hold Down to Reveal)' }
             ],
             PlayerSettings.get('osdLayout') || 'left'
         )}
@@ -1315,15 +1637,32 @@ class SettingsPage extends Page {
             'media-rows-layout-select',
             [
                 { value: 'classic', label: i18n.t('LayoutClassic') || 'Classic' },
-                { value: 'modern', label: i18n.t('LayoutExpandingPosters') || 'Expanding Posters' }
+                { value: 'modern', label: i18n.t('LayoutModern') || 'Modern' },
+                { value: 'expanded', label: i18n.t('LayoutExpandedPosters') || 'Modern Cards' },
+                { value: 'modern-posters', label: i18n.t('LayoutModernPosters') || 'Modern Posters' },
+                { value: 'expanding', label: i18n.t('LayoutExpandingPosters') || 'Expanding Posters' }
             ],
             layoutManager.getMediaRowsLayout() || 'classic'
         )}
                     </div>
                 </div>
 
-                <!-- Force Expandable Posters option: hidden unless media rows layout is modern/expanding posters -->
-                <div class="setting-item ${layoutManager.getMediaRowsLayout() === 'modern' ? '' : 'hidden'}">
+                <!-- Prefer Backdrops Over Thumbs option: hidden unless media rows layout is expanding or expanded -->
+                <div class="setting-item ${layoutManager.getMediaRowsLayout() === 'expanding' || layoutManager.getMediaRowsLayout() === 'expanded' ? '' : 'hidden'}" id="item-prefer-backdrops-over-thumbs">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="PreferBackdropsOverThumbs">${i18n.t('PreferBackdropsOverThumbs') || 'Use Backdrops Instead of Thumbs'}</span>
+                        <span class="setting-description" data-i18n="PreferBackdropsOverThumbsDescription">${i18n.t('PreferBackdropsOverThumbsDescription') || 'Prefer backdrop artwork over thumbnails for wide cards in Expanding and Expanded layouts.'}</span>
+                    </div>
+                    <div class="setting-control">
+                         <button class="toggle-switch ${storage.getItem('pref:preferBackdropsOverThumbs') === 'true' ? 'active' : ''}" 
+                                 id="toggle-prefer-backdrops-over-thumbs" 
+                                 tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Force Expandable Posters option: hidden unless media rows layout is expanding posters -->
+                <div class="setting-item ${layoutManager.getMediaRowsLayout() === 'expanding' ? '' : 'hidden'}" id="item-home-force-expandable-posters">
                     <div class="setting-label">
                         <span class="setting-name" data-i18n="HomeForceExpandablePosters">${i18n.t('HomeForceExpandablePosters') || 'Force Expandable Posters'}</span>
                         <span class="setting-description" data-i18n="HomeForceExpandablePostersDescription">${i18n.t('HomeForceExpandablePostersDescription') || 'Force all home screen rows (except My Media) to use portrait posters that expand horizontally on focus.'}</span>
@@ -1336,10 +1675,11 @@ class SettingsPage extends Page {
                     </div>
                 </div>
 
+                <!-- Details Page Layout (Movies & Series) -->
                 <div class="setting-item">
                     <div class="setting-label">
-                        <span class="setting-name" data-i18n="LabelDetailsLayout">${i18n.t('LabelDetailsLayout') || 'Details Page Layout'}</span>
-                        <span class="setting-description" data-i18n="DetailsLayoutDescription">${i18n.t('DetailsLayoutDescription') || 'Choose the layout mode for the item details page.'}</span>
+                        <span class="setting-name" data-i18n="LabelDetailsLayout">${i18n.t('LabelDetailsLayout') || 'Movies & Series Details Layout'}</span>
+                        <span class="setting-description" data-i18n="MovieDetailsLayoutDescription">${i18n.t('MovieDetailsLayoutDescription') || 'Choose the layout mode for movies and series details pages.'}</span>
                     </div>
                     <div class="setting-control">
                         ${this._renderDropdown(
@@ -1368,6 +1708,59 @@ class SettingsPage extends Page {
         )}
                     </div>
                 </div>
+
+                <!-- Details Page Layout (Seasons & Episodes) -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelSeasonEpisodeDetailsLayout">${i18n.t('LabelSeasonEpisodeDetailsLayout') || 'Seasons & Episodes Details Layout'}</span>
+                        <span class="setting-description" data-i18n="SeasonEpisodeDetailsLayoutDescription">${i18n.t('SeasonEpisodeDetailsLayoutDescription') || 'Choose the layout mode for season and episode details pages.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+            'season-episode-details-layout-select',
+            [
+                {
+                    value: 'posterLeft',
+                    label: i18n.t('OptionDetailsLayoutPosterLeft') || 'Poster Left Aligned (Default)'
+                },
+                {
+                    value: 'posterRight',
+                    label: i18n.t('OptionDetailsLayoutPosterRight') || 'Poster Right Aligned'
+                },
+                {
+                    value: 'backdropMinimal',
+                    label:
+                        i18n.t('OptionDetailsLayoutBackdropMinimal') || 'Cinematic Backdrop (Centered)'
+                },
+                {
+                    value: 'backdropLeft',
+                    label:
+                        i18n.t('OptionDetailsLayoutBackdropLeft') || 'Cinematic Backdrop (Left Aligned)'
+                }
+            ],
+            storage.getItem('pref:seasonEpisodeDetailsLayout') || storage.getItem('pref:detailsLayout') || 'posterLeft'
+        )}
+                    </div>
+                </div>
+
+                <!-- Alphabet Selector Placement preference for Library view -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelAlphaPickerPosition">${i18n.t('LabelAlphaPickerPosition') || 'Alphabet Selector Position'}</span>
+                        <span class="setting-description" data-i18n="AlphaPickerPositionDescription">${i18n.t('AlphaPickerPositionDescription') || 'Choose the layout and placement of the alphabet quick-jump selector in library views.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+            'alpha-picker-position-select',
+            [
+                { value: 'top', label: i18n.t('OptionAlphaPickerTop') || 'Top (Horizontal)' },
+                { value: 'right', label: i18n.t('OptionAlphaPickerRight') || 'Right Side (Vertical)' }
+            ],
+            layoutManager.getAlphaPickerPosition() || 'top'
+        )}
+                    </div>
+                </div>
+             
 
                 <!-- Player OSD Section -->
                 <h3 class="setting-section-title" data-i18n="PlayerOSD">${i18n.t('PlayerOSD')}</h3>
@@ -1467,18 +1860,82 @@ class SettingsPage extends Page {
                     </div>
                     <div class="setting-control">
                         ${(() => {
-                const isModernLayout = layoutManager.getMediaRowsLayout() === 'modern';
-                const cardSizeOptions = isModernLayout
-                    ? [
-                        { value: '1.2', label: '120%' },
+                const mediaRowsLayout = layoutManager.getMediaRowsLayout();
+                const isExpanded = mediaRowsLayout === 'expanded';
+                const isModernPosters = mediaRowsLayout === 'modern-posters';
+                const isModern = mediaRowsLayout === 'modern';
+                const isExpanding = mediaRowsLayout === 'expanding';
+
+                let cardSizeOptions;
+                let defaultValue;
+                let storageKey;
+
+                if (isExpanded) {
+                    cardSizeOptions = [
+                        { value: '1', label: '100%' },
+                        { value: '1.05', label: '105%' },
+                        { value: '1.1', label: '110%' },
+                        { value: '1.15', label: '115%' },
+                        { value: '1.2', label: '120% (Default)' },
                         { value: '1.25', label: '125%' },
-                        { value: '1.3', label: '130% (Default)' },
+                        { value: '1.3', label: '130%' },
                         { value: '1.35', label: '135%' },
                         { value: '1.4', label: '140%' },
                         { value: '1.45', label: '145%' },
                         { value: '1.5', label: '150%' }
-                    ]
-                    : [
+                    ];
+                    defaultValue = '1.2';
+                    storageKey = 'pref:expandedCardSizeScale';
+                } else if (isModernPosters) {
+                    cardSizeOptions = [
+                        { value: '1', label: '100%' },
+                        { value: '1.05', label: '105%' },
+                        { value: '1.1', label: '110%' },
+                        { value: '1.15', label: '115%' },
+                        { value: '1.2', label: '120% (Default)' },
+                        { value: '1.25', label: '125%' },
+                        { value: '1.3', label: '130%' },
+                        { value: '1.35', label: '135%' },
+                        { value: '1.4', label: '140%' },
+                        { value: '1.45', label: '145%' },
+                        { value: '1.5', label: '150%' }
+                    ];
+                    defaultValue = '1.2';
+                    storageKey = 'pref:modernPostersCardSizeScale';
+                } else if (isModern) {
+                    cardSizeOptions = [
+                        { value: '1', label: '100%' },
+                        { value: '1.05', label: '105%' },
+                        { value: '1.1', label: '110%' },
+                        { value: '1.15', label: '115%' },
+                        { value: '1.2', label: '120% (Default)' },
+                        { value: '1.25', label: '125%' },
+                        { value: '1.3', label: '130%' },
+                        { value: '1.35', label: '135%' },
+                        { value: '1.4', label: '140%' },
+                        { value: '1.45', label: '145%' },
+                        { value: '1.5', label: '150%' }
+                    ];
+                    defaultValue = '1.2';
+                    storageKey = 'pref:modernCardSizeScale';
+                } else if (isExpanding) {
+                    cardSizeOptions = [
+                        { value: '1', label: '100% (Default)' },
+                        { value: '1.05', label: '105%' },
+                        { value: '1.1', label: '110%' },
+                        { value: '1.15', label: '115%' },
+                        { value: '1.2', label: '120%' },
+                        { value: '1.25', label: '125%' },
+                        { value: '1.3', label: '130%' },
+                        { value: '1.35', label: '135%' },
+                        { value: '1.4', label: '140%' },
+                        { value: '1.45', label: '145%' },
+                        { value: '1.5', label: '150%' }
+                    ];
+                    defaultValue = '1';
+                    storageKey = 'pref:expandingCardSizeScale';
+                } else {
+                    cardSizeOptions = [
                         { value: '1', label: '100% (Small / Default)' },
                         { value: '1.05', label: '105%' },
                         { value: '1.1', label: '110%' },
@@ -1491,10 +1948,10 @@ class SettingsPage extends Page {
                         { value: '1.45', label: '145%' },
                         { value: '1.5', label: '150%' }
                     ];
-                const defaultValue = isModernLayout ? '1.3' : '1';
-                const storageKey = isModernLayout
-                    ? 'pref:modernCardSizeScale'
-                    : 'pref:classicCardSizeScale';
+                    defaultValue = '1';
+                    storageKey = 'pref:classicCardSizeScale';
+                }
+
                 return this._renderDropdown(
                     'classic-card-size-scale-select',
                     cardSizeOptions,
@@ -1541,7 +1998,8 @@ class SettingsPage extends Page {
                         <span class="setting-description" data-i18n="SwapEpisodeTitlesDescription">${i18n.t('SwapEpisodeTitlesDescription') || 'Display the episode name as the card title and the show name as the subtitle.'}</span>
                     </div>
                     <div class="setting-control">
-                         <button class="toggle-switch ${storage.getItem('pref:swapEpisodeTitles') === 'true' ? 'active' : ''}" 
+                         <!-- Toggle switch for swapping episode title & subtitle (defaults to enabled/active) -->
+                         <button class="toggle-switch ${storage.getItem('pref:swapEpisodeTitles') !== 'false' ? 'active' : ''}" 
                                  id="toggle-swap-episode-titles" 
                                  tabindex="0">
                         </button>
@@ -1631,6 +2089,19 @@ class SettingsPage extends Page {
                     <div class="setting-control">
                          <button class="toggle-switch ${storage.getItem('pref:hideEpisodeCounts') === 'true' ? 'active' : ''}" 
                                  id="toggle-hide-episode-counts" 
+                                 tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="HideProgressBar">${i18n.t('HideProgressBar') || 'Hide Progress Bar'}</span>
+                        <span class="setting-description" data-i18n="HideProgressBarDescription">${i18n.t('HideProgressBarDescription') || 'Hide playback progress indicators on media cards.'}</span>
+                    </div>
+                    <div class="setting-control">
+                         <button class="toggle-switch ${storage.getItem('pref:hideProgressBar') === 'true' ? 'active' : ''}" 
+                                 id="toggle-hide-progress-bar" 
                                  tabindex="0">
                         </button>
                     </div>
@@ -1728,30 +2199,80 @@ class SettingsPage extends Page {
                     </div>
                 </div>
 
-                <div class="setting-item ${storage.getItem('pref:detailsLayout') === 'backdropMinimal' || storage.getItem('pref:detailsLayout') === 'backdropLeft' ? 'hidden' : ''}" id="details-title-style-container">
+                ${(() => {
+                // Check if both media types are using cinematic backdrops; hide title style dropdown only if both are
+                const movieLayout = storage.getItem('pref:detailsLayout') || 'posterLeft';
+                const seasonLayout = storage.getItem('pref:seasonEpisodeDetailsLayout') || movieLayout;
+                const isMovieBackdrop = movieLayout === 'backdropMinimal' || movieLayout === 'backdropLeft';
+                const isSeasonBackdrop = seasonLayout === 'backdropMinimal' || seasonLayout === 'backdropLeft';
+                const hideTitleStyle = isMovieBackdrop && isSeasonBackdrop;
+                return `
+                <div class="setting-item ${hideTitleStyle ? 'hidden' : ''}" id="details-title-style-container">
                     <div class="setting-label">
                         <span class="setting-name" data-i18n="LabelDetailsTitleStyle">${i18n.t('LabelDetailsTitleStyle') || 'Title and Icon Style'}</span>
                         <span class="setting-description" data-i18n="DetailsTitleStyleDescription">${i18n.t('DetailsTitleStyleDescription') || 'Choose how the title and logo/icon are displayed on the details page.'}</span>
                     </div>
                     <div class="setting-control">
                         ${this._renderDropdown(
-                'details-title-style-select',
+                    'details-title-style-select',
+                    [
+                        {
+                            value: 'both',
+                            label: i18n.t('OptionDetailsTitleStyleBoth') || 'Text Title and Icon'
+                        },
+                        {
+                            value: 'logo-only',
+                            label: i18n.t('OptionDetailsTitleStyleLogoOnly') || 'Only Icon as Title (Large)'
+                        },
+                        {
+                            value: 'text-only',
+                            label: i18n.t('OptionDetailsTitleStyleTextOnly') || 'Only Text Title'
+                        }
+                    ],
+                    storage.getItem('pref:detailsTitleStyle') || 'both'
+                )}
+                    </div>
+                </div>`;
+            })()}
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelDetailsOverviewMaxLines">${i18n.t('LabelDetailsOverviewMaxLines') || 'Overview Max Lines'}</span>
+                        <span class="setting-description" data-i18n="DetailsOverviewMaxLinesDescription">${i18n.t('DetailsOverviewMaxLinesDescription') || 'Configure the maximum number of lines for overviews and biographies on details and person pages.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+                'details-overview-max-lines-select',
                 [
+                    { value: '2', label: i18n.t('ValueLines', [2]) || '2 lines' },
+                    { value: '3', label: i18n.t('ValueLines', [3]) || '3 lines' },
+                    { value: '4', label: i18n.t('ValueLines', [4]) || '4 lines' },
+                    { value: '5', label: i18n.t('ValueLines', [5]) || '5 lines' },
                     {
-                        value: 'both',
-                        label: i18n.t('OptionDetailsTitleStyleBoth') || 'Text Title and Icon'
+                        value: '6',
+                        label: `${i18n.t('ValueLines', [6]) || '6 lines'} (${i18n.t('Default') || 'Default'})`
                     },
-                    {
-                        value: 'logo-only',
-                        label: i18n.t('OptionDetailsTitleStyleLogoOnly') || 'Only Icon as Title (Large)'
-                    },
-                    {
-                        value: 'text-only',
-                        label: i18n.t('OptionDetailsTitleStyleTextOnly') || 'Only Text Title'
-                    }
+                    { value: '7', label: i18n.t('ValueLines', [7]) || '7 lines' },
+                    { value: '8', label: i18n.t('ValueLines', [8]) || '8 lines' },
+                    { value: '10', label: i18n.t('ValueLines', [10]) || '10 lines' },
+                    { value: '12', label: i18n.t('ValueLines', [12]) || '12 lines' },
+                    { value: 'none', label: i18n.t('OptionDetailsOverviewLinesNone') || i18n.t('Unlimited') || 'Unlimited (Full Overview)' }
                 ],
-                storage.getItem('pref:detailsTitleStyle') || 'both'
+                storage.getItem('pref:detailsOverviewMaxLines') || '6'
             )}
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelDetailsAlwaysShowSeeMore">${i18n.t('LabelDetailsAlwaysShowSeeMore') || 'Always Show Detailed View Button'}</span>
+                        <span class="setting-description" data-i18n="DetailsAlwaysShowSeeMoreDescription">${i18n.t('DetailsAlwaysShowSeeMoreDescription') || 'Always display the Detailed View button on details and person pages even if the description fits without truncation.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${storage.getItem('pref:detailsAlwaysShowSeeMore') === 'true' ? 'active' : ''}" 
+                                id="toggle-details-always-show-see-more" 
+                                tabindex="0">
+                        </button>
                     </div>
                 </div>
 
@@ -1763,6 +2284,19 @@ class SettingsPage extends Page {
                     <div class="setting-control">
                         <button class="toggle-switch ${storage.getItem('pref:hideGhostMode') === 'true' ? 'active' : ''}" 
                                 id="toggle-hide-ghost-mode" 
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="ShowActionTooltips">${i18n.t('ShowActionTooltips') || 'Show Button Names Tooltip'}</span>
+                        <span class="setting-description" data-i18n="ShowActionTooltipsDescription">${i18n.t('ShowActionTooltipsDescription') || 'Display a label under focused action buttons on the details page.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${storage.getItem('pref:showActionTooltips') !== 'false' ? 'active' : ''}" 
+                                id="toggle-show-action-tooltips" 
                                 tabindex="0">
                         </button>
                     </div>
@@ -1871,24 +2405,28 @@ class SettingsPage extends Page {
                 'rich-metadata-select',
                 [
                     { value: 'all', label: i18n.t('OptionRichMetadataAll') || 'Show Full Rich Metadata' },
+                    // Option to hide tags and directors while showing genres, studios, and writers
                     {
                         value: 'genres-studios-writers',
                         label:
-                            i18n.t('OptionRichMetadataGenresStudiosWriters') ||
-                            'Show Genres, Studios & Writers'
+                            i18n.t('OptionRichMetadataHideTagsOnly') ||
+                            'Hide Tags Only'
                     },
+                    // Option to hide tags and studios while showing genres and writers
                     {
                         value: 'genres-writers',
-                        label: i18n.t('OptionRichMetadataGenresWriters') || 'Show Genres & Writers'
+                        label: i18n.t('OptionRichMetadataHideTagsAndStudios') || 'Hide Tags and Studios'
                     },
+                    // Option to display genres alone and suppress other metadata sections
                     {
                         value: 'genres-only',
-                        label: i18n.t('OptionRichMetadataGenresOnly') || 'Show Only Genres'
+                        label: i18n.t('OptionRichMetadataShowGenresOnly') || 'Show Genres Only'
                     },
+                    // Option to hide all rich metadata completely
                     { value: 'none', label: i18n.t('OptionRichMetadataNone') || 'Hide All' }
                 ],
                 storage.getItem('pref:richMetadataStyle') ||
-                (storage.getItem('pref:hideRichMetadata') === 'true' ? 'none' : 'all')
+                (storage.getItem('pref:hideRichMetadata') === 'true' ? 'none' : 'genres-studios-writers')
             )}
                     </div>
                 </div>
@@ -1944,6 +2482,52 @@ class SettingsPage extends Page {
                         </button>
                     </div>
                 </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name">${i18n.t('ShowWatchProviders')}</span>
+                        <span class="setting-description">${i18n.t('ShowWatchProvidersDescription')}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${storage.getItem('pref:showWatchProviders') === 'true' ? 'active' : ''}"
+                            id="toggle-show-watch-providers" tabindex="0" role="switch"
+                            aria-label="${i18n.t('ShowWatchProviders')}"
+                            aria-checked="${storage.getItem('pref:showWatchProviders') === 'true'}"></button>
+                    </div>
+                </div>
+
+                <h3 class="setting-section-title" data-i18n="Seerr">${i18n.t('Seerr') || 'Seerr'}</h3>
+
+                <!-- Seerr Recommendations row on details pages (enabled by default) -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="SeerrRecommendations">${i18n.t('SeerrRecommendations') || 'Seerr Recommendations'}</span>
+                        <span class="setting-description" data-i18n="SeerrRecommendationsDescription">${i18n.t('SeerrRecommendationsDescription') || 'Show recommendations from Seerr on media details pages.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${storage.getItem('pref:SeerrRecommendations') !== 'false' ? 'active' : ''}"
+                            id="toggle-show-seerr-recommendations" tabindex="0" role="switch"
+                            aria-label="${i18n.t('SeerrRecommendations') || 'Seerr Recommendations'}"
+                            aria-checked="${storage.getItem('pref:SeerrRecommendations') !== 'false'}"></button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name">${i18n.t('WatchProvidersRegion')}</span>
+                        <span class="setting-description">${i18n.t('WatchProvidersRegionDescription')}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+                'watch-provider-region-select',
+                [watchProviderRegion(storage.getItem('pref:watchProviderRegion'))].map((value) => ({
+                    value,
+                    label: watchProviderRegionName(value, i18n.currentLang)
+                })),
+                watchProviderRegion(storage.getItem('pref:watchProviderRegion'))
+            )}
+                    </div>
+                </div>
             </div>
         `;
     }
@@ -1976,18 +2560,21 @@ class SettingsPage extends Page {
                         ${this._renderDropdown(
             'home-rows-limit-select',
             [
-                { value: 30, label: i18n.t('ItemCountValue', [30]) || '30 items' },
-                { value: 25, label: i18n.t('ItemCountValue', [25]) || '25 items' },
-                { value: 20, label: i18n.t('ItemCountValue', [20]) || '20 items' },
-                { value: 15, label: i18n.t('ItemCountValue', [15]) || '15 items' },
+                { value: 8, label: i18n.t('ItemCountValue', [8]) || '8 items' },
+                { value: 10, label: i18n.t('ItemCountValue', [10]) || '10 items' },
                 {
                     value: 12,
                     label:
                         (i18n.t('ItemCountValue', [12]) || '12 items') +
                         ` (${i18n.t('Default') || 'Default'})`
                 },
-                { value: 10, label: i18n.t('ItemCountValue', [10]) || '10 items' },
-                { value: 8, label: i18n.t('ItemCountValue', [8]) || '8 items' }
+                { value: 15, label: i18n.t('ItemCountValue', [15]) || '15 items' },
+                { value: 20, label: i18n.t('ItemCountValue', [20]) || '20 items' },
+                { value: 25, label: i18n.t('ItemCountValue', [25]) || '25 items' },
+                { value: 30, label: i18n.t('ItemCountValue', [30]) || '30 items' },
+                { value: 50, label: i18n.t('ItemCountValue', [50]) || '50 items' },
+                { value: 100, label: i18n.t('ItemCountValue', [100]) || '100 items' },
+                { value: 200, label: i18n.t('ItemCountValue', [200]) || '200 items' }
             ],
             parseInt(storage.getItem('pref:homeRowsLimit') || 12, 10)
         )}
@@ -2074,6 +2661,20 @@ class SettingsPage extends Page {
                          <button class="toggle-switch ${storage.getItem('pref:useTrendingCollectionName') === 'true' ? 'active' : ''}" 
                                  id="toggle-use-trending-collection-name" 
                                  tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item" id="setting-custom-collections" style="display: ${storage.getItem('pref:enableCollectionRows') === 'true' ? '' : 'none'}">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelCustomCollectionRows">${i18n.t('LabelCustomCollectionRows')}</span>
+                        <span class="setting-description" data-i18n="LabelCustomCollectionRowsDesc">${i18n.t('LabelCustomCollectionRowsDesc')}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="setting-action-btn select-btn" id="btn-manage-custom-collections" tabindex="0" data-focusable="true">
+                            <span class="btn-label" id="custom-collections-count-label">
+                                ${this._getCustomCollectionsLabel()}
+                            </span>
                         </button>
                     </div>
                 </div>
@@ -2188,6 +2789,29 @@ class SettingsPage extends Page {
                                  id="toggle-hide-livetv-home" 
                                  tabindex="0">
                         </button>
+                    </div>
+                </div>
+
+                <!-- Default Live TV Tab Setting -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="DefaultLiveTvTab">${i18n.t('DefaultLiveTvTab') || 'Default Live TV Tab'}</span>
+                        <span class="setting-description" data-i18n="DefaultLiveTvTabDescription">${i18n.t('DefaultLiveTvTabDescription') || 'Choose which tab is selected by default when opening the Live TV page.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+                'default-livetv-tab-select',
+                [
+                    {
+                        value: 'suggestions',
+                        label: (i18n.t('Suggestions') || 'Suggestions') + ` (${i18n.t('Default') || 'Default'})`
+                    },
+                    { value: 'guide', label: i18n.t('Guide') || 'Guide' },
+                    { value: 'channels', label: i18n.t('Channels') || 'Channels' },
+                    { value: 'recordings', label: i18n.t('Recordings') || 'Recordings' }
+                ],
+                storage.getItem('pref:defaultLiveTvTab') || 'suggestions'
+            )}
                     </div>
                 </div>
 
@@ -2369,6 +2993,31 @@ class SettingsPage extends Page {
                     </div>
                 </div>
 
+                <div class="setting-item" id="hero-carousel-vignette-item" style="display: ${storage.getItem('pref:heroCarousel') !== 'false' ? '' : 'none'}">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="HeroCarouselVignette">${i18n.t('HeroCarouselVignette') || 'Text Vignette Contrast'}</span>
+                        <span class="setting-description" data-i18n="HeroCarouselVignetteDescription">${i18n.t('HeroCarouselVignetteDescription') || 'Adjust the dark vignette gradient behind carousel titles from completely transparent to 90% dark.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+                'hero-carousel-vignette-select',
+                [
+                    { value: 'transparent', label: i18n.t('Transparent') || 'Transparent (0%)' },
+                    { value: '10', label: '10%' },
+                    { value: '20', label: '20%' },
+                    { value: '30', label: '30%' },
+                    { value: '40', label: '40%' },
+                    { value: '50', label: '50%' },
+                    { value: '60', label: '60%' },
+                    { value: '70', label: `70% (${i18n.t('Default') || 'Default'})` },
+                    { value: '80', label: '80%' },
+                    { value: '90', label: '90%' }
+                ],
+                layoutManager.getHeroVignette()
+            )}
+                    </div>
+                </div>
+
                 <div class="setting-item" id="hero-carousel-zoom-item" style="display: ${storage.getItem('pref:heroCarousel') !== 'false' ? '' : 'none'}">
                     <div class="setting-label">
                         <span class="setting-name" data-i18n="HeroCarouselZoom">${i18n.t('HeroCarouselZoom') || 'Enable Zoom Effect'}</span>
@@ -2382,7 +3031,25 @@ class SettingsPage extends Page {
                     </div>
                 </div>
 
-                <div class="setting-item" id="hero-carousel-indicator-animation-item" style="display: ${storage.getItem('pref:heroCarousel') !== 'false' ? '' : 'none'}">
+                <div class="setting-item" id="hero-carousel-indicator-style-item" style="display: ${storage.getItem('pref:heroCarousel') !== 'false' ? '' : 'none'}">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="HeroCarouselIndicatorStyle">${i18n.t('HeroCarouselIndicatorStyle') || 'Indicator Style'}</span>
+                        <span class="setting-description" data-i18n="HeroCarouselIndicatorStyleDescription">${i18n.t('HeroCarouselIndicatorStyleDescription') || 'Visual style of the hero carousel position indicators.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+                'hero-carousel-indicator-style-select',
+                [
+                    { value: 'dots', label: i18n.t('IndicatorStyleDots') || 'Simple Dots' },
+                    { value: 'lines', label: i18n.t('IndicatorStyleLines') || 'Lines' },
+                    { value: 'progress', label: i18n.t('IndicatorStyleProgress') || 'Progress Pill' }
+                ],
+                storage.getItem('pref:heroCarouselIndicatorStyle') || 'dots'
+            )}
+                    </div>
+                </div>
+
+                <div class="setting-item" id="hero-carousel-indicator-animation-item" style="display: ${storage.getItem('pref:heroCarousel') !== 'false' && (storage.getItem('pref:heroCarouselIndicatorStyle') || 'dots') === 'progress' ? '' : 'none'}">
                     <div class="setting-label">
                         <span class="setting-name" data-i18n="HeroCarouselIndicatorAnimation">${i18n.t('HeroCarouselIndicatorAnimation') || 'Indicator Animation'}</span>
                         <span class="setting-description" data-i18n="HeroCarouselIndicatorAnimationDescription">${i18n.t('HeroCarouselIndicatorAnimationDescription') || 'Enable the progress bar animation for the carousel dots.'}</span>
@@ -2440,7 +3107,7 @@ class SettingsPage extends Page {
                 { value: 'floating-buttons', label: i18n.t('LayoutFloatingButtonsSidebar') || 'Floating Buttons' },
                 { value: 'floating-island', label: i18n.t('LayoutFloatingIslandSidebar') || 'Floating Island' }
             ],
-            layoutManager.getSidebarLayout() || 'modern'
+            layoutManager.getSidebarLayout() || 'modern-collapsed'
         )}
                     </div>
                 </div>
@@ -2594,6 +3261,36 @@ class SettingsPage extends Page {
                     </div>
                 </div>
 
+                <!-- Bottom Navigation Bar Color Section (Mobile Portrait) -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelBottomNavBarColor">${i18n.t('LabelBottomNavBarColor') || 'Bottom Nav Bar Color'}</span>
+                        <span class="setting-description" data-i18n="BottomNavBarColorDescription">${i18n.t('BottomNavBarColorDescription') || 'Choose the background transparency or style for the mobile bottom navigation bar.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+            'bottom-nav-bar-color-select',
+            [
+                { value: 'theme', label: i18n.t('OptionCollapsedSidebarColorTheme') || 'Follow Theme' },
+                { value: 'black', label: i18n.t('OptionCollapsedSidebarColorBlack') || 'Black' },
+                {
+                    value: 'semi',
+                    label: i18n.t('OptionCollapsedSidebarColorSemi') || 'Semi-transparent'
+                },
+                {
+                    value: 'tinted-semi',
+                    label: i18n.t('OptionCollapsedSidebarColorTintedSemi') || 'Tinted Semi-transparent'
+                },
+                {
+                    value: 'transparent',
+                    label: i18n.t('OptionCollapsedSidebarColorTransparent') || 'Transparent'
+                }
+            ],
+            storage.getItem('pref:bottomNavBarColor') || storage.getItem('pref:collapsedSidebarColor') || 'theme'
+        )}
+                    </div>
+                </div>
+
                 <!-- Litefin Logo Section -->
                 <div class="setting-item">
                     <div class="setting-label">
@@ -2618,6 +3315,25 @@ class SettingsPage extends Page {
                 if (val === 'false') return 'visible';
                 return val;
             })()
+        )}
+                    </div>
+                </div>
+                
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="SidebarLogoColor">${i18n.t('SidebarLogoColor') || 'Sidebar Logo Color'}</span>
+                        <span class="setting-description" data-i18n="SidebarLogoColorDescription">${i18n.t('SidebarLogoColorDescription') || 'Choose the color for the sidebar Litefin logo.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+            'sidebar-logo-color-select',
+            [
+                { value: 'icon-colors', label: i18n.t('SidebarColorIconColors') || 'Icon Colors' },
+                { value: 'follow-theme', label: i18n.t('SidebarColorFollowTheme') || 'Follow Theme' },
+                { value: 'white', label: i18n.t('SidebarColorWhite') || 'White' },
+                { value: 'black', label: i18n.t('SidebarColorBlack') || 'Black' }
+            ],
+            layoutManager.getSidebarLogoColor()
         )}
                     </div>
                 </div>
@@ -2695,6 +3411,8 @@ class SettingsPage extends Page {
         const currentBackend = PlayerSettings.get('playerBackend') || 'auto';
         const skipForward = PlayerSettings.get('skipForwardLength') || 30000;
         const skipBack = PlayerSettings.get('skipBackLength') || 10000;
+        // Resume rewind setting: 0 = disabled (None), 5000 = 5s, 10000 = 10s, etc.
+        const resumeRewind = PlayerSettings.get('resumeRewindLength') || 0;
         const currentAudioNormalization = PlayerSettings.get('audioNormalization') || 'TrackGain';
 
         const caps = getDeviceCapabilities();
@@ -2751,19 +3469,91 @@ class SettingsPage extends Page {
                     </div>
                     <div class="setting-control">
                         ${(() => {
-                const options = [
-                    { value: 'auto', label: i18n.t('AutoRecommended') },
-                    { value: 'html5', label: i18n.t('BackendWeb') }
-                ];
-                if (platformInfo.isTizen) {
-                    options.push({ value: 'avplay', label: i18n.t('BackendTizen') });
+                // Determine the highest-fidelity, native video backend recommended for the active platform
+                const recommendedBackend = typeof PlayerSettings.getRecommendedBackend === 'function'
+                    ? PlayerSettings.getRecommendedBackend()
+                    : (() => {
+                        if (platformInfo.isAndroid) return 'exoplayer';
+                        if (platformInfo.isTizen) return 'avplay';
+                        if (platformInfo.isWebOS) return 'webos';
+                        if ((platformInfo.isDesktop || platformInfo.isWeb) && platformInfo.hasWebCodecsSupport) return 'movi';
+                        return 'html5';
+                    })();
+
+                // Extract localized '(Recommended)' string from AutoRecommended translation across all 106 languages
+                const autoRec = i18n.t('AutoRecommended') || '';
+                const recMatch = autoRec.match(/\((.+?)\)|（(.+?)）/);
+                const recWord = (recMatch && (recMatch[1] || recMatch[2])) || 'Recommended';
+                const recSuffix = ` (${recWord})`;
+
+                // Assemble available options without the generic 'auto' option
+                const options = [];
+
+                // Native hardware backends
+                const hasExoBridge = typeof window !== 'undefined' && Boolean(
+                    window.LitefinExoPlayer ||
+                    window.LitefinAndroid ||
+                    window.__TAURI_INTERNALS__?.invoke ||
+                    window.__TAURI__?.core?.invoke
+                );
+                if (platformInfo.isAndroid && (hasExoBridge || platformInfo._platform === 'android')) {
+                    const base = i18n.t('BackendExoPlayer') || 'Media3 ExoPlayer (Android Native)';
+                    options.push({
+                        value: 'exoplayer',
+                        label: recommendedBackend === 'exoplayer' ? `${base}${recSuffix}` : base
+                    });
+                } else if (platformInfo.isTizen) {
+                    const base = i18n.t('BackendTizen') || 'Tizen Native (Avplay)';
+                    options.push({
+                        value: 'avplay',
+                        label: recommendedBackend === 'avplay' ? `${base}${recSuffix}` : base
+                    });
                 } else if (platformInfo.isWebOS) {
-                    options.push({ value: 'webos', label: i18n.t('BackendWebOS') });
+                    const base = i18n.t('BackendWebOS') || 'LG Native (webOS Player)';
+                    options.push({
+                        value: 'webos',
+                        label: recommendedBackend === 'webos' ? `${base}${recSuffix}` : base
+                    });
                 }
-                return this._renderDropdown('player-backend-select', options, currentBackend);
+
+                // WebCodecs hardware accelerated player (Movi)
+                // Excluded on television builds (Tizen and webOS) where Movi is replaced with a stub
+                if (platformInfo.hasWebCodecsSupport && !platformInfo.isTizen && !platformInfo.isWebOS) {
+                    const base = i18n.t('BackendMovi') || 'Movi Player (MKV/WebCodecs)';
+                    options.push({
+                        value: 'movi',
+                        label: recommendedBackend === 'movi' ? `${base}${recSuffix}` : base
+                    });
+                }
+
+                // Universal browser video backend (HTML5)
+                const html5Base = i18n.t('BackendWeb') || 'Web (HTML5 Player)';
+                options.push({
+                    value: 'html5',
+                    label: recommendedBackend === 'html5' ? `${html5Base}${recSuffix}` : html5Base
+                });
+
+                // If currently stored backend setting is 'movi' but WebCodecs is not supported or on TV builds,
+                // or 'exoplayer' without native bridge, fall back to 'html5'. If backend setting was legacy 'auto'
+                // or unconfigured or missing from available build options, re-select and bind directly to recommended.
+                const effectiveBackend = (currentBackend === 'movi' && (!platformInfo.hasWebCodecsSupport || platformInfo.isTizen || platformInfo.isWebOS))
+                    ? 'html5'
+                    : (currentBackend === 'exoplayer' && !hasExoBridge && !platformInfo.isAndroid)
+                        ? 'html5'
+                        : (currentBackend === 'auto' || !currentBackend || !options.some(o => o.value === currentBackend))
+                            ? recommendedBackend
+                            : currentBackend;
+
+                // Re-select and persist if user had previously selected or stored 'auto' or an unavailable backend
+                if (currentBackend === 'auto' || (currentBackend && currentBackend !== effectiveBackend && !options.some(o => o.value === currentBackend))) {
+                    PlayerSettings.set('playerBackend', effectiveBackend);
+                }
+
+                return this._renderDropdown('player-backend-select', options, effectiveBackend);
             })()}
                     </div>
                 </div>
+
 
                 <div class="setting-item">
                     <div class="setting-label">
@@ -2789,6 +3579,26 @@ class SettingsPage extends Page {
                         <button class="toggle-switch ${PlayerSettings.get('awaitTracksBeforePlayback') ? 'active' : ''}" 
                                 id="toggle-await-tracks-before-playback" 
                                 data-setting="awaitTracksBeforePlayback"
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <!-- ============================================================
+                     PREFER DIRECT PLAY AUDIO TRACK (AUTO-SELECTION)
+                     Automatically pick an audio track that does not require
+                     transcoding if the container's default track (e.g. TrueHD or DTS)
+                     is unsupported by hardware.
+                     ============================================================ -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="PreferDirectPlayAudio">${i18n.t('PreferDirectPlayAudio') || 'Prefer Direct Play Audio'}</span>
+                        <span class="setting-description" data-i18n="PreferDirectPlayAudioDescription">${i18n.t('PreferDirectPlayAudioDescription') || 'Automatically select an audio track that plays directly without transcoding when the default track (e.g. TrueHD or DTS) is unsupported by hardware.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${PlayerSettings.get('preferDirectPlayAudio') ? 'active' : ''}" 
+                                id="toggle-prefer-direct-play-audio" 
+                                data-setting="preferDirectPlayAudio"
                                 tabindex="0">
                         </button>
                     </div>
@@ -2842,15 +3652,46 @@ class SettingsPage extends Page {
 
                 <div class="setting-item">
                     <div class="setting-label">
-                        <span class="setting-name" data-i18n="LabelAudioLanguagePreference">${i18n.t('LabelAudioLanguagePreference')}</span>
-                        <span class="setting-description" data-i18n="PreferredAudioLanguageDescription">${i18n.t('PreferredAudioLanguageDescription')}</span>
+                        <span class="setting-name" data-i18n="PausePlaybackOnScrub">${i18n.t('PausePlaybackOnScrub') || 'Pause playback while scrubbing'}</span>
+                        <span class="setting-description" data-i18n="PausePlaybackOnScrubDescription">${i18n.t('PausePlaybackOnScrubDescription') || 'Pause playback when scrubbing the seek bar and resume when finished.'}</span>
                     </div>
                     <div class="setting-control">
-                        ${this._renderDropdown(
-                'audio-lang-select',
-                [{ value: 'Default', label: i18n.t('Default') }, ...this.prefLanguages],
-                storage.getItem('pref:audioLang') || 'Default'
-            )}
+                        <button class="toggle-switch ${PlayerSettings.get('pausePlaybackOnScrub') ? 'active' : ''}"
+                                id="toggle-pause-on-scrub" tabindex="0"></button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="EnableSeekAcceleration">${i18n.t('EnableSeekAcceleration') || 'Accelerate seek speed'}</span>
+                        <span class="setting-description" data-i18n="EnableSeekAccelerationDescription">${i18n.t('EnableSeekAccelerationDescription') || 'Gradually increase seek speed (up to 10x) when holding directional buttons on the timeline.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${PlayerSettings.get('enableSeekAcceleration') ? 'active' : ''}"
+                                id="toggle-enable-seek-acceleration" tabindex="0"></button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="ResetSeekSpeedOnDirectionChange">${i18n.t('ResetSeekSpeedOnDirectionChange') || 'Reset seek speed on direction change'}</span>
+                        <span class="setting-description" data-i18n="ResetSeekSpeedOnDirectionChangeDescription">${i18n.t('ResetSeekSpeedOnDirectionChangeDescription') || 'Reset accelerated seek speed back to 1x when reversing direction during timeline scrubbing.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${PlayerSettings.get('resetSeekSpeedOnDirectionChange') ? 'active' : ''}"
+                                id="toggle-reset-seek-speed-on-direction-change" tabindex="0"></button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelAudioLanguagePreference">${i18n.t('LabelAudioLanguagePreference')}</span>
+                        <span class="setting-description" data-i18n="AudioLanguageFallbackDescription">${i18n.t('AudioLanguageFallbackDescription')}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="setting-action-btn audio-fallback-select-btn" id="audio-fallback-languages-btn" tabindex="0" data-focusable="true">
+                            <span class="btn-label">${this._getAudioPreferencesSummaryLabel()}</span>
+                        </button>
                     </div>
                 </div>
 
@@ -2866,6 +3707,7 @@ class SettingsPage extends Page {
                     { value: 5000, label: i18n.t('Seconds', ['5']) },
                     { value: 10000, label: i18n.t('Seconds', ['10']) },
                     { value: 15000, label: i18n.t('Seconds', ['15']) },
+                    { value: 20000, label: i18n.t('Seconds', ['20']) },
                     { value: 30000, label: i18n.t('Seconds', ['30']) },
                     { value: 60000, label: i18n.t('Seconds', ['60']) }
                 ],
@@ -2886,10 +3728,33 @@ class SettingsPage extends Page {
                     { value: 5000, label: i18n.t('Seconds', ['5']) },
                     { value: 10000, label: i18n.t('Seconds', ['10']) },
                     { value: 15000, label: i18n.t('Seconds', ['15']) },
+                    { value: 20000, label: i18n.t('Seconds', ['20']) },
                     { value: 30000, label: i18n.t('Seconds', ['30']) },
                     { value: 60000, label: i18n.t('Seconds', ['60']) }
                 ],
                 skipBack
+            )}
+                    </div>
+                </div>
+
+                <!-- Resume Rewind Offset (Recap previous seconds upon resuming) -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelResumeRewindLength">${i18n.t('LabelResumeRewindLength') || 'Resume rewind'}</span>
+                        <span class="setting-description" data-i18n="ResumeRewindDurationDescription">${i18n.t('ResumeRewindDurationDescription') || 'Rewind playback slightly when resuming an in-progress video to review the previous scene.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+                'resume-rewind-select',
+                [
+                    { value: 0, label: i18n.t('None') || 'None' },
+                    { value: 5000, label: i18n.t('Seconds', ['5']) },
+                    { value: 10000, label: i18n.t('Seconds', ['10']) },
+                    { value: 15000, label: i18n.t('Seconds', ['15']) },
+                    { value: 20000, label: i18n.t('Seconds', ['20']) },
+                    { value: 30000, label: i18n.t('Seconds', ['30']) }
+                ],
+                resumeRewind
             )}
                     </div>
                 </div>
@@ -2904,6 +3769,47 @@ class SettingsPage extends Page {
                                 id="toggle-auto-next" 
                                 tabindex="0">
                         </button>
+                    </div>
+                </div>
+
+                <!-- Mark as Watched Completion Threshold (Apple HIG style tactile selector) -->
+                <!-- Allows viewer to keep Litefin's 80% credits-friendly default or respect server MaxResumePct -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="WatchedThreshold">${i18n.t('WatchedThreshold') || 'Mark as Watched Threshold'}</span>
+                        <span class="setting-description" data-i18n="WatchedThresholdDescription">${i18n.t('WatchedThresholdDescription') || 'Choose the completion percentage required to mark an item as watched. Litefin defaults to 80% to accommodate credit and ending sequences, or you can respect your Jellyfin server setting.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+                'watched-threshold-select',
+                [
+                    {
+                        value: 'server',
+                        label: i18n.t('OptionWatchedThresholdServer') || 'Server Setting (MaxResumePct)'
+                    },
+                    {
+                        value: '80',
+                        label: i18n.t('OptionWatchedThreshold80') || '80% (Litefin Default - Credits friendly)'
+                    },
+                    {
+                        value: '85',
+                        label: i18n.t('OptionWatchedThreshold85') || '85%'
+                    },
+                    {
+                        value: '90',
+                        label: i18n.t('OptionWatchedThreshold90') || '90%'
+                    },
+                    {
+                        value: '95',
+                        label: i18n.t('OptionWatchedThreshold95') || '95%'
+                    },
+                    {
+                        value: '100',
+                        label: i18n.t('OptionWatchedThreshold100') || '100% (Strict Completion)'
+                    }
+                ],
+                PlayerSettings.get('watchedThreshold') || '80'
+            )}
                     </div>
                 </div>
 
@@ -3018,6 +3924,20 @@ class SettingsPage extends Page {
 
                 <div class="setting-item">
                     <div class="setting-label">
+                        <span class="setting-name" data-i18n="OsdColorButtonsReveal">${i18n.t('OsdColorButtonsReveal') || 'Colored Buttons Reveal OSD'}</span>
+                        <span class="setting-description" data-i18n="OsdColorButtonsRevealDescription">${i18n.t('OsdColorButtonsRevealDescription') || 'Allow pressing colored remote buttons (Red, Green, Yellow, Blue) to instantly reveal controls in stealth mode instead of holding Down.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${PlayerSettings.get('osdColorButtonsReveal') !== false ? 'active' : ''}"
+                                id="toggle-osd-color-buttons-reveal"
+                                data-setting="osdColorButtonsReveal"
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
                         <span class="setting-name" data-i18n="KeepFocusOnSubtitleOffset">${i18n.t('KeepFocusOnSubtitleOffset') || 'Pin Subtitle Offset'}</span>
                         <span class="setting-description" data-i18n="KeepFocusOnSubtitleOffsetDescription">${i18n.t('KeepFocusOnSubtitleOffsetDescription') || 'Prevent the player controls from auto-hiding while the subtitle offset menu is open.'}</span>
                     </div>
@@ -3025,6 +3945,20 @@ class SettingsPage extends Page {
                         <button class="toggle-switch ${PlayerSettings.get('keepFocusOnSubtitleOffset') ? 'active' : ''}" 
                                 id="toggle-keep-focus-subtitle-offset" 
                                 data-setting="keepFocusOnSubtitleOffset"
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelOsdHideUnfocusedProgress">${i18n.t('LabelOsdHideUnfocusedProgress') || 'Hide Progress and Time on Seekbar'}</span>
+                        <span class="setting-description" data-i18n="OsdHideUnfocusedProgressDescription">${i18n.t('OsdHideUnfocusedProgressDescription') || 'Hides the progress bar, times, and ends-at time when the seekbar is not focused. When focused, values are shown normally. Note: If OSD Focus Mode is set to \'Always return to Seekbar\', this setting will not work because the seekbar is always focused.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${PlayerSettings.get('osdHideUnfocusedProgress') ? 'active' : ''}" 
+                                id="toggle-osd-hide-unfocused-progress" 
+                                data-setting="osdHideUnfocusedProgress"
                                 tabindex="0">
                         </button>
                     </div>
@@ -3088,10 +4022,12 @@ class SettingsPage extends Page {
 
                 <h3 class="setting-section-title" data-i18n="AudioSettings">${i18n.t('AudioSettings') || 'Audio'}</h3>
 
+                <!-- Maximum Audio Channels (Direct Play Gate) -->
+                <!-- Governs the maximum audio channels allowed for native direct play. Any track exceeding this limit forces transcode. -->
                 <div class="setting-item">
                     <div class="setting-label">
                         <span class="setting-name" data-i18n="AllowedAudioChannels">${i18n.t('AllowedAudioChannels') || 'Maximum Audio Channels'}</span>
-                        <span class="setting-description" data-i18n="AllowedAudioChannelsDescription">${i18n.t('AllowedAudioChannelsDescription') || 'Configure maximum audio channels for video playback. Defaults to 5.1 (6 channels).'}</span>
+                        <span class="setting-description" data-i18n="AllowedAudioChannelsDescription">${i18n.t('AllowedAudioChannelsDescription') || 'Maximum audio channels allowed for Direct Play. Tracks with more channels will be transcoded.'}</span>
                     </div>
                     <div class="setting-control">
                         ${this._renderDropdown(
@@ -3099,11 +4035,33 @@ class SettingsPage extends Page {
                 [
                     { value: -1, label: i18n.t('AudioChannelsAuto') || 'Auto (No Limit)' },
                     { value: 8, label: i18n.t('AudioChannels71') || '7.1 Channels' },
-                    { value: 6, label: i18n.t('AudioChannels51') || '5.1 Channels (Default)' },
+                    { value: 6, label: i18n.t('AudioChannels51') || '5.1 Channels' },
                     { value: 2, label: i18n.t('AudioChannels20') || 'Stereo 2.0' },
                     { value: 1, label: i18n.t('AudioChannels10') || 'Mono 1.0' }
                 ],
-                PlayerSettings.get('allowedAudioChannels') ?? 6
+                PlayerSettings.get('allowedAudioChannels') ?? -1
+            )}
+                    </div>
+                </div>
+
+                <!-- Transcoding Maximum Audio Channels -->
+                <!-- Specifies the maximum number of audio channels the server should output when transcoding audio. -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="TranscodeMaxAudioChannels">${i18n.t('TranscodeMaxAudioChannels') || 'Transcoding Max Audio Channels'}</span>
+                        <span class="setting-description" data-i18n="TranscodeMaxAudioChannelsDescription">${i18n.t('TranscodeMaxAudioChannelsDescription') || 'Maximum audio channels output by the server when audio is transcoded.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+                'transcode-max-audio-channels-select',
+                [
+                    { value: -1, label: i18n.t('AudioChannelsAutoTranscode') || 'Auto (Match Max Channels)' },
+                    { value: 8, label: i18n.t('AudioChannels71') || '7.1 Channels' },
+                    { value: 6, label: i18n.t('AudioChannels51') || '5.1 Channels' },
+                    { value: 2, label: i18n.t('AudioChannels20') || 'Stereo 2.0' },
+                    { value: 1, label: i18n.t('AudioChannels10') || 'Mono 1.0' }
+                ],
+                PlayerSettings.get('transcodeMaxAudioChannels') ?? -1
             )}
                     </div>
                 </div>
@@ -3446,6 +4404,20 @@ class SettingsPage extends Page {
 
                 <div class="setting-item">
                     <div class="setting-label">
+                        <span class="setting-name" data-i18n="RemuxMkvToMp4">${i18n.t('RemuxMkvToMp4') || 'Remux MKV to MP4'}</span>
+                        <span class="setting-description" data-i18n="RemuxMkvToMp4Description">${i18n.t('RemuxMkvToMp4Description') || 'Always remux MKV containers to MP4. Streams are copied losslessly — no re-encoding. Off by default.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${PlayerSettings.get('remuxMkvToMp4') ? 'active' : ''}" 
+                                id="toggle-remux-mkv-to-mp4" 
+                                data-setting="remuxMkvToMp4"
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
                         <span class="setting-name" data-i18n="ForceDirectPlay">${i18n.t('ForceDirectPlay') || 'Force Direct Play'}</span>
                         <span class="setting-description" data-i18n="ForceDirectPlayDescription">${i18n.t('ForceDirectPlayDescription') || 'Forces direct play for all media formats. May cause playback failure if the device does not support the format natively.'}</span>
                     </div>
@@ -3458,8 +4430,75 @@ class SettingsPage extends Page {
                     </div>
                 </div>
 
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="AutoTranscodeOnError">${i18n.t('AutoTranscodeOnError') || 'Auto-Fallback to Transcode'}</span>
+                        <span class="setting-description" data-i18n="AutoTranscodeOnErrorDescription">${i18n.t('AutoTranscodeOnErrorDescription') || 'Automatically escalate to server-side transcoding if DirectPlay or Remux fails during playback startup or mid-stream.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${PlayerSettings.get('autoTranscodeOnError') !== false ? 'active' : ''}" 
+                                id="toggle-auto-transcode-on-error" 
+                                data-setting="autoTranscodeOnError"
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <h3 class="setting-section-title" data-i18n="TrailersSettings">${i18n.t('TrailersSettings')}</h3>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="TrailerPlayback">${i18n.t('TrailerPlayback') || 'Trailer Playback'}</span>
+                        <span class="setting-description" data-i18n="TrailerPlaybackDescription">${i18n.t('TrailerPlaybackDescription') || 'Choose how remote trailers are opened'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+                'trailer-playback-select',
+                [
+                    {
+                        value: 'internal_proxy',
+                        label: i18n.t('InternalPlayerNew') || 'Internal Player (New)'
+                    },
+                    {
+                        value: 'internal_iframe',
+                        label: i18n.t('InternalPlayerLegacy') || 'Internal Player (Legacy Iframe)'
+                    },
+                    { value: 'external', label: i18n.t('ExternalApp') || 'External App' }
+                ],
+                PlayerSettings.get('trailerPlaybackMode')
+            )}
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="TrailerAutoChain">${i18n.t('TrailerAutoChain') || 'Auto-play local, then online'}</span>
+                        <span class="setting-description" data-i18n="TrailerAutoChainDescription">${i18n.t('TrailerAutoChainDescription') || 'Plays the server-side trailer first, then jumps straight to the online trailer when it ends. No picking required.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${PlayerSettings.get('trailerAutoChain') ? 'active' : ''}"
+                                id="toggle-trailer-auto-chain"
+                                data-setting="trailerAutoChain"
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="EnableBackgroundService">${i18n.t('EnableBackgroundService') || 'Enable Background Service'}</span>
+                        <span class="setting-description" data-i18n="EnableBackgroundServiceDescription">${i18n.t('EnableBackgroundServiceDescription') || 'Enable the background Node.js service for Discovery and Proxy playback. Disable if you experience performance issues.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${PlayerSettings.get('enableBackgroundService') ? 'active' : ''}" 
+                                id="toggle-background-service" 
+                                data-setting="enableBackgroundService"
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
                 <!-- Playback Buffering Section -->
-                <h3 class="setting-section-title" data-i18n="PlaybackBuffering">${i18n.t('PlaybackBuffering') || 'Playback Buffering'}</h3>
                 
                 ${(() => {
                 let html = '';
@@ -3467,6 +4506,8 @@ class SettingsPage extends Page {
                 // WebOS Buffering
                 if (currentBackend === 'webos' || (currentBackend === 'auto' && platformInfo.isWebOS)) {
                     html += `
+
+                    <h3 class="setting-section-title" data-i18n="PlaybackBuffering">${i18n.t('PlaybackBuffering') || 'Playback Buffering'}</h3>
                         <div class="setting-item">
                             <div class="setting-label">
                                 <span class="setting-name" data-i18n="WebosBufferGate">${i18n.t('WebosBufferGate') || 'Buffer Gate'}</span>
@@ -3541,6 +4582,7 @@ class SettingsPage extends Page {
                 // Tizen Buffering
                 if (currentBackend === 'avplay' || (currentBackend === 'auto' && platformInfo.isTizen)) {
                     html += `
+                    <h3 class="setting-section-title" data-i18n="PlaybackBuffering">${i18n.t('PlaybackBuffering') || 'Playback Buffering'}</h3>
                         <div class="setting-item">
                             <div class="setting-label">
                                 <span class="setting-name" data-i18n="TizenInitialBuffer">${i18n.t('TizenInitialBuffer') || 'Initial Buffer'}</span>
@@ -3622,6 +4664,7 @@ class SettingsPage extends Page {
                     (currentBackend === 'auto' && !platformInfo.isTizen && !platformInfo.isWebOS)
                 ) {
                     html += `
+                    <h3 class="setting-section-title" data-i18n="PlaybackBuffering">${i18n.t('PlaybackBuffering') || 'Playback Buffering'}</h3>
                         <div class="setting-item">
                             <div class="setting-label">
                                 <span class="setting-name" data-i18n="Html5MaxBufferLength">${i18n.t('Html5MaxBufferLength') || 'Max Buffer Length'}</span>
@@ -3695,59 +4738,7 @@ class SettingsPage extends Page {
                     )}
                             </div>
                         </div>
-                        <h3 class="setting-section-title" data-i18n="TrailersSettings">${i18n.t('TrailersSettings')}</h3>
-
-                <div class="setting-item">
-                    <div class="setting-label">
-                        <span class="setting-name" data-i18n="TrailerPlayback">${i18n.t('TrailerPlayback') || 'Trailer Playback'}</span>
-                        <span class="setting-description" data-i18n="TrailerPlaybackDescription">${i18n.t('TrailerPlaybackDescription') || 'Choose how remote trailers are opened'}</span>
-                    </div>
-                    <div class="setting-control">
-                        ${this._renderDropdown(
-                        'trailer-playback-select',
-                        [
-                            {
-                                value: 'internal_proxy',
-                                label: i18n.t('InternalPlayerNew') || 'Internal Player (New)'
-                            },
-                            {
-                                value: 'internal_iframe',
-                                label: i18n.t('InternalPlayerLegacy') || 'Internal Player (Legacy Iframe)'
-                            },
-                            { value: 'external', label: i18n.t('ExternalApp') || 'External App' }
-                        ],
-                        PlayerSettings.get('trailerPlaybackMode') || 'internal_proxy'
-                    )}
-                    </div>
-                </div>
-
-                <div class="setting-item">
-                    <div class="setting-label">
-                        <span class="setting-name" data-i18n="TrailerAutoChain">${i18n.t('TrailerAutoChain') || 'Auto-play local, then online'}</span>
-                        <span class="setting-description" data-i18n="TrailerAutoChainDescription">${i18n.t('TrailerAutoChainDescription') || 'Plays the server-side trailer first, then jumps straight to the online trailer when it ends. No picking required.'}</span>
-                    </div>
-                    <div class="setting-control">
-                        <button class="toggle-switch ${PlayerSettings.get('trailerAutoChain') ? 'active' : ''}"
-                                id="toggle-trailer-auto-chain"
-                                data-setting="trailerAutoChain"
-                                tabindex="0">
-                        </button>
-                    </div>
-                </div>
-
-                <div class="setting-item">
-                    <div class="setting-label">
-                        <span class="setting-name" data-i18n="EnableBackgroundService">${i18n.t('EnableBackgroundService') || 'Enable Background Service'}</span>
-                        <span class="setting-description" data-i18n="EnableBackgroundServiceDescription">${i18n.t('EnableBackgroundServiceDescription') || 'Enable the background Node.js service for Discovery and Proxy playback. Disable if you experience performance issues.'}</span>
-                    </div>
-                    <div class="setting-control">
-                        <button class="toggle-switch ${PlayerSettings.get('enableBackgroundService') ? 'active' : ''}" 
-                                id="toggle-background-service" 
-                                data-setting="enableBackgroundService"
-                                tabindex="0">
-                        </button>
-                    </div>
-                </div>
+                        
                         `;
                 }
 
@@ -3871,9 +4862,22 @@ class SettingsPage extends Page {
                         ${this._renderDropdown(
             'ass-renderer-select',
             [
-                { value: 'libjass', label: 'libjass (DOM, Older TV Compatible)' },
-                { value: 'assjs', label: 'ass.js (Lightweight DOM, Experimental)' },
-                { value: 'libass-wasm', label: 'libass-wasm (WebGL/WASM, Custom Octopus)' }
+                // Prioritize libass-wasm as the recommended option on devices with WebAssembly support
+                {
+                    value: 'libass-wasm',
+                    label: platformInfo.hasWasmSupport
+                        ? 'libass-wasm (WebGL/WASM, Recommended)'
+                        : 'libass-wasm (WebGL/WASM, Unsupported)'
+                },
+                // libjass is the DOM fallback for older engines lacking WebAssembly (Tizen 3/4, WebOS <= 4.0)
+                {
+                    value: 'libjass',
+                    label: platformInfo.hasWasmSupport
+                        ? 'libjass (DOM, Older TV Compatible)'
+                        : 'libjass (DOM, Recommended / Older TV)'
+                },
+                // ass.js lightweight experimental fallback
+                { value: 'assjs', label: 'ass.js (Lightweight DOM, Experimental)' }
             ],
             PlayerSettings.get('assRenderer')
         )}
@@ -3979,7 +4983,8 @@ class SettingsPage extends Page {
                     label: i18n.t('FontZenKakuGothicNew') || 'Zen Kaku Gothic New'
                 },
                 { value: 'opendyslexic', label: i18n.t('FontOpenDyslexic') || 'OpenDyslexic' },
-                { value: 'atkinson', label: i18n.t('FontAtkinson') || 'Atkinson Hyperlegible' }
+                { value: 'atkinson', label: i18n.t('FontAtkinson') || 'Atkinson Hyperlegible' },
+                { value: 'manrope', label: i18n.t('FontManrope') || 'Manrope' }
             ],
             PlayerSettings.get('subtitleFont')
         )}
@@ -4062,6 +5067,21 @@ class SettingsPage extends Page {
                     </div>
                 </div>
 
+                <!-- Subtitle OSD Dodging (Smart Shift) Toggle -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelSubtitleOsdDodging">${i18n.t('LabelSubtitleOsdDodging')}</span>
+                        <span class="setting-description" data-i18n="SubtitleOsdDodgingDescription">${i18n.t('SubtitleOsdDodgingDescription')}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${PlayerSettings.get('subtitleOsdDodging') !== false ? 'active' : ''}" 
+                                id="subtitle-osd-dodging-toggle" 
+                                data-setting="subtitleOsdDodging"
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
                 <div class="setting-item">
                     <div class="setting-label">
                         <span class="setting-name" data-i18n="LabelTextWeight">${i18n.t('LabelTextWeight')}</span>
@@ -4120,6 +5140,20 @@ class SettingsPage extends Page {
             ],
             PlayerSettings.get('subtitleTextColorHdr') || '#ffffff'
         )}
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="OverrideSubtitleColors">${i18n.t('OverrideSubtitleColors') || 'Override Embedded Subtitle Colors'}</span>
+                        <span class="setting-description" data-i18n="OverrideSubtitleColorsDescription">${i18n.t('OverrideSubtitleColorsDescription') || 'Override author-specified colors in subtitles with your selected subtitle color.'}</span>
+                    </div>
+                    <div class="setting-control">
+                         <button class="toggle-switch ${PlayerSettings.get('subtitleOverrideColors') ? 'active' : ''}" 
+                                 id="subtitle-override-colors-toggle" 
+                                 data-setting="subtitleOverrideColors"
+                                 tabindex="0">
+                        </button>
                     </div>
                 </div>
 
@@ -4355,6 +5389,7 @@ class SettingsPage extends Page {
                 },
                 { value: 'opendyslexic', label: i18n.t('FontOpenDyslexic') || 'OpenDyslexic' },
                 { value: 'atkinson', label: i18n.t('FontAtkinson') || 'Atkinson Hyperlegible' },
+                { value: 'manrope', label: i18n.t('FontManrope') || 'Manrope' },
                 {
                     value: 'fallback-font',
                     label: i18n.t('JellyfinFallbackFont') || 'Jellyfin Fallback Font'
@@ -4494,12 +5529,40 @@ class SettingsPage extends Page {
      * =========================================================================
      */
     _renderPerformanceTab() {
+        /*
+         * =========================================================================
+         * Platform Defaults: TV (Tizen/webOS) vs Web/Desktop
+         * =========================================================================
+         * On smart TVs (Tizen/webOS), waking from sleep or foregrounding often desyncs
+         * long-lived socket connections, making reload on resume enabled by default.
+         * On web/desktop browsers, keeping it off by default preserves in-memory DOM
+         * trees, scroll offsets, and lazy-loaded items without jarring page refreshes.
+         * If the user explicitly sets the preference, their saved choice takes precedence.
+         * =========================================================================
+         */
+        const isTv = platformInfo.isTizen || platformInfo.isWebOS || platformInfo.isAndroid;
+        const savedReloadPref = storage.getItem('pref:reloadOnResume');
+        const reloadOnResumeEnabled = savedReloadPref !== null ? savedReloadPref === 'true' : isTv;
+
         return `
             <div class="settings-tab-content">
                 <h2 class="content-title" data-i18n="Performance">${i18n.t('Performance') || 'Performance'}</h2>
                 <p class="content-subtitle" data-i18n="PerformanceTabDescription">
                     ${i18n.t('PerformanceTabDescription') || 'Optimize memory usage, scrolling animations, cache policies, and rendering speed.'}
                 </p>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelReloadOnResume">${i18n.t('LabelReloadOnResume') || 'Reload Page on Resume'}</span>
+                        <span class="setting-description" data-i18n="ReloadOnResumeDescription">${i18n.t('ReloadOnResumeDescription') || 'Automatically reload the active view when returning from background or waking from sleep. Keep disabled to preserve loaded lists and scroll position.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${reloadOnResumeEnabled ? 'active' : ''}"
+                                id="toggle-reload-on-resume"
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
 
                 <div class="setting-item">
                     <div class="setting-label">
@@ -4569,10 +5632,56 @@ class SettingsPage extends Page {
                 { value: 50, label: '50' },
                 { value: 75, label: '75' },
                 { value: 100, label: '100' },
-                { value: 150, label: '150' }
+                { value: 150, label: '150' },
+                { value: 'unlimited', label: i18n.t('OptionUnlimited') || 'Unlimited (Infinite Scroll)' }
             ],
             storage.getItem('pref:libraryPageSize') || 100
         )}
+                    </div>
+                </div>
+
+                <!-- -------------------------------------------------------------
+                 * Dynamic Play Queue Episode Window Size
+                 * Configures how many preceding and succeeding episodes are loaded
+                 * around the currently playing episode. Designed for maximum clarity,
+                 * tactile responsiveness, and minimal memory footprint.
+                 * ------------------------------------------------------------- -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelPlayQueueEpisodeLimit">${i18n.t('LabelPlayQueueEpisodeLimit') || 'Episode Queue Window Size'}</span>
+                        <span class="setting-description" data-i18n="PlayQueueEpisodeLimitDescription">${i18n.t('PlayQueueEpisodeLimitDescription') || 'Number of previous and next episodes to load into the player queue around the active episode. Lower values reduce memory and improve performance on large series.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+            'play-queue-episode-limit-select',
+            [
+                { value: 25, label: '25' },
+                { value: 50, label: '50 (Default)' },
+                { value: 75, label: '75' },
+                { value: 100, label: '100' },
+                { value: 150, label: '150' }
+            ],
+            PlayerSettings.get('playQueueEpisodeLimit') || 50
+        )}
+                    </div>
+                </div>
+
+                <!-- -------------------------------------------------------------
+                 * Alphabet Quick-Jump Scroll Behavior (Only in Unlimited Mode)
+                 * Enables scrolling directly to letter anchors instead of querying
+                 * and filtering down the library items strictly to that letter.
+                 * Designed for sleek, fluid tactile control on TV and webOS navigation.
+                 * ------------------------------------------------------------- -->
+                <div class="setting-item" id="alpha-picker-scroll-mode-item" style="${storage.getItem('pref:libraryPageSize') === 'unlimited' ? '' : 'display: none;'}">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelAlphaPickerScrollMode">${i18n.t('LabelAlphaPickerScrollMode') || 'Alphabet Quick-Jump Action'}</span>
+                        <span class="setting-description" data-i18n="AlphaPickerScrollModeDescription">${i18n.t('AlphaPickerScrollModeDescription') || 'In unlimited mode, scroll directly to letter sections instead of filtering the library.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${storage.getItem('pref:alphaPickerScrollMode') !== 'false' ? 'active' : ''}" 
+                                id="toggle-alpha-picker-scroll-mode" 
+                                tabindex="0">
+                        </button>
                     </div>
                 </div>
 
@@ -4584,6 +5693,19 @@ class SettingsPage extends Page {
                     <div class="setting-control">
                         <button class="toggle-switch ${layoutManager.getOnlyBlurHashBackdrop() ? 'active' : ''}" 
                                 id="toggle-only-blurhash-backdrop" 
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelLightMusicPlayer">${i18n.t('LabelLightMusicPlayer') || 'Light Music Player'}</span>
+                        <span class="setting-description" data-i18n="LightMusicPlayerDescription">${i18n.t('LightMusicPlayerDescription') || 'Removes background blur and drop shadows from the music player to significantly improve performance on older TVs.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${layoutManager.getLightMusicPlayer() ? 'active' : ''}" 
+                                id="toggle-light-music-player" 
                                 tabindex="0">
                         </button>
                     </div>
@@ -4627,19 +5749,6 @@ class SettingsPage extends Page {
                         </button>
                     </div>
                 </div>           
-
-                <div class="setting-item">
-                    <div class="setting-label">
-                        <span class="setting-name" data-i18n="LabelSimpleLoader">${i18n.t('LabelSimpleLoader') || 'Simple Loading Indicator'}</span>
-                        <span class="setting-description" data-i18n="SimpleLoaderDescription">${i18n.t('SimpleLoaderDescription') || 'Replace the standard animated loader with a lightweight rotating ring to reduce CPU usage.'}</span>
-                    </div>
-                    <div class="setting-control">
-                        <button class="toggle-switch ${layoutManager.getSimpleLoader() ? 'active' : ''}" 
-                                id="toggle-simple-loader" 
-                                tabindex="0">
-                        </button>
-                    </div>
-                </div>
 
                 <div class="setting-item">
                     <div class="setting-label">
@@ -4709,6 +5818,7 @@ class SettingsPage extends Page {
      * @returns {string} The fully compiled HTML template representing active tab UI.
      */
     _renderControlsTab() {
+        const showProfilesOnResume = storage.getItem('pref:showProfilesOnResume') === 'true';
         // Retrieve localized keys or fallback gracefully to default values.
         const scrollNavEnabled = storage.getItem('pref:hoverScrollNavigation') === 'true';
         const magicCursorEnabled = PlayerSettings.get('enableMagicCursor');
@@ -4753,6 +5863,10 @@ class SettingsPage extends Page {
                 value: 'playerPlaybackInfo',
                 label: i18n.t('OptionPlayerPlaybackInfo') || 'Player: Toggle Playback Info'
             },
+            {
+                value: 'playerShowOsd',
+                label: i18n.t('OptionPlayerShowOsd') || 'Player: Reveal Controls / OSD'
+            },
             /*
              * ========================================================================
              * NEW PREMIUM CHAPTER NAVIGATION ACTIONS
@@ -4784,6 +5898,8 @@ class SettingsPage extends Page {
                     ${i18n.t('ControlsTabDescription') || 'Map physical remote buttons, mouse cursor behavior, and navigation gestures.'}
                 </p>
 
+                <h3 class="setting-section-title" data-i18n="AppBehavior">${i18n.t('AppBehavior')}</h3>
+
                 <!-- Application Behavior -->
                 <div class="setting-item">
                     <div class="setting-label">
@@ -4795,6 +5911,16 @@ class SettingsPage extends Page {
                                 id="toggle-confirm-exit" 
                                 tabindex="0">
                         </button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="ShowProfilesOnResume">${i18n.t('ShowProfilesOnResume')}</span>
+                        <span class="setting-description" data-i18n="ShowProfilesOnResumeDescription">${i18n.t('ShowProfilesOnResumeDescription')}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${showProfilesOnResume ? 'active' : ''}" id="toggle-profiles-on-resume" tabindex="0"></button>
                     </div>
                 </div>
 
@@ -5006,8 +6132,7 @@ class SettingsPage extends Page {
     }
 
     _renderAboutTab() {
-        const caps = getDeviceCapabilities();
-
+        // Render the top version and application identity card, keeping the original layout
         return `
             <div class="settings-tab-content">
                 <h2 class="content-title" data-i18n="AboutLitefin">${i18n.t('AboutLitefin')}</h2>
@@ -5015,6 +6140,7 @@ class SettingsPage extends Page {
                     ${i18n.t('AboutTabDescription') || 'View application version, platform specifications, and hardware identity.'}
                 </p>
                 
+                <!-- Main application version banner -->
                 <div class="about-card" tabindex="0">
                     <h3 class="app-version">${i18n.t('AppVersion', [__APP_VERSION__])}</h3>
                     <p class="about-desc" data-i18n="AppDescription">
@@ -5023,79 +6149,159 @@ class SettingsPage extends Page {
                     <p class="about-credits" data-i18n="DevelopedBy">${i18n.t('DevelopedBy')}</p>
                 </div>
 
+                <!-- Community and Resources Section -->
+                <h3 class="setting-section-title" data-i18n="AboutResourcesTitle">${i18n.t('AboutResourcesTitle') || 'Community & Resources'}</h3>
+                <p class="content-subtitle" data-i18n="AboutResourcesDesc" style="margin-top: -10px; margin-bottom: 16px;">
+                    ${i18n.t('AboutResourcesDesc') || 'Explore project source code, install server plugins, access quick issue reporting, join Discord, or support development.'}
+                </p>
 
-                <h3 class="setting-section-title" data-i18n="DeviceInformation">${i18n.t('DeviceInformation')}</h3>
-                <div class="about-card identity-card" tabindex="0">
-                    <div class="identity-grid">
-                        <div class="identity-item">
-                            <span class="identity-label" data-i18n="Model">${i18n.t('Model')}</span>
-                            <span class="identity-value">${caps.modelName}</span>
+                <!-- Compact Action Cards Grid -->
+                <div class="about-actions-grid" id="about-actions-grid">
+                    <!-- Device Information Card (Row 1 Left) -->
+                    <button class="about-action-card focusable" 
+                            id="btn-about-device-info" 
+                            tabindex="0" 
+                            data-focusable="true"
+                            data-nav-right="#btn-about-github"
+                            data-nav-down="#btn-about-issues">
+                        <div class="about-card-icon-wrap" aria-hidden="true">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                                <line x1="8" y1="21" x2="16" y2="21"/>
+                                <line x1="12" y1="17" x2="12" y2="21"/>
+                            </svg>
                         </div>
-                        <div class="identity-item">
-                            <span class="identity-label" data-i18n="Platform">${i18n.t('Platform')}</span>
-                            <span class="identity-value">${platformInfo.isWeb ? i18n.t('BrowserValue', [caps.browserVersion]) : platformInfo.isWebOS ? i18n.t('WebOSValue', [caps.webosVersion]) : i18n.t('TizenValue', [caps.tizenVersion])}</span>
+                        <div class="about-card-info">
+                            <span class="about-card-title" data-i18n="ViewDeviceInfo">${i18n.t('ViewDeviceInfo') || 'Device Specifications'}</span>
+                            <span class="about-card-desc" data-i18n="ViewDeviceInfoDesc">${i18n.t('ViewDeviceInfoDesc') || 'Hardware model, platform details, resolution, and supported audio/video codecs.'}</span>
                         </div>
-                        <div class="identity-item">
-                            <span class="identity-label" data-i18n="Resolution">${i18n.t('Resolution')}</span>
-                            <span class="identity-value">${i18n.t('ResolutionValue', [
-            caps.screenWidth,
-            caps.screenHeight,
-            caps.uhd8K ? i18n.t('UHD8K') : caps.uhd ? i18n.t('UHD') : i18n.t('FHD')
-        ])}</span>
+                        <div class="about-card-chevron" aria-hidden="true">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M9 18l6-6-6-6"/>
+                            </svg>
                         </div>
-                        <div class="identity-item">
-                            <span class="identity-label" data-i18n="HDRSupport">${i18n.t('HDRSupport')}</span>
-                            <span class="identity-value">${(() => {
-                const resolveOverride = (key, hwSupport) => {
-                    const val = PlayerSettings.get(key);
-                    return val === 'enable' ? true : val === 'disable' ? false : hwSupport;
-                };
-                const userHdr = resolveOverride('enableHDR', !!caps.hdr10);
-                const hwHdr = [
-                    caps.hdr10 ? 'HDR10' : null,
-                    caps.hdr10Plus ? 'HDR10+' : null,
-                    caps.hlg ? 'HLG' : null,
-                    caps.dolbyVision ? i18n.t('DolbyVision') : null
-                ].filter(Boolean);
+                    </button>
 
-                if (hwHdr.length === 0) return i18n.t('SDROnly');
-                if (!userHdr) return `${hwHdr.join(', ')} (${i18n.t('Disabled')})`;
-                return hwHdr.join(', ');
-            })()}</span>
+                    <!-- GitHub Repository Card (Row 1 Right) -->
+                    <button class="about-action-card focusable" 
+                            id="btn-about-github" 
+                            tabindex="0" 
+                            data-focusable="true"
+                            data-nav-left="#btn-about-device-info"
+                            data-nav-down="#btn-about-plugins">
+                        <div class="about-card-icon-wrap" aria-hidden="true">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 2A10 10 0 0 0 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.1-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0 0 12 2z"/>
+                            </svg>
                         </div>
-                        <div class="identity-item">
-                            <span class="identity-label" data-i18n="VideoCodecs">${i18n.t('VideoCodecs')}</span>
-                            <span class="identity-value">${(() => {
-                const resolveOverride = (key, hwSupport) => {
-                    const val = PlayerSettings.get(key);
-                    return val === 'enable' ? true : val === 'disable' ? false : hwSupport;
-                };
-                const codecs = [
-                    { name: 'H.264', hw: true, user: true },
-                    {
-                        name: 'HEVC',
-                        hw: caps.hevc,
-                        user: resolveOverride('enableHEVC', caps.hevc)
-                    },
-                    {
-                        name: 'AV1',
-                        hw: caps.av1,
-                        user: resolveOverride('enableAV1', caps.av1)
-                    },
-                    {
-                        name: 'VP9',
-                        hw: caps.vp9,
-                        user: resolveOverride('enableVP9', caps.vp9)
-                    }
-                ];
+                        <div class="about-card-info">
+                            <span class="about-card-title" data-i18n="GitHubRepo">${i18n.t('GitHubRepo') || 'GitHub Repository'}</span>
+                            <span class="about-card-desc" data-i18n="GitHubRepoDesc">${i18n.t('GitHubRepoDesc') || 'Explore the source code, check releases, and follow development.'}</span>
+                        </div>
+                        <div class="about-card-chevron" aria-hidden="true">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M9 18l6-6-6-6"/>
+                            </svg>
+                        </div>
+                    </button>
 
-                return codecs
-                    .filter((c) => c.hw)
-                    .map((c) => (c.user ? c.name : `${c.name} (${i18n.t('Disabled')})`))
-                    .join(', ');
-            })()}</span>
+                    <!-- Quick Issue Reporter Card (Row 2 Left) -->
+                    <button class="about-action-card focusable" 
+                            id="btn-about-issues" 
+                            tabindex="0" 
+                            data-focusable="true"
+                            data-nav-up="#btn-about-device-info"
+                            data-nav-right="#btn-about-plugins"
+                            data-nav-down="#btn-about-discord">
+                        <div class="about-card-icon-wrap" aria-hidden="true">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"/>
+                                <line x1="12" y1="8" x2="12" y2="12"/>
+                                <line x1="12" y1="16" x2="12.01" y2="16"/>
+                            </svg>
                         </div>
-                    </div>
+                        <div class="about-card-info">
+                            <span class="about-card-title" data-i18n="ReportIssue">${i18n.t('ReportIssue') || 'Quick Issue Reporter'}</span>
+                            <span class="about-card-desc" data-i18n="ReportIssueDesc">${i18n.t('ReportIssueDesc') || 'Quickly submit bug reports and feature requests via GitHub.'}</span>
+                        </div>
+                        <div class="about-card-chevron" aria-hidden="true">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M9 18l6-6-6-6"/>
+                            </svg>
+                        </div>
+                    </button>
+
+                    <!-- Companion Plugins Card (Row 2 Right) -->
+                    <button class="about-action-card focusable" 
+                            id="btn-about-plugins" 
+                            tabindex="0" 
+                            data-focusable="true"
+                            data-nav-up="#btn-about-github"
+                            data-nav-left="#btn-about-issues"
+                            data-nav-down="#btn-about-support">
+                        <div class="about-card-icon-wrap" aria-hidden="true">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                                <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                                <line x1="12" y1="22.08" x2="12" y2="12"/>
+                            </svg>
+                        </div>
+                        <div class="about-card-info">
+                            <span class="about-card-title" data-i18n="CompanionPlugins">${i18n.t('CompanionPlugins') || 'Companion Plugins'}</span>
+                            <span class="about-card-desc" data-i18n="CompanionPluginsDesc">${i18n.t('CompanionPluginsDesc') || 'Download the Litefin companion plugins for Jellyfin and Emby servers.'}</span>
+                        </div>
+                        <div class="about-card-chevron" aria-hidden="true">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M9 18l6-6-6-6"/>
+                            </svg>
+                        </div>
+                    </button>
+
+                    <!-- Discord Community Card (Row 3 Left) -->
+                    <button class="about-action-card focusable" 
+                            id="btn-about-discord" 
+                            tabindex="0" 
+                            data-focusable="true"
+                            data-nav-up="#btn-about-issues"
+                            data-nav-right="#btn-about-support">
+                        <div class="about-card-icon-wrap" aria-hidden="true">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.929 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+                            </svg>
+                        </div>
+                        <div class="about-card-info">
+                            <span class="about-card-title" data-i18n="DiscordCommunity">${i18n.t('DiscordCommunity') || 'Discord Community'}</span>
+                            <span class="about-card-desc" data-i18n="DiscordCommunityDesc">${i18n.t('DiscordCommunityDesc') || 'Join our live Discord chat for questions, discussions, and updates.'}</span>
+                        </div>
+                        <div class="about-card-chevron" aria-hidden="true">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M9 18l6-6-6-6"/>
+                            </svg>
+                        </div>
+                    </button>
+
+                    <!-- Support & Donations Card (Row 3 Right) -->
+                    <button class="about-action-card focusable" 
+                            id="btn-about-support" 
+                            tabindex="0" 
+                            data-focusable="true"
+                            data-nav-up="#btn-about-plugins"
+                            data-nav-left="#btn-about-discord">
+                        <div class="about-card-icon-wrap" aria-hidden="true">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                            </svg>
+                        </div>
+                        <div class="about-card-info">
+                            <span class="about-card-title" data-i18n="SupportDonations">${i18n.t('SupportDonations') || 'Support & Donations'}</span>
+                            <span class="about-card-desc" data-i18n="SupportDonationsDesc">${i18n.t('SupportDonationsDesc') || 'Help support continuous development of Litefin via Buy Me a Coffee or Sponsors.'}</span>
+                        </div>
+                        <div class="about-card-chevron" aria-hidden="true">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M9 18l6-6-6-6"/>
+                            </svg>
+                        </div>
+                    </button>
                 </div>
 
                 <!-- Updates Section -->
@@ -5125,10 +6331,668 @@ class SettingsPage extends Page {
                         </button>
                     </div>
                 </div>
-
-
             </div>
         `;
+    }
+
+    /**
+     * Resolves and structures current device capabilities into displayable sections.
+     * @private
+     * @returns {Object} Structured device specs
+     */
+    _getDeviceSpecsData() {
+        const caps = getDeviceCapabilities();
+
+        // 1. Platform String
+        let platformStr = i18n.t('BrowserValue', [caps.browserVersion]);
+        if (platformInfo.isAndroid) {
+            const ver = caps.androidVersion || platformInfo.androidVersion;
+            platformStr = ver ? `Android ${ver}` : 'Android';
+        } else if (platformInfo.isWebOS) {
+            platformStr = i18n.t('WebOSValue', [caps.webosVersion]);
+        } else if (platformInfo.isTizen) {
+            platformStr = i18n.t('TizenValue', [caps.tizenVersion]);
+        } else if (platformInfo.isDesktop) {
+            platformStr = `Desktop (${platformInfo.operatingSystem || 'Native'})`;
+        }
+
+        // 2. Resolution String
+        const screenW = caps.screenWidth || (typeof window !== 'undefined' ? (window.screen?.width || window.innerWidth || 1920) : 1920);
+        const screenH = caps.screenHeight || (typeof window !== 'undefined' ? (window.screen?.height || window.innerHeight || 1080) : 1080);
+        const resTier = caps.uhd8K ? i18n.t('UHD8K') : caps.uhd ? i18n.t('UHD') : i18n.t('FHD');
+        const resStr = i18n.t('ResolutionValue', [screenW, screenH, resTier]);
+
+        // 3. HDR Formats
+        const resolveOverride = (key, hwSupport) => {
+            const val = PlayerSettings.get(key);
+            return val === 'enable' ? true : val === 'disable' ? false : hwSupport;
+        };
+        const userHdr = resolveOverride('enableHDR', !!caps.hdr10);
+        const hwHdr = [
+            caps.hdr10 ? 'HDR10' : null,
+            caps.hdr10Plus ? 'HDR10+' : null,
+            caps.hlg ? 'HLG' : null,
+            caps.dolbyVision ? i18n.t('DolbyVision') : null
+        ].filter(Boolean);
+
+        let hdrStr = i18n.t('SDROnly');
+        if (hwHdr.length > 0) {
+            hdrStr = userHdr ? hwHdr.join(', ') : `${hwHdr.join(', ')} (${i18n.t('Disabled')})`;
+        }
+
+        // 4. Video Codecs List with statuses
+        const videoCodecs = [
+            { name: 'H.264', hw: true, user: true },
+            { name: 'HEVC', hw: caps.hevc, user: resolveOverride('enableHEVC', caps.hevc) },
+            { name: 'VP9', hw: caps.vp9, user: resolveOverride('enableVP9', caps.vp9) },
+            { name: 'VP8', hw: caps.vp8 !== false, user: true },
+            { name: 'MPEG-2', hw: caps.mpeg2video !== false, user: true },
+            { name: 'AV1', hw: caps.av1, user: resolveOverride('enableAV1', caps.av1) }
+        ];
+
+        // 5. Audio Codecs List with statuses
+        const audioCodecs = [
+            { name: 'AAC', hw: true, user: true },
+            { name: 'AC-3', hw: caps.ac3 !== false, user: true },
+            { name: 'E-AC-3', hw: caps.eac3 !== false, user: resolveOverride('enableEac3', caps.eac3 !== false) },
+            { name: 'TrueHD', hw: caps.truehd !== false, user: resolveOverride('enableTrueHd', caps.truehd !== false) },
+            { name: 'DTS', hw: caps.dts !== false, user: resolveOverride('enableDts', caps.dts !== false) },
+            { name: 'FLAC', hw: true, user: true },
+            { name: 'Opus', hw: true, user: true },
+            { name: 'MP3', hw: true, user: true }
+        ];
+
+        return {
+            modelName: caps.modelName || 'Standard Display',
+            platform: platformStr,
+            resolution: resStr,
+            hdr: hdrStr,
+            videoCodecs,
+            audioCodecs
+        };
+    }
+
+    /**
+     * Safely dispatches an external web URL using the appropriate native platform bridge.
+     * @param {string} url Target URL to launch
+     * @private
+     */
+    _openExternalUrl(url) {
+        log.info(`Opening external link: ${url}`);
+        // Desktop Tauri runtime shell support
+        if (typeof window !== 'undefined' && window.__TAURI_INTERNALS__?.invoke) {
+            window.__TAURI_INTERNALS__.invoke('plugin:opener|open_url', { url })
+                .catch(() => {
+                    try { window.open(url, '_blank'); } catch (_) {}
+                });
+            return;
+        }
+        if (typeof window !== 'undefined' && window.__TAURI__?.core?.invoke) {
+            window.__TAURI__.core.invoke('plugin:opener|open_url', { url })
+                .catch(() => {
+                    try { window.open(url, '_blank'); } catch (_) {}
+                });
+            return;
+        }
+        // Universal web browser fallback
+        try {
+            window.open(url, '_blank');
+        } catch (err) {
+            log.warn('Could not launch window.open:', err);
+        }
+    }
+
+    /**
+     * Closes any currently displayed About modal dialog and safely returns navigation focus.
+     * @private
+     */
+    _closeAboutDialog() {
+        const overlay = this.$('#modal-overlay');
+        if (!overlay || !overlay.classList.contains('visible')) return;
+
+        // Disarm and blur all interactive elements inside dialog to prevent focus latching
+        const actionButtons = overlay.querySelectorAll('button, [tabindex]');
+        actionButtons.forEach((btn) => {
+            btn.setAttribute('tabindex', '-1');
+            btn.setAttribute('disabled', 'true');
+            if (typeof btn.blur === 'function') {
+                btn.blur();
+            }
+        });
+
+        // Hide overlay smoothly
+        overlay.classList.remove('visible');
+        overlay.setAttribute('aria-hidden', 'true');
+        overlay.onclick = null;
+
+        setTimeout(() => {
+            if (overlay) {
+                overlay.innerHTML = '';
+            }
+        }, 300);
+
+        // Pop the modal focus trap and cleanly restore previous focus
+        focusManager.popTrap();
+    }
+
+    /**
+     * Displays the Device Specifications dialog modal with complete hardware identification.
+     * @private
+     */
+    _showDeviceInformationDialog() {
+        const overlay = this.$('#modal-overlay');
+        if (!overlay) return;
+
+        const specs = this._getDeviceSpecsData();
+
+        // Build video codec badges
+        const videoBadgesHtml = specs.videoCodecs
+            .map((c) => {
+                const statusClass = !c.hw ? 'unsupported' : !c.user ? 'disabled' : 'supported';
+                const statusLabel = !c.hw ? ` (${i18n.t('Unsupported') || 'Unsupported'})` : !c.user ? ` (${i18n.t('Disabled') || 'Disabled'})` : '';
+                return `<span class="about-codec-badge ${statusClass}">${c.name}${statusLabel}</span>`;
+            })
+            .join('');
+
+        // Build audio codec badges
+        const audioBadgesHtml = specs.audioCodecs
+            .map((c) => {
+                const statusClass = !c.hw ? 'unsupported' : !c.user ? 'disabled' : 'supported';
+                const statusLabel = !c.hw ? ` (${i18n.t('Unsupported') || 'Unsupported'})` : !c.user ? ` (${i18n.t('Disabled') || 'Disabled'})` : '';
+                return `<span class="about-codec-badge ${statusClass}">${c.name}${statusLabel}</span>`;
+            })
+            .join('');
+
+        overlay.innerHTML = `
+            <div class="settings-modal about-dialog-modal" role="dialog" aria-modal="true" aria-label="${i18n.t('ViewDeviceInfo') || 'Device Specifications'}">
+                <div class="about-dialog-header">
+                    <h2>
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                            <line x1="8" y1="21" x2="16" y2="21"/>
+                            <line x1="12" y1="17" x2="12" y2="21"/>
+                        </svg>
+                        ${i18n.t('ViewDeviceInfo') || 'Device Specifications'}
+                    </h2>
+                    <p class="about-dialog-subtitle">Hardware identity, display pipeline, and hardware decoding decoders.</p>
+                </div>
+
+                <div class="about-dialog-content">
+                    <div class="about-device-specs-grid">
+                        <div class="about-device-tile">
+                            <span class="about-device-label" data-i18n="Model">${i18n.t('Model')}</span>
+                            <span class="about-device-val">${specs.modelName}</span>
+                        </div>
+                        <div class="about-device-tile">
+                            <span class="about-device-label" data-i18n="Platform">${i18n.t('Platform')}</span>
+                            <span class="about-device-val">${specs.platform}</span>
+                        </div>
+                        <div class="about-device-tile">
+                            <span class="about-device-label" data-i18n="Resolution">${i18n.t('Resolution')}</span>
+                            <span class="about-device-val">${specs.resolution}</span>
+                        </div>
+                        <div class="about-device-tile">
+                            <span class="about-device-label" data-i18n="HDRSupport">${i18n.t('HDRSupport')}</span>
+                            <span class="about-device-val">${specs.hdr}</span>
+                        </div>
+                        <div class="about-device-tile span-2">
+                            <span class="about-device-label" data-i18n="VideoCodecs">${i18n.t('VideoCodecs')}</span>
+                            <div class="about-badge-cloud">
+                                ${videoBadgesHtml}
+                            </div>
+                        </div>
+                        <div class="about-device-tile span-2">
+                            <span class="about-device-label" data-i18n="AudioCodecs">${i18n.t('AudioCodecs') || 'Audio Codecs'}</span>
+                            <div class="about-badge-cloud">
+                                ${audioBadgesHtml}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="about-dialog-actions" id="device-info-modal-actions">
+                    <!-- Standard modal dismiss button styled for compact viewports -->
+                    <button class="modal-action-btn focusable about-dialog-close-btn" id="btn-device-info-done" tabindex="0" data-focusable="true">
+                        ${i18n.t('Close') || 'Close'}
+                    </button>
+                </div>
+            </div>
+        `;
+
+        overlay.classList.add('visible');
+        overlay.setAttribute('aria-hidden', 'false');
+
+        // Close on backdrop click
+        overlay.onclick = (e) => {
+            if (e.target === overlay) this._closeAboutDialog();
+        };
+
+        const doneBtn = overlay.querySelector('#btn-device-info-done');
+        if (doneBtn) {
+            doneBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._closeAboutDialog();
+            };
+        }
+
+        // Lock focus trap inside modal with focus on Done button
+        focusManager.pushTrap(overlay.querySelector('.about-dialog-modal'), {
+            orientation: 'horizontal',
+            defaultFocusSelector: '#btn-device-info-done'
+        });
+    }
+
+    /**
+     * Displays GitHub repository and issue tracker dialog with 2 QR codes side by side.
+     * @param {'repo'|'issues'} [initialFocus='repo'] Whether to highlight the repository or issues link
+     * @private
+     */
+    _showGitHubDialog(initialFocus = 'repo') {
+        const overlay = this.$('#modal-overlay');
+        if (!overlay) return;
+
+        overlay.innerHTML = `
+            <div class="settings-modal about-dialog-modal" role="dialog" aria-modal="true" aria-label="GitHub & Bug Reporter">
+                <div class="about-dialog-header">
+                    <h2>
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2A10 10 0 0 0 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.1-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0 0 12 2z"/>
+                        </svg>
+                        GitHub & Bug Tracker
+                    </h2>
+                    <p class="about-dialog-subtitle">Scan with your phone camera, or click to open directly in a browser.</p>
+                </div>
+
+                <div class="about-dialog-content">
+                    <div class="about-qr-grid">
+                        <!-- Repository QR Card -->
+                        <div class="about-qr-card">
+                            <div class="about-qr-image-wrap">
+                                <img src="assets/qr/qr-github.png" class="about-qr-img" alt="GitHub Repository QR Code" />
+                            </div>
+                            <span class="about-qr-title" data-i18n="GitHubRepo">${i18n.t('GitHubRepo') || 'GitHub Repository'}</span>
+                            <span class="about-qr-desc">View source code, release notes, and documentation on GitHub.</span>
+                            <span class="about-qr-url-chip">github.com/MoazSalem/litefin</span>
+                            <button class="btn btn-secondary btn-small focusable about-qr-btn" 
+                                    id="btn-github-open" 
+                                    tabindex="0" 
+                                    data-focusable="true"
+                                    data-nav-right="#btn-issues-open"
+                                    data-nav-down="#btn-about-modal-close">
+                                ${i18n.t('OpenLink') || 'Open Link'}
+                            </button>
+                        </div>
+
+                        <!-- Issues QR Card -->
+                        <div class="about-qr-card">
+                            <div class="about-qr-image-wrap">
+                                <img src="assets/qr/qr-issues.png" class="about-qr-img" alt="GitHub Issues QR Code" />
+                            </div>
+                            <span class="about-qr-title" data-i18n="ReportIssue">${i18n.t('ReportIssue') || 'Quick Issue Reporter'}</span>
+                            <span class="about-qr-desc">Submit bug reports, feature requests, or troubleshooting crash reports.</span>
+                            <span class="about-qr-url-chip">github.com/MoazSalem/litefin/issues</span>
+                            <button class="btn btn-secondary btn-small focusable about-qr-btn" 
+                                    id="btn-issues-open" 
+                                    tabindex="0" 
+                                    data-focusable="true"
+                                    data-nav-left="#btn-github-open"
+                                    data-nav-down="#btn-about-modal-close">
+                                ${i18n.t('OpenLink') || 'Open Link'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="about-dialog-actions" id="github-modal-actions">
+                    <button class="modal-action-btn focusable about-dialog-close-btn" 
+                            id="btn-about-modal-close" 
+                            tabindex="0" 
+                            data-focusable="true"
+                            data-nav-up="#btn-github-open">
+                        ${i18n.t('Close') || 'Close'}
+                    </button>
+                </div>
+            </div>
+        `;
+
+        overlay.classList.add('visible');
+        overlay.setAttribute('aria-hidden', 'false');
+
+        // Bind clicks
+        overlay.onclick = (e) => {
+            if (e.target === overlay) this._closeAboutDialog();
+        };
+
+        const closeBtn = overlay.querySelector('#btn-about-modal-close');
+        if (closeBtn) {
+            closeBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._closeAboutDialog();
+            };
+        }
+
+        const openRepoBtn = overlay.querySelector('#btn-github-open');
+        if (openRepoBtn) {
+            openRepoBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._openExternalUrl('https://github.com/MoazSalem/litefin');
+            };
+        }
+
+        const openIssuesBtn = overlay.querySelector('#btn-issues-open');
+        if (openIssuesBtn) {
+            openIssuesBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._openExternalUrl('https://github.com/MoazSalem/litefin/issues');
+            };
+        }
+
+        // Lock focus trap with contextual initial button
+        focusManager.pushTrap(overlay.querySelector('.about-dialog-modal'), {
+            orientation: 'grid',
+            defaultFocusSelector: initialFocus === 'issues' ? '#btn-issues-open' : '#btn-github-open'
+        });
+    }
+
+    /**
+     * Displays server companion plugins dialog featuring 2 QR codes (Jellyfin & Emby).
+     * @private
+     */
+    _showPluginsDialog() {
+        const overlay = this.$('#modal-overlay');
+        if (!overlay) return;
+
+        overlay.innerHTML = `
+            <div class="settings-modal about-dialog-modal" role="dialog" aria-modal="true" aria-label="Server Companion Plugins">
+                <div class="about-dialog-header">
+                    <h2>
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                            <line x1="12" y1="22.08" x2="12" y2="12"/>
+                        </svg>
+                        Server Companion Plugins
+                    </h2>
+                    <p class="about-dialog-subtitle">Install companion plugins on your media server for Seerr integration and cloud settings backup.</p>
+                </div>
+
+                <div class="about-dialog-content">
+                    <div class="about-qr-grid">
+                        <!-- Jellyfin Plugin QR Card -->
+                        <div class="about-qr-card">
+                            <div class="about-qr-image-wrap">
+                                <img src="assets/qr/qr-plugin-jellyfin.png" class="about-qr-img" alt="Jellyfin Plugin QR Code" />
+                            </div>
+                            <span class="about-qr-title">Jellyfin Plugin</span>
+                            <span class="about-qr-desc">Official server companion plugin for Jellyfin server instances.</span>
+                            <span class="about-qr-url-chip">github.com/MoazSalem/litefin-plugin</span>
+                            <button class="btn btn-secondary btn-small focusable about-qr-btn" 
+                                    id="btn-plugin-jellyfin-open" 
+                                    tabindex="0" 
+                                    data-focusable="true"
+                                    data-nav-right="#btn-plugin-emby-open"
+                                    data-nav-down="#btn-about-modal-close">
+                                ${i18n.t('OpenLink') || 'Open Link'}
+                            </button>
+                        </div>
+
+                        <!-- Emby Plugin QR Card -->
+                        <div class="about-qr-card">
+                            <div class="about-qr-image-wrap">
+                                <img src="assets/qr/qr-plugin-emby.png" class="about-qr-img" alt="Emby Plugin QR Code" />
+                            </div>
+                            <span class="about-qr-title">Emby Plugin</span>
+                            <span class="about-qr-desc">Official server companion plugin for Emby server instances.</span>
+                            <span class="about-qr-url-chip">github.com/MoazSalem/litefin-plugin-emby</span>
+                            <button class="btn btn-secondary btn-small focusable about-qr-btn" 
+                                    id="btn-plugin-emby-open" 
+                                    tabindex="0" 
+                                    data-focusable="true"
+                                    data-nav-left="#btn-plugin-jellyfin-open"
+                                    data-nav-down="#btn-about-modal-close">
+                                ${i18n.t('OpenLink') || 'Open Link'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="about-dialog-actions" id="plugins-modal-actions">
+                    <button class="modal-action-btn focusable about-dialog-close-btn" 
+                            id="btn-about-modal-close" 
+                            tabindex="0" 
+                            data-focusable="true"
+                            data-nav-up="#btn-plugin-jellyfin-open">
+                        ${i18n.t('Close') || 'Close'}
+                    </button>
+                </div>
+            </div>
+        `;
+
+        overlay.classList.add('visible');
+        overlay.setAttribute('aria-hidden', 'false');
+
+        overlay.onclick = (e) => {
+            if (e.target === overlay) this._closeAboutDialog();
+        };
+
+        const closeBtn = overlay.querySelector('#btn-about-modal-close');
+        if (closeBtn) {
+            closeBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._closeAboutDialog();
+            };
+        }
+
+        const openJfBtn = overlay.querySelector('#btn-plugin-jellyfin-open');
+        if (openJfBtn) {
+            openJfBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._openExternalUrl('https://github.com/MoazSalem/litefin-plugin');
+            };
+        }
+
+        const openEmbyBtn = overlay.querySelector('#btn-plugin-emby-open');
+        if (openEmbyBtn) {
+            openEmbyBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._openExternalUrl('https://github.com/MoazSalem/litefin-plugin-emby');
+            };
+        }
+
+        focusManager.pushTrap(overlay.querySelector('.about-dialog-modal'), {
+            orientation: 'grid',
+            defaultFocusSelector: '#btn-plugin-jellyfin-open'
+        });
+    }
+
+    /**
+     * Displays the Discord Community invitation dialog featuring 1 centered QR code.
+     * @private
+     */
+    _showDiscordDialog() {
+        const overlay = this.$('#modal-overlay');
+        if (!overlay) return;
+
+        overlay.innerHTML = `
+            <div class="settings-modal about-dialog-modal compact-modal" role="dialog" aria-modal="true" aria-label="Discord Community">
+                <div class="about-dialog-header">
+                    <h2>
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994.021-.041.001-.09-.041-.106a13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.929 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.894.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+                        </svg>
+                        ${i18n.t('DiscordCommunity') || 'Discord Community'}
+                    </h2>
+                    <p class="about-dialog-subtitle">Scan to join the official Litefin Discord server. Connect with other users, ask questions, and share feedback.</p>
+                </div>
+
+                <div class="about-dialog-content">
+                    <div class="about-qr-grid">
+                        <div class="about-qr-card" style="max-width: 380px;">
+                            <div class="about-qr-image-wrap">
+                                <img src="assets/qr/qr-discord.png" class="about-qr-img" alt="Discord Invite QR Code" />
+                            </div>
+                            <span class="about-qr-title">Official Discord Server</span>
+                            <span class="about-qr-desc">Real-time troubleshooting, alpha announcements, and community discussions.</span>
+                            <span class="about-qr-url-chip">discord.gg/N3VpazBtTx</span>
+                            <button class="btn btn-secondary btn-small focusable about-qr-btn" 
+                                    id="btn-discord-open" 
+                                    tabindex="0" 
+                                    data-focusable="true"
+                                    data-nav-down="#btn-about-modal-close">
+                                ${i18n.t('OpenLink') || 'Open Link'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="about-dialog-actions" id="discord-modal-actions">
+                    <button class="modal-action-btn focusable about-dialog-close-btn" 
+                            id="btn-about-modal-close" 
+                            tabindex="0" 
+                            data-focusable="true"
+                            data-nav-up="#btn-discord-open">
+                        ${i18n.t('Close') || 'Close'}
+                    </button>
+                </div>
+            </div>
+        `;
+
+        overlay.classList.add('visible');
+        overlay.setAttribute('aria-hidden', 'false');
+
+        overlay.onclick = (e) => {
+            if (e.target === overlay) this._closeAboutDialog();
+        };
+
+        const closeBtn = overlay.querySelector('#btn-about-modal-close');
+        if (closeBtn) {
+            closeBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._closeAboutDialog();
+            };
+        }
+
+        const openDiscordBtn = overlay.querySelector('#btn-discord-open');
+        if (openDiscordBtn) {
+            openDiscordBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._openExternalUrl('https://discord.gg/N3VpazBtTx');
+            };
+        }
+
+        focusManager.pushTrap(overlay.querySelector('.about-dialog-modal'), {
+            orientation: 'grid',
+            defaultFocusSelector: '#btn-discord-open'
+        });
+    }
+
+    /**
+     * Displays the Support & Donations dialog featuring 2 QR codes (Buy Me a Coffee & Sponsors).
+     * @private
+     */
+    _showSupportDialog() {
+        const overlay = this.$('#modal-overlay');
+        if (!overlay) return;
+
+        overlay.innerHTML = `
+            <div class="settings-modal about-dialog-modal" role="dialog" aria-modal="true" aria-label="Support Litefin">
+                <div class="about-dialog-header">
+                    <h2>
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                        </svg>
+                        Support & Donations
+                    </h2>
+                    <p class="about-dialog-subtitle">Litefin is free and open-source. Help back continuous development and infrastructure support.</p>
+                </div>
+
+                <div class="about-dialog-content">
+                    <div class="about-qr-grid">
+                        <!-- Buy Me a Coffee QR Card -->
+                        <div class="about-qr-card">
+                            <div class="about-qr-image-wrap">
+                                <img src="assets/qr/qr-donation.png" class="about-qr-img" alt="Buy Me A Coffee QR Code" />
+                            </div>
+                            <span class="about-qr-title">Buy Me a Coffee</span>
+                            <span class="about-qr-desc">Support developer coffee fuels and ongoing rapid release cycles!</span>
+                            <span class="about-qr-url-chip">buymeacoffee.com/moazsalem</span>
+                            <button class="btn btn-secondary btn-small focusable about-qr-btn" 
+                                    id="btn-support-coffee-open" 
+                                    tabindex="0" 
+                                    data-focusable="true"
+                                    data-nav-right="#btn-support-sponsors-open"
+                                    data-nav-down="#btn-about-modal-close">
+                                ${i18n.t('OpenLink') || 'Open Link'}
+                            </button>
+                        </div>
+
+                        <!-- GitHub Sponsors QR Card -->
+                        <div class="about-qr-card">
+                            <div class="about-qr-image-wrap">
+                                <img src="assets/qr/qr-sponsors.png" class="about-qr-img" alt="GitHub Sponsors QR Code" />
+                            </div>
+                            <span class="about-qr-title">GitHub Sponsors</span>
+                            <span class="about-qr-desc">Become an official sponsor of the Litefin repository.</span>
+                            <span class="about-qr-url-chip">github.com/sponsors/MoazSalem</span>
+                            <button class="btn btn-secondary btn-small focusable about-qr-btn" 
+                                    id="btn-support-sponsors-open" 
+                                    tabindex="0" 
+                                    data-focusable="true"
+                                    data-nav-left="#btn-support-coffee-open"
+                                    data-nav-down="#btn-about-modal-close">
+                                ${i18n.t('OpenLink') || 'Open Link'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="about-dialog-actions" id="support-modal-actions">
+                    <button class="modal-action-btn focusable about-dialog-close-btn" 
+                            id="btn-about-modal-close" 
+                            tabindex="0" 
+                            data-focusable="true"
+                            data-nav-up="#btn-support-coffee-open">
+                        ${i18n.t('Close') || 'Close'}
+                    </button>
+                </div>
+            </div>
+        `;
+
+        overlay.classList.add('visible');
+        overlay.setAttribute('aria-hidden', 'false');
+
+        overlay.onclick = (e) => {
+            if (e.target === overlay) this._closeAboutDialog();
+        };
+
+        const closeBtn = overlay.querySelector('#btn-about-modal-close');
+        if (closeBtn) {
+            closeBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._closeAboutDialog();
+            };
+        }
+
+        const openCoffeeBtn = overlay.querySelector('#btn-support-coffee-open');
+        if (openCoffeeBtn) {
+            openCoffeeBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._openExternalUrl('https://www.buymeacoffee.com/moazsalem');
+            };
+        }
+
+        const openSponsorsBtn = overlay.querySelector('#btn-support-sponsors-open');
+        if (openSponsorsBtn) {
+            openSponsorsBtn.onclick = (e) => {
+                e.stopPropagation();
+                this._openExternalUrl('https://github.com/sponsors/MoazSalem');
+            };
+        }
+
+        focusManager.pushTrap(overlay.querySelector('.about-dialog-modal'), {
+            orientation: 'grid',
+            defaultFocusSelector: '#btn-support-coffee-open'
+        });
     }
 
     _renderBackupTab() {
@@ -5233,6 +7097,21 @@ class SettingsPage extends Page {
 
         try {
             msgEl.innerText = i18n.t('CheckingBackupStatus') || 'Checking server for settings backup...';
+
+            // Verify Litefin companion server plugin is installed and active before calling backup endpoint
+            const isPluginAvailable = await api.isLitefinPluginAvailable(true);
+            if (!isPluginAvailable) {
+                msgEl.innerText =
+                    i18n.t('BackupPluginError') ||
+                    'Server backup plugin is not available. Please ensure the Litefin backup plugin is installed on your Jellyfin server.';
+
+                const selectContainer = this.$('#backup-select-container');
+                const actionsContainer = this.$('#backup-actions-container');
+                if (selectContainer) selectContainer.innerHTML = '';
+                if (actionsContainer) actionsContainer.innerHTML = '';
+                return;
+            }
+
             // Perform authenticated GET request to server backup endpoint (returns array)
             const backups = await api.get('/Litefin/Backup');
 
@@ -5844,6 +7723,10 @@ class SettingsPage extends Page {
     _renderDebugTab() {
         const logsEnabled = debugOverlay.isLogsEnabled;
         const overlayEnabled = debugOverlay.isOverlayEnabled;
+        // Check whether low-level Movi player engine logging is enabled (defaults to false)
+        const moviLogsEnabled = storage.getItem('debug_movi_logs') === 'true';
+        // Check whether low-level ExoPlayer native engine logging is enabled (defaults to false)
+        const exoLogsEnabled = storage.getItem('debug_exoplayer_logs') === 'true';
 
         return `
             <div class="settings-tab-content">
@@ -5887,6 +7770,32 @@ class SettingsPage extends Page {
                     <div class="setting-control">
                         <button class="btn btn-option" id="btn-upload-logs" tabindex="0" style="width: auto; min-width: 120px;" data-i18n="Upload">
                             ${i18n.t('Upload')}
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="EnableMoviDebugLogs">${i18n.t('EnableMoviDebugLogs') || 'Enable Movi Engine Logs'}</span>
+                        <span class="setting-description" data-i18n="EnableMoviDebugLogsDescription">${i18n.t('EnableMoviDebugLogsDescription') || 'Output low-level WebAssembly demuxer, FFmpeg, and decoding logs from movi-player to the logger.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${moviLogsEnabled ? 'active' : ''}" 
+                                id="toggle-debug-movi-logs" 
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="EnableExoPlayerDebugLogs">${i18n.t('EnableExoPlayerDebugLogs') || 'Enable ExoPlayer Debug Logs'}</span>
+                        <span class="setting-description" data-i18n="EnableExoPlayerDebugLogsDescription">${i18n.t('EnableExoPlayerDebugLogsDescription') || 'Output low-level Media3 ExoPlayer playback and state events to the console.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${exoLogsEnabled ? 'active' : ''}" 
+                                id="toggle-debug-exoplayer-logs" 
+                                tabindex="0">
                         </button>
                     </div>
                 </div>
@@ -6051,15 +7960,36 @@ class SettingsPage extends Page {
         this._bindEvents();
         this._setupFocus();
 
-        // Default focus to the active tab button in the sidebar.
-        // We do this explicitly instead of relying on last-focused behavior,
-        // to ensure we always start at the current selection.
-        const activeBtn = this.$(`.settings-menu-btn[data-tab="${this.activeTab}"]`);
-        if (activeBtn) {
-            focusManager.focusElement(activeBtn);
-        } else {
-            this.setActiveSection('settings-sidebar');
+        // Initialize mobile portrait 2-page view state
+        // Ensures user begins on the category selection view in portrait orientation
+        this._mobileDetailOpen = false;
+        this._updateMobileViewState();
+
+        // Responsive viewport observer to seamlessly transition layouts on rotation
+        this._onResize = () => {
+            this._updateMobileViewState();
+        };
+        window.addEventListener('resize', this._onResize);
+        window.addEventListener('orientationchange', this._onResize);
+
+        // Default focus to the active tab button in the sidebar (landscape/desktop only).
+        // On mobile portrait, we deliberately avoid focusing or enlarging any tabs.
+        if (!this._isPortraitMode()) {
+            const activeBtn = this.$(`.settings-menu-btn[data-tab="${this.activeTab}"]`);
+            if (activeBtn) {
+                focusManager.focusElement(activeBtn);
+            } else {
+                this.setActiveSection('settings-sidebar');
+            }
         }
+
+        // Intercept browser / system gesture back navigation to close detail view in portrait
+        this._onPopState = () => {
+            if (this._mobileDetailOpen) {
+                this._closeMobileDetail(false);
+            }
+        };
+        window.addEventListener('popstate', this._onPopState);
 
         // If the debug tab is active, populate the live storage usage display
         // so the user gets immediate feedback without having to navigate away.
@@ -6069,15 +7999,41 @@ class SettingsPage extends Page {
             this._updateBackupStatusDisplay();
         }
 
-        // Initial visibility check for Details Page Title Style setting based on current layout setting
-        const currentDetailsLayout = storage.getItem('pref:detailsLayout') || 'posterLeft';
-        this._updateDetailsTitleStyleVisibility(currentDetailsLayout);
+        // Initial visibility check for Details Page Title Style setting based on current layout settings
+        this._updateDetailsTitleStyleVisibility();
+
+        // Initial visibility check for Lighter Background setting based on active theme
+        this._updateLighterBackgroundVisibility();
     }
 
-    _updateDetailsTitleStyleVisibility(layout) {
+    /**
+     * Updates visibility of the lighter background toggle based on active theme mode.
+     * Only available for tinted and classic themes (tinted, tinted-light, classic-dark, classic-light).
+     * @private
+     */
+    _updateLighterBackgroundVisibility() {
+        const item = this.$('#lighter-background-item');
+        if (item) {
+            const currentMode = layoutManager.getThemeMode();
+            const isSupported = ['tinted', 'tinted-light', 'classic-dark', 'classic-light'].includes(currentMode);
+            item.classList.toggle('hidden', !isSupported);
+            focusManager.invalidateCache('settings-content');
+        }
+    }
+
+    _updateDetailsTitleStyleVisibility() {
         const container = this.$('#details-title-style-container');
         if (container) {
-            if (layout === 'backdropMinimal' || layout === 'backdropLeft') {
+            // Retrieve both movie and season/episode layout preferences
+            const movieLayout = storage.getItem('pref:detailsLayout') || 'posterLeft';
+            const seasonLayout = storage.getItem('pref:seasonEpisodeDetailsLayout') || movieLayout;
+
+            // Check if both media types use full backdrop cinematic layouts
+            const isMovieBackdrop = movieLayout === 'backdropMinimal' || movieLayout === 'backdropLeft';
+            const isSeasonBackdrop = seasonLayout === 'backdropMinimal' || seasonLayout === 'backdropLeft';
+
+            // Title style (logo/text selection) is only hidden if ALL details pages use cinematic backdrops
+            if (isMovieBackdrop && isSeasonBackdrop) {
                 container.classList.add('hidden');
             } else {
                 container.classList.remove('hidden');
@@ -6087,18 +8043,18 @@ class SettingsPage extends Page {
     }
 
     _bindEvents() {
-        // Back button
-
         // Sidebar Navigation
         this.$$('.settings-menu-btn').forEach((btn) => {
             btn.addEventListener('click', () => {
                 const tab = btn.dataset.tab;
-                this._switchTab(tab, false, true);
+                if (this._isPortraitMode()) {
+                    // Mobile portrait: drill down into full settings for chosen category
+                    this._openMobileTab(tab);
+                } else {
+                    // Landscape / Desktop: update active tab in split-view panel
+                    this._switchTab(tab, false, true);
+                }
             });
-
-            // Also switch on focus for hover-like preview?
-            // Better to switch on click/enter for stability, or debounce focus.
-            // Let's stick to click/enter (standard behavior)
         });
 
         this._bindContentEvents();
@@ -6210,6 +8166,16 @@ class SettingsPage extends Page {
             });
         }
 
+        // Device-wide resume behavior (Controls tab).
+        const profilesOnResumeToggle = this.$('#toggle-profiles-on-resume');
+        if (profilesOnResumeToggle) {
+            profilesOnResumeToggle.addEventListener('click', () => {
+                const enabled = storage.getItem('pref:showProfilesOnResume') !== 'true';
+                storage.setItem('pref:showProfilesOnResume', String(enabled));
+                profilesOnResumeToggle.classList.toggle('active', enabled);
+            });
+        }
+
         // ==========================================
         // REMEMBER LAST ACTIVE USER TOGGLE (Account tab)
         // ==========================================
@@ -6299,14 +8265,36 @@ class SettingsPage extends Page {
             });
         }
 
+        // ==========================================
+        // TOGGLE LIGHTER BACKGROUND (Tinted & Classic themes)
+        // ==========================================
+        // Controls whether the main canvas background is swapped with the
+        // alternate background for a brighter presentation on supported themes.
+        const lighterBgBtn = this.$('#toggle-lighter-background');
+        if (lighterBgBtn) {
+            lighterBgBtn.addEventListener('click', () => {
+                // Invert the current lighter background setting state
+                const newValue = !layoutManager.getLighterBackground();
+
+                // Persist and apply changes via LayoutManager
+                layoutManager.setLighterBackground(newValue);
+
+                // Update tactile switch element visual state
+                lighterBgBtn.classList.toggle('active', newValue);
+                log.info(`Lighter Background set to: ${newValue}`);
+            });
+        }
+
         // Toggle Enable Collection Rows in Home Screen
         const enableCollectionRowsBtn = this.$('#toggle-enable-collection-rows');
         const moviesColItem = this.$('#trending-movies-collection-item');
         const seriesColItem = this.$('#trending-series-collection-item');
         const colNameItem = this.$('#trending-collection-name-item');
+        const customColsItem = this.$('#setting-custom-collections');
 
         if (enableCollectionRowsBtn) {
             enableCollectionRowsBtn.addEventListener('click', () => {
+                // Determine the next toggle state based on persistent storage
                 const isCurrentlyEnabled = storage.getItem('pref:enableCollectionRows') === 'true';
                 const newValue = !isCurrentlyEnabled;
                 storage.setItem('pref:enableCollectionRows', newValue.toString());
@@ -6332,15 +8320,17 @@ class SettingsPage extends Page {
                         if (labelSpan) labelSpan.innerText = i18n.t('Disabled') || 'Disabled';
                     }
 
-                    // Hide the 3 items
+                    // Hide dependent collection settings items
                     if (moviesColItem) moviesColItem.style.display = 'none';
                     if (seriesColItem) seriesColItem.style.display = 'none';
                     if (colNameItem) colNameItem.style.display = 'none';
+                    if (customColsItem) customColsItem.style.display = 'none';
                 } else {
-                    // Show the 3 items back
+                    // Show dependent collection settings items when enabled
                     if (moviesColItem) moviesColItem.style.display = '';
                     if (seriesColItem) seriesColItem.style.display = '';
                     if (colNameItem) colNameItem.style.display = '';
+                    if (customColsItem) customColsItem.style.display = '';
                 }
 
                 log.info(`Enable Collection Rows set to: ${newValue}`);
@@ -6348,6 +8338,13 @@ class SettingsPage extends Page {
                 // Refresh the home layout ordering manager if present
                 this._setupHomeLayoutUI();
                 focusManager.invalidateCache('settings-content');
+            });
+        }
+
+        const manageCustomColsBtn = this.$('#btn-manage-custom-collections');
+        if (manageCustomColsBtn) {
+            manageCustomColsBtn.addEventListener('click', () => {
+                this._showCustomCollectionsModal();
             });
         }
 
@@ -6379,6 +8376,23 @@ class SettingsPage extends Page {
         }
 
         // =====================================================================
+        // TOGGLE ALWAYS SHOW DETAILED VIEW BUTTON
+        // =====================================================================
+        // Registers click event handler for always displaying the Detailed View
+        // overview button on details and person pages.
+        // =====================================================================
+        const alwaysShowSeeMoreBtn = this.$('#toggle-details-always-show-see-more');
+        if (alwaysShowSeeMoreBtn) {
+            alwaysShowSeeMoreBtn.addEventListener('click', () => {
+                const isAlways = storage.getItem('pref:detailsAlwaysShowSeeMore') === 'true';
+                const newValue = !isAlways;
+                storage.setItem('pref:detailsAlwaysShowSeeMore', newValue.toString());
+                alwaysShowSeeMoreBtn.classList.toggle('active', newValue);
+                log.info(`Always Show Detailed View Button set to: ${newValue}`);
+            });
+        }
+
+        // =====================================================================
         // TOGGLE HIDE GHOST MODE BUTTON
         // =====================================================================
         // Registers the click event handler for the Ghost Mode visibility toggle.
@@ -6398,6 +8412,25 @@ class SettingsPage extends Page {
                 // Instantly update the visual active state using the iOS-style slider transition.
                 hideGhostModeBtn.classList.toggle('active', newValue);
                 log.info(`Hide Ghost Mode Button set to: ${newValue}`);
+            });
+        }
+
+        // =====================================================================
+        // TOGGLE SHOW ACTION BUTTON NAMES TOOLTIP
+        // =====================================================================
+        // Controls whether dynamic tooltip names appear directly below focused
+        // action buttons on the item details page.
+        // =====================================================================
+        const showActionTooltipsBtn = this.$('#toggle-show-action-tooltips');
+        if (showActionTooltipsBtn) {
+            showActionTooltipsBtn.addEventListener('click', () => {
+                // Enabled by default (true unless explicitly stored as 'false')
+                const isEnabled = storage.getItem('pref:showActionTooltips') !== 'false';
+                const newValue = !isEnabled;
+
+                storage.setItem('pref:showActionTooltips', newValue.toString());
+                showActionTooltipsBtn.classList.toggle('active', newValue);
+                log.info(`Show Action Tooltips set to: ${newValue}`);
             });
         }
 
@@ -6422,7 +8455,8 @@ class SettingsPage extends Page {
                 forceExpandablePostersBtn.classList.toggle('active', newValue);
                 log.info(`Force Expandable Posters on Home set to: ${newValue}`);
 
-                // Clear the homepage pageCache so the card layouts refresh instantly on navigation
+                // Clear the homepage pageCache and CardRenderer cache so the card layouts refresh instantly on navigation
+                CardRenderer.clearCache();
                 state.delete('home:pageCache');
             });
         }
@@ -6451,6 +8485,31 @@ class SettingsPage extends Page {
 
                 // Log settings adjustment for user session diagnostics.
                 log.info(`Hide Episode Counts set to: ${newValue}`);
+            });
+        }
+
+        // ==========================================
+        // TOGGLE HIDE PROGRESS BAR
+        // ==========================================
+        //
+        // Controls visibility of media card playback progress indicators.
+        const hideProgressBarBtn = this.$('#toggle-hide-progress-bar');
+
+        // Verify button exists in the active view before attaching handler
+        if (hideProgressBarBtn) {
+            hideProgressBarBtn.addEventListener('click', () => {
+                // Retrieve current setting (defaults to false / visible)
+                const isHidden = storage.getItem('pref:hideProgressBar') === 'true';
+                const newValue = !isHidden;
+
+                // Persist new setting for CardRenderer to consult
+                storage.setItem('pref:hideProgressBar', newValue);
+
+                // Update active class for sleek switch animation
+                hideProgressBarBtn.classList.toggle('active', newValue);
+
+                // Log state transition
+                log.info(`Hide Progress Bar set to: ${newValue}`);
             });
         }
 
@@ -6540,13 +8599,15 @@ class SettingsPage extends Page {
             });
         }
 
-        // Toggle Swap Episode Titles
+        // Toggle Swap Episode Titles (defaults to true)
         const swapEpisodeTitlesBtn = this.$('#toggle-swap-episode-titles');
         if (swapEpisodeTitlesBtn) {
             swapEpisodeTitlesBtn.addEventListener('click', () => {
-                const isEnabled = storage.getItem('pref:swapEpisodeTitles') === 'true';
+                // Check if currently enabled (default is true if not explicitly 'false')
+                const isEnabled = storage.getItem('pref:swapEpisodeTitles') !== 'false';
                 const newValue = !isEnabled;
-                storage.setItem('pref:swapEpisodeTitles', newValue);
+                // Store updated preference
+                storage.setItem('pref:swapEpisodeTitles', newValue.toString());
                 swapEpisodeTitlesBtn.classList.toggle('active', newValue);
                 log.info(`Swap Episode Titles set to: ${newValue}`);
             });
@@ -6664,11 +8725,15 @@ class SettingsPage extends Page {
                 const styleItem = this.$('#hero-carousel-style-item');
                 const zoomItem = this.$('#hero-carousel-zoom-item');
                 const heroQualityItem = this.$('#hero-image-quality-item');
+                const indicatorStyleItem = this.$('#hero-carousel-indicator-style-item');
                 const indicatorAnimItem = this.$('#hero-carousel-indicator-animation-item');
                 const intervalItem = this.$('#hero-carousel-interval-item');
                 const countItem = this.$('#hero-carousel-count-item');
                 const mdbItem = this.$('#hero-carousel-mdb-item');
                 const ignoreWatchedItem = this.$('#hero-carousel-ignore-watched-item');
+
+                // Read current indicator style to determine if animation toggle is applicable
+                const indicatorStyle = storage.getItem('pref:heroCarouselIndicatorStyle') || 'dots';
 
                 // Apply transitions/display toggles based on the master toggle value.
                 if (textTitleItem) textTitleItem.style.display = newValue ? '' : 'none';
@@ -6676,7 +8741,8 @@ class SettingsPage extends Page {
                 if (styleItem) styleItem.style.display = newValue ? '' : 'none';
                 if (zoomItem) zoomItem.style.display = newValue ? '' : 'none';
                 if (heroQualityItem) heroQualityItem.style.display = newValue ? '' : 'none';
-                if (indicatorAnimItem) indicatorAnimItem.style.display = newValue ? '' : 'none';
+                if (indicatorStyleItem) indicatorStyleItem.style.display = newValue ? '' : 'none';
+                if (indicatorAnimItem) indicatorAnimItem.style.display = newValue && indicatorStyle === 'progress' ? '' : 'none';
                 if (intervalItem) intervalItem.style.display = newValue ? '' : 'none';
                 if (countItem) countItem.style.display = newValue ? '' : 'none';
 
@@ -6756,16 +8822,6 @@ class SettingsPage extends Page {
             });
         }
 
-        // Toggle Simple Loader
-        const simpleLoaderBtn = this.$('#toggle-simple-loader');
-        if (simpleLoaderBtn) {
-            simpleLoaderBtn.addEventListener('click', () => {
-                const newValue = !layoutManager.getSimpleLoader();
-                layoutManager.setSimpleLoader(newValue);
-                simpleLoaderBtn.classList.toggle('active', newValue);
-            });
-        }
-
         // Toggle Disable BlurHash
         // Toggles the state of our TV-optimized canvas blurhash background system
         const disableBlurhashBtn = this.$('#toggle-disable-blurhash');
@@ -6782,6 +8838,27 @@ class SettingsPage extends Page {
             });
         }
 
+        /* -----------------------------------------------------------------
+         * Toggle Alpha Picker Scroll Mode (under Library Item Limit)
+         * In unlimited mode, clicking an alphabet letter glides directly to
+         * that letter anchor instead of reloading filtered single-letter lists.
+         * ----------------------------------------------------------------- */
+        const alphaPickerScrollModeBtn = this.$('#toggle-alpha-picker-scroll-mode');
+        if (alphaPickerScrollModeBtn) {
+            alphaPickerScrollModeBtn.addEventListener('click', () => {
+                // Read current state (defaults to true if unset)
+                const isCurrentActive = storage.getItem('pref:alphaPickerScrollMode') !== 'false';
+                const newValue = !isCurrentActive;
+
+                // Save to local storage and toggle premium iOS-style switch state
+                storage.setItem('pref:alphaPickerScrollMode', newValue.toString());
+                alphaPickerScrollModeBtn.classList.toggle('active', newValue);
+
+                // Emit event for real-time listeners across active views
+                eventBus.emit('pref:alphaPickerScrollMode:changed', newValue);
+            });
+        }
+
         // Toggle Only BlurHash Backdrop
         const onlyBlurhashBackdropBtn = this.$('#toggle-only-blurhash-backdrop');
         if (onlyBlurhashBackdropBtn) {
@@ -6789,6 +8866,16 @@ class SettingsPage extends Page {
                 const newValue = !layoutManager.getOnlyBlurHashBackdrop();
                 layoutManager.setOnlyBlurHashBackdrop(newValue);
                 onlyBlurhashBackdropBtn.classList.toggle('active', newValue);
+            });
+        }
+
+        // Toggle Light Music Player
+        const lightMusicPlayerBtn = this.$('#toggle-light-music-player');
+        if (lightMusicPlayerBtn) {
+            lightMusicPlayerBtn.addEventListener('click', () => {
+                const newValue = !layoutManager.getLightMusicPlayer();
+                layoutManager.setLightMusicPlayer(newValue);
+                lightMusicPlayerBtn.classList.toggle('active', newValue);
             });
         }
 
@@ -6816,6 +8903,26 @@ class SettingsPage extends Page {
             });
         }
 
+        // Toggle Reload Page on Resume (Performance Tab)
+        // Persists preference to local storage and updates the tactile toggle switch state
+        const reloadOnResumeBtn = this.$('#toggle-reload-on-resume');
+        if (reloadOnResumeBtn) {
+            reloadOnResumeBtn.addEventListener('click', () => {
+                // Determine current state considering platform default (enabled on TV, disabled on Web)
+                const isTv = platformInfo.isTizen || platformInfo.isWebOS;
+                const saved = storage.getItem('pref:reloadOnResume');
+                const isCurrentlyEnabled = saved !== null ? saved === 'true' : isTv;
+                const newValue = !isCurrentlyEnabled;
+
+                // Persist new value to local storage service
+                storage.setItem('pref:reloadOnResume', newValue.toString());
+
+                // Update visual switch state on the toggle button
+                reloadOnResumeBtn.classList.toggle('active', newValue);
+                log.info(`Reload Page on Resume set to: ${newValue}`);
+            });
+        }
+
         // Toggle Hide Cast & Guest Stars
         const hideCastBtn = this.$('#toggle-hide-cast-section');
         if (hideCastBtn) {
@@ -6836,7 +8943,7 @@ class SettingsPage extends Page {
                 const isHidden = storage.getItem('pref:hideSimilarSection') === 'true';
                 const newValue = !isHidden;
 
-                // Save setting locally and toggle the active HIG switch class
+                // Save setting locally and toggle the active switch class
                 storage.setItem('pref:hideSimilarSection', newValue.toString());
                 hideSimilarBtn.classList.toggle('active', newValue);
                 log.info(`Hide Similar Recommendations set to: ${newValue}`);
@@ -7001,6 +9108,19 @@ class SettingsPage extends Page {
 
                 // Clear the homepage pageCache to refresh randomized hero pool selections
                 state.delete('home:pageCache');
+            });
+        }
+
+        // Toggle Prefer Backdrops Over Thumbs (Wide Cards)
+        const preferBackdropsBtn = this.$('#toggle-prefer-backdrops-over-thumbs');
+        if (preferBackdropsBtn) {
+            preferBackdropsBtn.addEventListener('click', () => {
+                const isEnabled = storage.getItem('pref:preferBackdropsOverThumbs') === 'true';
+                const newValue = !isEnabled;
+                storage.setItem('pref:preferBackdropsOverThumbs', newValue.toString());
+                preferBackdropsBtn.classList.toggle('active', newValue);
+                CardRenderer.clearCache();
+                log.info(`Prefer Backdrops Over Thumbs set to: ${newValue}`);
             });
         }
 
@@ -7257,6 +9377,17 @@ class SettingsPage extends Page {
             });
         }
 
+        // Toggle Colored Buttons Reveal OSD in Stealth Mode
+        const colorButtonsRevealBtn = this.$('#toggle-osd-color-buttons-reveal');
+        if (colorButtonsRevealBtn) {
+            colorButtonsRevealBtn.addEventListener('click', () => {
+                const currentValue = PlayerSettings.get('osdColorButtonsReveal') !== false;
+                const newValue = !currentValue;
+                PlayerSettings.set('osdColorButtonsReveal', newValue);
+                colorButtonsRevealBtn.classList.toggle('active', newValue);
+            });
+        }
+
         // Toggle Keep Focus On Subtitle Offset
         const keepFocusOffsetBtn = this.$('#toggle-keep-focus-subtitle-offset');
         if (keepFocusOffsetBtn) {
@@ -7265,6 +9396,17 @@ class SettingsPage extends Page {
                 const newValue = !currentValue;
                 PlayerSettings.set('keepFocusOnSubtitleOffset', newValue);
                 keepFocusOffsetBtn.classList.toggle('active', newValue);
+            });
+        }
+
+        // Toggle Hide Progress and Time on Seekbar when Unfocused
+        const hideUnfocusedProgressBtn = this.$('#toggle-osd-hide-unfocused-progress');
+        if (hideUnfocusedProgressBtn) {
+            hideUnfocusedProgressBtn.addEventListener('click', () => {
+                const currentValue = PlayerSettings.get('osdHideUnfocusedProgress');
+                const newValue = !currentValue;
+                PlayerSettings.set('osdHideUnfocusedProgress', newValue);
+                hideUnfocusedProgressBtn.classList.toggle('active', newValue);
             });
         }
 
@@ -7331,6 +9473,30 @@ class SettingsPage extends Page {
 
                 // Invalidate focus cache so the newly visible items can be focused
                 focusManager.invalidateCache();
+            });
+        }
+
+        /*
+         * ====================================================================
+         * SUBTITLE OSD DODGING TOGGLE (SMART SHIFT)
+         * ====================================================================
+         * Manages user preference to dynamically elevate text subtitles above
+         * on-screen display controls whenever playback actions or navigation occur.
+         * Default state is enabled (true).
+         * ====================================================================
+         */
+        const osdDodgingBtn = this.$('#subtitle-osd-dodging-toggle');
+        if (osdDodgingBtn) {
+            osdDodgingBtn.addEventListener('click', () => {
+                // Read current preference state (defaults to true if unset)
+                const currentValue = PlayerSettings.get('subtitleOsdDodging') !== false;
+                const newValue = !currentValue;
+
+                // Persist new toggle state in PlayerSettings
+                PlayerSettings.set('subtitleOsdDodging', newValue);
+
+                // Update visual active state on toggle switch button
+                osdDodgingBtn.classList.toggle('active', newValue);
             });
         }
 
@@ -7438,10 +9604,14 @@ class SettingsPage extends Page {
         // Generic handler for all toggle-switch buttons with data-setting attribute
         // Each toggle reads/writes to PlayerSettings and invalidates the cached profile
         const profileToggles = [
+            'toggle-prefer-direct-play-audio',
             'toggle-enable-flac-in-video',
             'toggle-enable-fmp4-hls',
             'toggle-force-fmp4-hls',
             'toggle-force-transcode',
+            // Always remux MKV containers to MP4 — strips MKV from DirectPlayProfiles
+            // so the server falls back to lossless DirectStream into MP4
+            'toggle-remux-mkv-to-mp4',
             'toggle-force-direct-play',
             'toggle-background-service',
             // Interlaced content fallback — auto-switch to HTML5 when AVPlay
@@ -7487,6 +9657,50 @@ class SettingsPage extends Page {
                 this._openThemeColorModal();
             });
         }
+
+        // Loading Indicator Style Picker Dialog Trigger
+        const btnLoaderStylePicker = this.$('#btn-loader-style-picker');
+        if (btnLoaderStylePicker) {
+            btnLoaderStylePicker.addEventListener('click', () => {
+                this._openLoaderStyleModal();
+            });
+        }
+
+        // =====================================================================
+        // Fallback Audio Languages Multi-Slot Modal Trigger
+        // =====================================================================
+        // Opens the unified modal containing the 3-slot priority tab switcher
+        // at the top for selecting fallbacks 1, 2, and 3 under a single setting.
+        const btnAudioFallbacks = this.$('#audio-fallback-languages-btn');
+        if (btnAudioFallbacks) {
+            btnAudioFallbacks.addEventListener('click', async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                await this._openAudioFallbackModal();
+            });
+        }
+
+        // Keep loading style button label in sync
+        eventBus.on('loaderStyle:changed', ({ style }) => {
+            const triggerLabel = this.$('#loader-style-btn-label');
+            if (triggerLabel) {
+                const styleNames = {
+                    'dots': i18n.t('LoaderStyleDots') || 'Pulsing Dots',
+                    'ring': i18n.t('LoaderStyleRing') || 'Rotating Ring',
+                    'dual-ring': i18n.t('LoaderStyleDualRing') || 'Dual Ring',
+                    'orbit': i18n.t('LoaderStyleOrbit') || 'Orbital Bead',
+                    'satellite': i18n.t('LoaderStyleSatellite') || 'Satellite Ring',
+                    'triple-ring': i18n.t('LoaderStyleTripleRing') || 'Triple Gyro',
+                    'dotted-ring': i18n.t('LoaderStyleDottedRing') || 'Dotted Eclipse',
+                    'sonar-ring': i18n.t('LoaderStyleSonarRing') || 'Sonar Aperture',
+                    'eclipse-sweep': i18n.t('LoaderStyleEclipseSweep') || 'Crescent Sweep',
+                    'push-pulse': i18n.t('LoaderStylePushPulse') || 'Push Pulse',
+                    'horizontal-dots': i18n.t('LoaderStyleHorizontalDots') || 'Fading Trio',
+                    'pulsing-grid': i18n.t('LoaderStylePulsingGrid') || 'Morphing Grid'
+                };
+                triggerLabel.textContent = styleNames[style] || style;
+            }
+        });
 
         // Initialize Custom Dropdowns
         this._bindDropdownEvents();
@@ -7768,7 +9982,7 @@ class SettingsPage extends Page {
         `;
     }
 
-    _renderSelectionModal(title, options, currentValue, onSelect) {
+    _renderSelectionModal(title, options, currentValue, onSelect, selectId = '') {
         const overlay = this.$('#modal-overlay');
         if (!overlay) return;
 
@@ -7776,116 +9990,285 @@ class SettingsPage extends Page {
         this._prevFocus = focusManager.getFocused();
         this._prevSection = focusManager.getActiveSection();
 
-        overlay.innerHTML = `
-            <div class="settings-modal" role="dialog" aria-modal="true">
-                <div class="modal-header">
-                    <h2>${title}</h2>
-                </div>
-                <div class="modal-options">
-                    ${options.length === 0
+        // Check if this dropdown is a language selection menu
+        const isLanguageSelect = selectId === 'app-language-select' ||
+            selectId === 'audio-lang-select' ||
+            isAudioFallbackSelect(selectId) ||
+            selectId === 'subtitle-lang-select' ||
+            (title && (title.toLowerCase().includes('language') || title.toLowerCase().includes('idioma') || title.toLowerCase().includes('langue') || title.toLowerCase().includes('sprache')));
+
+        // Determine initial filter view (if favorites exist and this is a language picker, default to favorites)
+        let activeFilter = (isLanguageSelect && languageManager.hasFavorites()) ? 'favorites' : 'all';
+
+        const renderModalContent = () => {
+            // Determine active options according to filter
+            let displayOptions = options;
+            if (isLanguageSelect && activeFilter === 'favorites') {
+                displayOptions = languageManager.filterOptions(options);
+            }
+
+            const favoritesCount = options.filter(o => languageManager.isFavorite(o)).length;
+
+            let filterPillsHtml = '';
+            if (isLanguageSelect && languageManager.hasFavorites()) {
+                filterPillsHtml = `
+                    <div class="modal-filter-pills" id="modal-lang-filter-pills">
+                        <button class="modal-filter-pill ${activeFilter === 'favorites' ? 'active' : ''}" data-filter="favorites" tabindex="0">
+                            ★ ${i18n.t('FavoritesOnly') || 'Favorites'} (${favoritesCount})
+                        </button>
+                        <button class="modal-filter-pill ${activeFilter === 'all' ? 'active' : ''}" data-filter="all" tabindex="0">
+                            ${i18n.t('AllLanguages') || 'All Languages'} (${options.length})
+                        </button>
+                    </div>
+                `;
+            }
+
+            const optionsHtml = displayOptions.length === 0
                 ? `
-                        <div class="modal-empty-placeholder" style="padding: 24px 16px; text-align: center; opacity: 0.7; font-size: 1.1rem; pointer-events: none;" data-i18n="NoOptionsAvailable">
-                            ${i18n.t('NoOptionsAvailable') || 'No options available'}
-                        </div>
-                    `
-                : options
-                    .map((opt) => {
-                        let badge = '';
-                        if (opt.completeness !== undefined) {
-                            const percentage = Math.floor(opt.completeness);
-                            let innerBadge = '';
-                            if (percentage === 0) {
-                                innerBadge = `<span class="track-badge lang-badge badge-danger">0%</span>`;
-                            } else if (percentage < 85) {
-                                innerBadge = `<span class="track-badge lang-badge badge-warning">${percentage}%</span>`;
-                            } else {
-                                innerBadge = `<span class="track-badge lang-badge badge-success">100%</span>`;
-                            }
-                            badge = `<span class="track-badges">${innerBadge}</span>`;
+                    <div class="modal-empty-placeholder" style="padding: 24px 16px; text-align: center; opacity: 0.7; font-size: 1.1rem; pointer-events: none;" data-i18n="NoOptionsAvailable">
+                        ${i18n.t('NoOptionsAvailable') || 'No options available'}
+                    </div>
+                `
+                : displayOptions.map((opt) => {
+                    let badge = '';
+                    if (opt.completeness !== undefined) {
+                        const percentage = Math.floor(opt.completeness);
+                        let innerBadge = '';
+                        if (percentage === 0) {
+                            innerBadge = `<span class="track-badge lang-badge badge-danger">0%</span>`;
+                        } else if (percentage < 85) {
+                            innerBadge = `<span class="track-badge lang-badge badge-warning">${percentage}%</span>`;
+                        } else {
+                            innerBadge = `<span class="track-badge lang-badge badge-success">100%</span>`;
                         }
-                        return `
+                        badge = `<span class="track-badges">${innerBadge}</span>`;
+                    }
+
+                    // For language dropdowns, show a star toggle button on the right
+                    let starBtnHtml = '';
+                    if (isLanguageSelect) {
+                        const valStr = String(opt.value).toLowerCase();
+                        const isSpecial = valStr === 'none' || valStr === 'default' || valStr === 'auto' || valStr === '-1';
+                        if (!isSpecial) {
+                            const isFav = languageManager.isFavorite(opt);
+                            starBtnHtml = `
+                                <span class="modal-star-btn ${isFav ? 'active' : ''}" data-value="${opt.value}" title="Toggle Favorite" role="button" aria-label="Toggle Favorite">
+                                    ${isFav ? '★' : '☆'}
+                                </span>
+                            `;
+                        }
+                    }
+
+                    return `
                         <button class="modal-option-btn ${String(opt.value) === String(currentValue) ? 'selected' : ''}" 
                                 data-value="${opt.value}"
                                 tabindex="0">
-                             <span style="margin-right: 12px;">${escapeHtml(i18n.ensureBiDi(opt.label))}</span>
-                             ${badge}
+                            <span class="modal-option-label">${escapeHtml(i18n.ensureBiDi(opt.label))}</span>
+                            ${badge}
+                            ${starBtnHtml}
                         </button>
                     `;
-                    })
-                    .join('')
+                }).join('');
+
+            overlay.innerHTML = `
+                <div class="settings-modal" role="dialog" aria-modal="true">
+                    <div class="modal-header">
+                        <h2>${title}</h2>
+                    </div>
+                    ${filterPillsHtml}
+                    <div class="modal-options">
+                        ${optionsHtml}
+                    </div>
+                    <div class="modal-actions">
+                        <button class="modal-action-btn" id="btn-modal-cancel" tabindex="0" data-i18n="ButtonCancel">${i18n.t('ButtonCancel')}</button>
+                    </div>
+                </div>
+            `;
+
+            // Bind option clicks
+            overlay.querySelectorAll('.modal-option-btn').forEach((btn) => {
+                btn.addEventListener('click', (e) => {
+                    // Check if star button inside was clicked
+                    if (e.target.closest('.modal-star-btn')) {
+                        e.stopPropagation();
+                        const starBtn = e.target.closest('.modal-star-btn');
+                        const val = starBtn.dataset.value;
+                        const matchedOpt = options.find((o) => String(o.value) === String(val)) || val;
+                        const isNowFav = languageManager.toggleFavorite(matchedOpt);
+
+                        if (activeFilter === 'all') {
+                            // In "All Languages" view, update in-place without destroying DOM or losing scroll/focus
+                            starBtn.classList.toggle('active', isNowFav);
+                            starBtn.textContent = isNowFav ? '★' : '☆';
+
+                            // Update the Favorites count badge on the pill
+                            const favPill = overlay.querySelector('.modal-filter-pill[data-filter="favorites"]');
+                            if (favPill) {
+                                const newCount = options.filter((o) => languageManager.isFavorite(o)).length;
+                                favPill.textContent = `★ ${i18n.t('FavoritesOnly') || 'Favorites'} (${newCount})`;
+                            }
+                        } else {
+                            // In "Favorites" view, item is removed from view, preserve focus position on nearest option
+                            const currentIdx = Array.from(overlay.querySelectorAll('.modal-option-btn')).indexOf(btn);
+                            renderModalContent();
+                            const remainingOptions = overlay.querySelectorAll('.modal-option-btn');
+                            if (remainingOptions.length > 0) {
+                                const targetIdx = Math.min(currentIdx, remainingOptions.length - 1);
+                                focusManager.setActiveSection('modal-options');
+                                focusManager.focusElement(remainingOptions[targetIdx]);
+                            }
+                        }
+                        return;
+                    }
+                    e.stopPropagation();
+                    onSelect(btn.dataset.value);
+                    this._closeSelectionModal();
+                });
+            });
+
+            // Bind filter pill clicks
+            overlay.querySelectorAll('.modal-filter-pill').forEach((pill) => {
+                pill.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    activeFilter = pill.dataset.filter;
+                    renderModalContent();
+                });
+            });
+
+            overlay.querySelector('#btn-modal-cancel').addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._closeSelectionModal();
+            });
+
+            // Allow exiting modal by clicking the backdrop outside dialog
+            overlay.onclick = (e) => {
+                if (e.target === overlay) {
+                    e.stopPropagation();
+                    this._closeSelectionModal();
+                }
+            };
+
+            // Register Focus Sections with Left/Right tab switching
+            if (overlay.querySelector('#modal-lang-filter-pills')) {
+                this.registerFocusSection('modal-filter-pills', overlay.querySelector('#modal-lang-filter-pills'), {
+                    orientation: 'horizontal',
+                    leaveDown: 'modal-options',
+                    onMove: (direction) => {
+                        const isRtl = document.documentElement.getAttribute('dir') === 'rtl';
+                        if (direction === 'left') {
+                            const targetFilter = isRtl ? 'all' : 'favorites';
+                            if (activeFilter !== targetFilter) {
+                                activeFilter = targetFilter;
+                                renderModalContent();
+                                setTimeout(() => {
+                                    const pill = overlay.querySelector(`.modal-filter-pill[data-filter="${targetFilter}"]`);
+                                    if (pill) focusManager.focusElement(pill);
+                                }, 50);
+                                return true;
+                            }
+                        } else if (direction === 'right') {
+                            const targetFilter = isRtl ? 'favorites' : 'all';
+                            if (activeFilter !== targetFilter) {
+                                activeFilter = targetFilter;
+                                renderModalContent();
+                                setTimeout(() => {
+                                    const pill = overlay.querySelector(`.modal-filter-pill[data-filter="${targetFilter}"]`);
+                                    if (pill) focusManager.focusElement(pill);
+                                }, 50);
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                });
             }
-                </div>
-                <div class="modal-actions">
-                    <button class="modal-action-btn" id="btn-modal-cancel" tabindex="0" data-i18n="ButtonCancel">${i18n.t('ButtonCancel')}</button>
-                </div>
-            </div>
-        `;
+
+            this.registerFocusSection('modal-options', overlay.querySelector('.modal-options'), {
+                orientation: 'vertical',
+                leaveDown: 'modal-actions',
+                leaveUp: overlay.querySelector('#modal-lang-filter-pills') ? 'modal-filter-pills' : 'modal-actions',
+                enterTo: 'last-focused',
+                onMove: (direction) => {
+                    // Allow switching between Favorites and All Languages via Left/Right arrows while browsing options
+                    if (isLanguageSelect && languageManager.hasFavorites()) {
+                        const isRtl = document.documentElement.getAttribute('dir') === 'rtl';
+                        if (direction === 'left') {
+                            const targetFilter = isRtl ? 'all' : 'favorites';
+                            if (activeFilter !== targetFilter) {
+                                activeFilter = targetFilter;
+                                renderModalContent();
+                                return true;
+                            }
+                        } else if (direction === 'right') {
+                            const targetFilter = isRtl ? 'favorites' : 'all';
+                            if (activeFilter !== targetFilter) {
+                                activeFilter = targetFilter;
+                                renderModalContent();
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+            });
+
+            this.registerFocusSection('modal-actions', overlay.querySelector('.modal-actions'), {
+                orientation: 'horizontal',
+                leaveUp: 'modal-options',
+                onMove: (direction) => {
+                    if (direction === 'down') {
+                        focusManager.setActiveSection('modal-options', true, null, { enterTo: 'first' });
+                        return true;
+                    }
+                    return false;
+                }
+            });
+
+            // Focus appropriate element
+            if (displayOptions.length === 0) {
+                focusManager.setActiveSection('modal-actions');
+                setTimeout(() => {
+                    const cancelBtn = overlay.querySelector('#btn-modal-cancel');
+                    if (cancelBtn) focusManager.focusElement(cancelBtn);
+                }, 50);
+            } else {
+                focusManager.setActiveSection('modal-options');
+                setTimeout(() => {
+                    const selected = overlay.querySelector('.modal-option-btn.selected') || overlay.querySelector('.modal-option-btn');
+                    if (selected) focusManager.focusElement(selected);
+                }, 50);
+            }
+        };
 
         // Show Overlay
         overlay.classList.add('visible');
         overlay.setAttribute('aria-hidden', 'false');
 
-        // Bind Events
-        overlay.querySelectorAll('.modal-option-btn').forEach((btn) => {
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                onSelect(btn.dataset.value);
-                this._closeSelectionModal();
-            });
-        });
-
-        overlay.querySelector('#btn-modal-cancel').addEventListener('click', (e) => {
-            e.stopPropagation();
-            this._closeSelectionModal();
-        });
-
-        // Register Focus Sections
-        this.registerFocusSection('modal-options', overlay.querySelector('.modal-options'), {
-            orientation: 'vertical',
-            leaveDown: 'modal-actions',
-            leaveUp: 'modal-actions',
-            enterTo: 'last-focused'
-        });
-
-        this.registerFocusSection('modal-actions', overlay.querySelector('.modal-actions'), {
-            orientation: 'horizontal',
-            leaveUp: 'modal-options',
-            onMove: (direction) => {
-                if (direction === 'down') {
-                    focusManager.setActiveSection('modal-options', true, null, { enterTo: 'first' });
-                    return true;
-                }
-                return false;
-            }
-        });
-
-        // Set Focus
-        if (options.length === 0) {
-            focusManager.setActiveSection('modal-actions');
-            setTimeout(() => {
-                const cancelBtn = overlay.querySelector('#btn-modal-cancel');
-                if (cancelBtn) focusManager.focusElement(cancelBtn);
-            }, 50);
-        } else {
-            focusManager.setActiveSection('modal-options');
-            setTimeout(() => {
-                const selected =
-                    overlay.querySelector('.modal-option-btn.selected') || overlay.querySelector('.modal-option-btn');
-                if (selected) focusManager.focusElement(selected);
-            }, 50);
-        }
+        renderModalContent();
     }
 
     _closeSelectionModal() {
         const overlay = this.$('#modal-overlay');
         if (!overlay || !overlay.classList.contains('visible')) return;
 
+        // Clean up modal focus listener to prevent memory leaks or dangling event handlers
+        if (this._modalFocusChangedHandler) {
+            eventBus.off('focus:changed', this._modalFocusChangedHandler);
+            this._modalFocusChangedHandler = null;
+        }
+
+        // Clean up backdrop click handler
+        overlay.onclick = null;
+
         overlay.classList.remove('visible');
         overlay.setAttribute('aria-hidden', 'true');
         overlay.innerHTML = '';
 
         // Unregister modal focus
+        focusManager.unregister('modal-filter-pills');
+        focusManager.unregister('modal-slot-pills');
         focusManager.unregister('modal-options');
+        focusManager.unregister('modal-loader-options');
         focusManager.unregister('modal-color-grid');
         focusManager.unregister('modal-actions');
         focusManager.unregister('modal-error-content');
@@ -7900,6 +10283,454 @@ class SettingsPage extends Page {
 
         this._prevFocus = null;
         this._prevSection = null;
+    }
+
+    /**
+     * Get a human-readable summary of configured fallback audio languages.
+     * Delegates to the unified preferences summary helper.
+     * @returns {string} Summary string formatted for the settings dropdown trigger
+     */
+    _getAudioFallbackSummaryLabel() {
+        return this._getAudioPreferencesSummaryLabel();
+    }
+
+    /**
+     * Get a human-readable summary of preferred and fallback audio languages.
+     * Formats configured audio priorities (e.g. "Japanese • 1: English")
+     * or defaults to "Default" when no custom preferences are specified.
+     * @returns {string} Formatted summary string for the settings trigger button
+     */
+    _getAudioPreferencesSummaryLabel() {
+        // Retrieve preferred audio language setting
+        const rawPref = storage.getItem('pref:audioLang');
+        const prefVal = (!rawPref || rawPref === 'Default') ? 'Default' : rawPref;
+        let prefLabel = i18n.t('Default') || 'Default';
+
+        // Match localized label for preferred language if available
+        if (prefVal !== 'Default') {
+            const match = (this.prefLanguages || []).find((o) => String(o.value) === String(prefVal));
+            prefLabel = match ? match.label : prefVal;
+        }
+
+        // Collect configured fallback slots
+        const fallbackParts = [];
+        for (const priority of AUDIO_FALLBACK_SLOTS) {
+            const raw = storage.getItem(`pref:audioLangFallback${priority}`);
+            if (raw && raw !== 'Default' && raw !== 'none') {
+                const match = (this.prefLanguages || []).find((o) => String(o.value) === String(raw));
+                const name = match ? match.label : raw;
+                fallbackParts.push(`${priority}: ${name}`);
+            }
+        }
+
+        // Return combined summary string
+        if (fallbackParts.length > 0) {
+            return `${prefLabel} • ${fallbackParts.join(' • ')}`;
+        }
+        return prefLabel;
+    }
+
+    /**
+     * Open the unified preferred and fallback audio languages configuration modal.
+     * Renders a 2-tier tab bar:
+     * - Tier 1 (Filter): 2 tabs for Favorites and All Languages
+     * - Tier 2 (Priority Slot): 4 tabs for Preferred Language, Fallback 1, Fallback 2, Fallback 3
+     * Allows selecting languages per slot with remote D-pad Left/Right navigation across slots.
+     */
+    async _openAudioFallbackModal() {
+        const overlay = this.$('#modal-overlay');
+        if (!overlay) return;
+
+        // Ensure cultures are loaded from server before displaying language options
+        if (!cachedCultures || !this.prefLanguages || this.prefLanguages.length <= 1) {
+            try {
+                const cultures = await api.getCultures();
+                if (cultures && Array.isArray(cultures)) {
+                    languageManager.registerCultures(cultures);
+                    cachedCultures = cultures
+                        .map((c) => ({
+                            value: c.ThreeLetterISOLanguageName || c.Name,
+                            label: i18n.ensureBiDi(c.DisplayName),
+                            ThreeLetterISOLanguageName: c.ThreeLetterISOLanguageName,
+                            TwoLetterISOLanguageName: c.TwoLetterISOLanguageName,
+                            DisplayName: c.DisplayName
+                        }))
+                        .sort((a, b) => a.label.localeCompare(b.label));
+                    this.prefLanguages = cachedCultures;
+                }
+            } catch (err) {
+                log.error('Failed to load cultures for audio language modal:', err);
+            }
+        }
+
+        // Store focus context for restoration upon closing
+        this._prevFocus = focusManager.getFocused();
+        this._prevSection = focusManager.getActiveSection();
+
+        // 4 priority slots: 'pref' (preferred), '1', '2', '3' (fallbacks)
+        const SLOTS = ['pref', '1', '2', '3'];
+        let activeSlot = 'pref';
+
+        // Filter state: default to 'favorites' if favorites exist, otherwise 'all'
+        let activeFilter = languageManager.hasFavorites() ? 'favorites' : 'all';
+
+        // Clean list of server cultures (excluding sentinel keys)
+        const validLanguages = (this.prefLanguages || []).filter(
+            (o) => o.value !== 'Default' && o.value !== 'none'
+        );
+
+        // Helper: retrieve human-readable display label, short code, and value for a given slot
+        const getSlotValueAndLabel = (slot) => {
+            if (slot === 'pref') {
+                const raw = storage.getItem('pref:audioLang');
+                const val = (!raw || raw === 'Default') ? 'Default' : raw;
+                if (val === 'Default') {
+                    return {
+                        value: 'Default',
+                        label: i18n.t('Default') || 'Default',
+                        shortLabel: i18n.t('Default') || 'Default'
+                    };
+                }
+                const match = validLanguages.find((o) => String(o.value) === String(val));
+                const fullLabel = match ? match.label : val;
+                // Extract 2-letter ISO language code (e.g., 'en', 'ar') for ultra-compact tab headers
+                const twoLetter = match?.TwoLetterISOLanguageName || languageManager.normalizeLanguage(val)?.twoLetter;
+                const shortCode = (twoLetter || match?.ThreeLetterISOLanguageName || val).toLowerCase();
+                return { value: val, label: fullLabel, shortLabel: shortCode };
+            } else {
+                const raw = storage.getItem(`pref:audioLangFallback${slot}`);
+                const val = (!raw || raw === 'Default' || raw === 'none') ? 'none' : raw;
+                if (val === 'none') {
+                    return {
+                        value: 'none',
+                        label: i18n.t('None') || 'None',
+                        shortLabel: i18n.t('None') || 'None'
+                    };
+                }
+                const match = validLanguages.find((o) => String(o.value) === String(val));
+                const fullLabel = match ? match.label : val;
+                // Extract 2-letter ISO language code (e.g., 'en', 'ar') for ultra-compact tab headers
+                const twoLetter = match?.TwoLetterISOLanguageName || languageManager.normalizeLanguage(val)?.twoLetter;
+                const shortCode = (twoLetter || match?.ThreeLetterISOLanguageName || val).toLowerCase();
+                return { value: val, label: fullLabel, shortLabel: shortCode };
+            }
+        };
+
+        const renderModal = (focusTarget = 'options') => {
+            // Read active slot's current setting
+            const currentSlotInfo = getSlotValueAndLabel(activeSlot);
+            const currentSlotVal = currentSlotInfo.value;
+
+            // Slot special top option ('Default' for pref, 'None' for fallbacks)
+            const specialOption = activeSlot === 'pref'
+                ? { value: 'Default', label: i18n.t('Default') || 'Default' }
+                : { value: 'none', label: i18n.t('None') || 'None' };
+
+            // Languages filtered according to active filter tab
+            const filteredLanguages = activeFilter === 'favorites'
+                ? languageManager.filterOptions(validLanguages)
+                : validLanguages;
+
+            // Full options list for the active slot
+            const slotOptions = [specialOption, ...filteredLanguages];
+
+            // Counts for filter pills
+            const favoritesCount = validLanguages.filter((o) => languageManager.isFavorite(o)).length;
+            const allCount = validLanguages.length;
+
+            // Tier 1: 2 Filter Tabs (Favorites vs All Languages)
+            const filterPillsHtml = `
+                <div class="modal-filter-pills has-slot-subrow" id="modal-lang-filter-pills">
+                    <button class="modal-filter-pill ${activeFilter === 'favorites' ? 'active' : ''}" 
+                            data-filter="favorites" 
+                            tabindex="0">
+                        ★ ${i18n.t('FavoritesOnly') || 'Favorites'} (${favoritesCount})
+                    </button>
+                    <button class="modal-filter-pill ${activeFilter === 'all' ? 'active' : ''}" 
+                            data-filter="all" 
+                            tabindex="0">
+                        ${i18n.t('AllLanguages') || 'All Languages'} (${allCount})
+                    </button>
+                </div>
+            `;
+
+            // Tier 2: 4 Slot Tabs (Preferred, Fallback 1, Fallback 2, Fallback 3)
+            const slotPillsHtml = `
+                <div class="modal-slot-pills" id="modal-audio-slot-pills">
+                    ${SLOTS.map((slot) => {
+                        const isActive = slot === activeSlot;
+                        const info = getSlotValueAndLabel(slot);
+
+                        // Concise tab title prefix: "Preferred" or "Fallback 1", "Fallback 2", etc.
+                        const displayTitle = slot === 'pref'
+                            ? (i18n.t('Preferred') || 'Preferred')
+                            : `${i18n.t('Fallback') || 'Fallback'} ${slot}`;
+
+                        return `
+                            <button class="modal-filter-pill modal-slot-pill ${isActive ? 'active' : ''}" 
+                                    data-slot="${slot}" 
+                                    tabindex="0"
+                                    title="${displayTitle}: ${escapeHtml(info.label)}">
+                                <span class="slot-pill-title">${displayTitle}:</span>
+                                <span class="slot-pill-val">${escapeHtml(info.shortLabel)}</span>
+                            </button>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+
+            // Tier 3: Language Options List
+            const optionsHtml = slotOptions.map((opt) => {
+                const isSelected = String(opt.value) === String(currentSlotVal);
+                const valStr = String(opt.value).toLowerCase();
+                const isSpecial = valStr === 'none' || valStr === 'default' || valStr === 'auto' || valStr === '-1';
+
+                let starBtnHtml = '';
+                if (!isSpecial) {
+                    const isFav = languageManager.isFavorite(opt);
+                    starBtnHtml = `
+                        <span class="modal-star-btn ${isFav ? 'active' : ''}" 
+                              data-value="${opt.value}" 
+                              title="Toggle Favorite" 
+                              role="button" 
+                              aria-label="Toggle Favorite">
+                            ${isFav ? '★' : '☆'}
+                        </span>
+                    `;
+                }
+
+                return `
+                    <button class="modal-option-btn ${isSelected ? 'selected' : ''}" 
+                            data-value="${opt.value}" 
+                            tabindex="0">
+                        <span class="modal-option-label">${escapeHtml(i18n.ensureBiDi(opt.label))}</span>
+                        ${starBtnHtml}
+                    </button>
+                `;
+            }).join('');
+
+            // Assemble Modal Overlay Markup
+            overlay.innerHTML = `
+                <div class="settings-modal" role="dialog" aria-modal="true">
+                    <div class="modal-header">
+                        <h2>${i18n.t('LabelAudioLanguagePreference') || 'Preferred audio language'}</h2>
+                    </div>
+                    ${filterPillsHtml}
+                    ${slotPillsHtml}
+                    <div class="modal-options">
+                        ${optionsHtml}
+                    </div>
+                    <div class="modal-actions">
+                        <button class="modal-action-btn primary" id="btn-modal-done" tabindex="0" data-i18n="Done">${i18n.t('Done') || 'Done'}</button>
+                    </div>
+                </div>
+            `;
+
+            // Wire option clicks
+            overlay.querySelectorAll('.modal-option-btn').forEach((btn) => {
+                btn.addEventListener('click', (e) => {
+                    // Check if star favorite button was clicked
+                    if (e.target.closest('.modal-star-btn')) {
+                        e.stopPropagation();
+                        const starBtn = e.target.closest('.modal-star-btn');
+                        const val = starBtn.dataset.value;
+                        const matchedOpt = validLanguages.find((o) => String(o.value) === String(val)) || val;
+                        const isNowFav = languageManager.toggleFavorite(matchedOpt);
+
+                        if (activeFilter === 'all') {
+                            // Update star in-place without rebuilding options
+                            starBtn.classList.toggle('active', isNowFav);
+                            starBtn.textContent = isNowFav ? '★' : '☆';
+                            // Update Favorites count pill in Row 1
+                            const favPill = overlay.querySelector('.modal-filter-pill[data-filter="favorites"]');
+                            if (favPill) {
+                                const newCount = validLanguages.filter((o) => languageManager.isFavorite(o)).length;
+                                favPill.textContent = `★ ${i18n.t('FavoritesOnly') || 'Favorites'} (${newCount})`;
+                            }
+                        } else {
+                            // In favorites view, removing favorite removes option, preserve focus
+                            const currentIdx = Array.from(overlay.querySelectorAll('.modal-option-btn')).indexOf(btn);
+                            renderModal('options');
+                            const remaining = overlay.querySelectorAll('.modal-option-btn');
+                            if (remaining.length > 0) {
+                                const targetIdx = Math.min(currentIdx, remaining.length - 1);
+                                focusManager.setActiveSection('modal-options');
+                                focusManager.focusElement(remaining[targetIdx]);
+                            }
+                        }
+                        return;
+                    }
+
+                    e.stopPropagation();
+                    const chosenValue = btn.dataset.value;
+
+                    // Persist selection according to active slot
+                    if (activeSlot === 'pref') {
+                        storage.setItem('pref:audioLang', chosenValue);
+                    } else {
+                        storage.setItem(`pref:audioLangFallback${activeSlot}`, chosenValue);
+                    }
+
+                    // Update Settings page summary trigger button label
+                    const triggerBtn = this.$('#audio-fallback-languages-btn .btn-label');
+                    if (triggerBtn) {
+                        triggerBtn.innerText = this._getAudioPreferencesSummaryLabel();
+                    }
+
+                    // Re-render modal to refresh active tab text and selection checkmark
+                    renderModal('options');
+                });
+            });
+
+            // Wire Tier 1 Filter Pill Clicks (Favorites vs All)
+            overlay.querySelectorAll('#modal-lang-filter-pills .modal-filter-pill').forEach((pill) => {
+                pill.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const targetFilter = pill.dataset.filter;
+                    if (targetFilter && targetFilter !== activeFilter) {
+                        activeFilter = targetFilter;
+                        renderModal('filter-pills');
+                    }
+                });
+            });
+
+            // Wire Tier 2 Slot Pill Clicks (Preferred, 1, 2, 3)
+            overlay.querySelectorAll('#modal-audio-slot-pills .modal-slot-pill').forEach((pill) => {
+                pill.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const targetSlot = pill.dataset.slot;
+                    if (targetSlot && targetSlot !== activeSlot) {
+                        activeSlot = targetSlot;
+                        renderModal('slot-pills');
+                    }
+                });
+            });
+
+            // Wire Done button
+            overlay.querySelector('#btn-modal-done')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._closeSelectionModal();
+            });
+
+            // Backdrop dismiss
+            overlay.onclick = (e) => {
+                if (e.target === overlay) {
+                    e.stopPropagation();
+                    this._closeSelectionModal();
+                }
+            };
+
+            // Helper to navigate between slots via Left/Right keys
+            const switchSlot = (direction, focusTarget) => {
+                const isRtl = document.documentElement.getAttribute('dir') === 'rtl';
+                const currentIndex = SLOTS.indexOf(activeSlot);
+                const delta = direction === 'left' ? (isRtl ? 1 : -1) : (isRtl ? -1 : 1);
+                const nextIndex = currentIndex + delta;
+                if (nextIndex >= 0 && nextIndex < SLOTS.length) {
+                    activeSlot = SLOTS[nextIndex];
+                    renderModal(focusTarget);
+                    return true;
+                }
+                return false;
+            };
+
+            // Register Focus Section 1: Tier 1 Filter Pills (Favorites vs All)
+            this.registerFocusSection('modal-filter-pills', overlay.querySelector('#modal-lang-filter-pills'), {
+                orientation: 'horizontal',
+                leaveDown: 'modal-slot-pills',
+                onMove: (direction) => {
+                    const isRtl = document.documentElement.getAttribute('dir') === 'rtl';
+                    if (direction === 'left') {
+                        const targetFilter = isRtl ? 'all' : 'favorites';
+                        if (activeFilter !== targetFilter) {
+                            activeFilter = targetFilter;
+                            renderModal('filter-pills');
+                            return true;
+                        }
+                    } else if (direction === 'right') {
+                        const targetFilter = isRtl ? 'favorites' : 'all';
+                        if (activeFilter !== targetFilter) {
+                            activeFilter = targetFilter;
+                            renderModal('filter-pills');
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            });
+
+            // Register Focus Section 2: Tier 2 Slot Pills (Preferred, 1, 2, 3)
+            this.registerFocusSection('modal-slot-pills', overlay.querySelector('#modal-audio-slot-pills'), {
+                orientation: 'horizontal',
+                leaveUp: 'modal-filter-pills',
+                leaveDown: 'modal-options',
+                onMove: (direction) => {
+                    if (direction === 'left' || direction === 'right') {
+                        return switchSlot(direction, 'slot-pills');
+                    }
+                    return false;
+                }
+            });
+
+            // Register Focus Section 3: Tier 3 Options List with Left/Right slot switching
+            this.registerFocusSection('modal-options', overlay.querySelector('.modal-options'), {
+                orientation: 'vertical',
+                leaveUp: 'modal-slot-pills',
+                leaveDown: 'modal-actions',
+                enterTo: 'last-focused',
+                onMove: (direction) => {
+                    if (direction === 'left' || direction === 'right') {
+                        return switchSlot(direction, 'options');
+                    }
+                    return false;
+                }
+            });
+
+            // Register Focus Section 4: Modal Actions (Done Button)
+            this.registerFocusSection('modal-actions', overlay.querySelector('.modal-actions'), {
+                orientation: 'horizontal',
+                leaveUp: 'modal-options'
+            });
+
+            // Apply focus according to target
+            if (focusTarget === 'filter-pills') {
+                focusManager.setActiveSection('modal-filter-pills');
+                setTimeout(() => {
+                    const activePill = overlay.querySelector(`#modal-lang-filter-pills .modal-filter-pill[data-filter="${activeFilter}"]`);
+                    if (activePill) focusManager.focusElement(activePill);
+                }, 40);
+            } else if (focusTarget === 'slot-pills') {
+                focusManager.setActiveSection('modal-slot-pills');
+                setTimeout(() => {
+                    const activePill = overlay.querySelector(`#modal-audio-slot-pills .modal-slot-pill[data-slot="${activeSlot}"]`);
+                    if (activePill) focusManager.focusElement(activePill);
+                }, 40);
+            } else if (focusTarget === 'actions') {
+                focusManager.setActiveSection('modal-actions');
+                setTimeout(() => {
+                    const doneBtn = overlay.querySelector('#btn-modal-done');
+                    if (doneBtn) focusManager.focusElement(doneBtn);
+                }, 40);
+            } else {
+                focusManager.setActiveSection('modal-options');
+                setTimeout(() => {
+                    const selected = overlay.querySelector('.modal-option-btn.selected') || overlay.querySelector('.modal-option-btn');
+                    if (selected) {
+                        focusManager.focusElement(selected);
+                        if (typeof selected.scrollIntoView === 'function') {
+                            selected.scrollIntoView({ block: 'nearest' });
+                        }
+                    }
+                }, 40);
+            }
+        };
+
+        // Show Overlay
+        overlay.classList.add('visible');
+        overlay.setAttribute('aria-hidden', 'false');
+
+        // Initial render focusing the options list
+        renderModal('options');
     }
 
     /**
@@ -7972,9 +10803,9 @@ class SettingsPage extends Page {
     _getThemeColors() {
         return [
             // Row 1: Primary Swatches
+            { name: 'Litefin Purple Blue', hex: '#6b6ede' },
             { name: 'Jellyfin Blue', hex: '#00a4dc' },
             { name: 'Litefin Blue', hex: '#007aff' },
-            { name: 'Indigo', hex: '#5856d6' },
             { name: 'Royal Blue', hex: '#2962ff' },
             { name: 'Deep Purple', hex: '#6200ea' },
             { name: 'Lavender', hex: '#af52de' },
@@ -8020,7 +10851,7 @@ class SettingsPage extends Page {
             { name: 'Electric Lime', hex: '#7FFF00' },
 
             // Row 5: Deep & Earthy
-            { name: 'Slate Blue', hex: '#6A5ACD' },
+            { name: 'Indigo', hex: '#5856d6' },
             { name: 'Sea Green', hex: '#2E8B57' },
             { name: 'Cadet Blue', hex: '#5F9EA0' },
             { name: 'Burnt Orange', hex: '#CC5500' },
@@ -8098,6 +10929,12 @@ class SettingsPage extends Page {
         const previewDot = overlay.querySelector('#theme-color-preview-dot');
         const previewName = overlay.querySelector('#theme-color-preview-name');
 
+        // Centralized helper to update header live-preview dot and title
+        const updatePreviewForColor = (color, name) => {
+            if (previewDot && color) previewDot.style.backgroundColor = color;
+            if (previewName && name) previewName.textContent = name;
+        };
+
         // Bind interactive color swatch events
         overlay.querySelectorAll('.color-option').forEach((btn) => {
             const color = btn.dataset.color;
@@ -8105,8 +10942,7 @@ class SettingsPage extends Page {
 
             // Live preview update on focus / hover
             const updatePreview = () => {
-                if (previewDot && color) previewDot.style.backgroundColor = color;
-                if (previewName && name) previewName.textContent = name;
+                updatePreviewForColor(color, name);
             };
 
             btn.addEventListener('focus', updatePreview);
@@ -8126,6 +10962,20 @@ class SettingsPage extends Page {
                 this._closeSelectionModal();
             });
         });
+
+        // Listen for FocusManager focus transitions across color swatches (TV remote / D-pad spatial navigation)
+        if (this._modalFocusChangedHandler) {
+            eventBus.off('focus:changed', this._modalFocusChangedHandler);
+        }
+        this._modalFocusChangedHandler = (focusedEl) => {
+            if (!focusedEl) return;
+            // Check if the newly focused element is a color swatch in our grid
+            const optionBtn = focusedEl.closest ? focusedEl.closest('.color-option') : null;
+            if (optionBtn && optionBtn.dataset) {
+                updatePreviewForColor(optionBtn.dataset.color, optionBtn.dataset.name);
+            }
+        };
+        eventBus.on('focus:changed', this._modalFocusChangedHandler);
 
         // Cancel button
         overlay.querySelector('#btn-modal-cancel').addEventListener('click', (e) => {
@@ -8164,6 +11014,364 @@ class SettingsPage extends Page {
         }, 50);
     }
 
+    /**
+     * =========================================================================
+     * Open Loading Indicator Style Selection Modal Dialog
+     * =========================================================================
+     * Opens a detail dialog allowing users to select their preferred loading
+     * indicator visual style.
+     * 
+     * Features:
+     * - Left options column with tactile spring feedback on focus / hover
+     * - Right live animated preview stage on an isolated glass pedestal
+     * - Decoupled preview rendering immune to page-level attribute states
+     * - Full D-Pad / TV remote navigation with graceful focus restoration
+     * =========================================================================
+     */
+    _openLoaderStyleModal() {
+        const overlay = this.$('#modal-overlay');
+        if (!overlay) return;
+
+        // Store focus context for seamless restoration upon modal dismissal
+        this._prevFocus = focusManager.getFocused();
+        this._prevSection = focusManager.getActiveSection();
+
+        // Catalog of supported loading indicator styles
+        const styles = [
+            {
+                id: 'dots',
+                name: i18n.t('LoaderStyleDots') || 'Pulsing Dots',
+                description: i18n.t('LoaderStyleDotsDesc') || 'Signature multi-dot animation with vibrant theme glow.',
+                badge: i18n.t('LoaderStyleBadgeModern') || 'Standard'
+            },
+            {
+                id: 'ring',
+                name: i18n.t('LoaderStyleRing') || 'Rotating Ring',
+                description: i18n.t('LoaderStyleRingDesc') || 'Lightweight circular ring with minimal GPU & CPU overhead.',
+                badge: i18n.t('LoaderStyleBadgeEfficient') || 'Lightweight'
+            },
+            {
+                id: 'dual-ring',
+                name: i18n.t('LoaderStyleDualRing') || 'Dual Ring',
+                description: i18n.t('LoaderStyleDualRingDesc') || 'Concentric rotating ring with accent outer arc.',
+                badge: i18n.t('LoaderStyleBadgeDynamic') || 'Dual Arc'
+            },
+            {
+                id: 'orbit',
+                name: i18n.t('LoaderStyleOrbit') || 'Orbital Bead',
+                description: i18n.t('LoaderStyleOrbitDesc') || 'Translucent circular path with an orbiting accent satellite point.',
+                badge: i18n.t('LoaderStyleBadgeOrbit') || 'Planetary'
+            },
+            {
+                id: 'satellite',
+                name: i18n.t('LoaderStyleSatellite') || 'Satellite Ring',
+                description: i18n.t('LoaderStyleSatelliteDesc') || 'Rotating primary accent frame with an offset secondary orbiting ring.',
+                badge: i18n.t('LoaderStyleBadgeSatellite') || 'Dual Axis'
+            },
+            {
+                id: 'triple-ring',
+                name: i18n.t('LoaderStyleTripleRing') || 'Triple Gyro',
+                description: i18n.t('LoaderStyleTripleRingDesc') || 'Multi-tier concentric arcs spinning in alternating counter directions.',
+                badge: i18n.t('LoaderStyleBadgeTripleRing') || 'Gyroscope'
+            },
+            {
+                id: 'dotted-ring',
+                name: i18n.t('LoaderStyleDottedRing') || 'Dotted Eclipse',
+                description: i18n.t('LoaderStyleDottedRingDesc') || 'Dual-ring concentric spinner featuring dotted and solid accent strokes.',
+                badge: i18n.t('LoaderStyleBadgeDottedRing') || 'Dotted'
+            },
+            {
+                id: 'sonar-ring',
+                name: i18n.t('LoaderStyleSonarRing') || 'Sonar Aperture',
+                description: i18n.t('LoaderStyleSonarRingDesc') || 'Spinning theme-colored disc with opposing high-contrast aperture cutouts.',
+                badge: i18n.t('LoaderStyleBadgeSonarRing') || 'Aperture'
+            },
+            {
+                id: 'eclipse-sweep',
+                name: i18n.t('LoaderStyleEclipseSweep') || 'Crescent Sweep',
+                description: i18n.t('LoaderStyleEclipseSweepDesc') || 'Minimalist circular disc illuminated by a traveling inset crescent shadow.',
+                badge: i18n.t('LoaderStyleBadgeEclipseSweep') || 'Crescent'
+            },
+            {
+                id: 'push-pulse',
+                name: i18n.t('LoaderStylePushPulse') || 'Push Pulse',
+                description: i18n.t('LoaderStylePushPulseDesc') || 'Interlocking dual spheres expanding and contracting in counter-phase rhythm.',
+                badge: i18n.t('LoaderStyleBadgePushPulse') || 'Dual Pulse'
+            },
+            {
+                id: 'horizontal-dots',
+                name: i18n.t('LoaderStyleHorizontalDots') || 'Fading Trio',
+                description: i18n.t('LoaderStyleHorizontalDotsDesc') || 'Horizontal linear dot triad with progressive wave pulse animations.',
+                badge: i18n.t('LoaderStyleBadgeHorizontalDots') || 'Tri-Dot'
+            },
+            {
+                id: 'pulsing-grid',
+                name: i18n.t('LoaderStylePulsingGrid') || 'Morphing Grid',
+                description: i18n.t('LoaderStylePulsingGridDesc') || 'Geometric four-quadrant pinwheel that contracts, rotates, and expands.',
+                badge: i18n.t('LoaderStyleBadgePulsingGrid') || 'Geometric'
+            }
+        ];
+
+        // Retrieve current active style from LayoutManager
+        const currentStyle = layoutManager.getLoaderStyle() || 'dots';
+        const activeObj = styles.find((s) => s.id === currentStyle) || styles[0];
+
+        overlay.innerHTML = `
+            <div class="settings-modal loader-style-modal" role="dialog" aria-modal="true">
+                <div class="modal-header loader-style-modal-header">
+                    <h2 data-i18n="LabelLoaderStyle">${i18n.t('LabelLoaderStyle') || 'Loading Indicator Style'}</h2>
+                    <span class="loader-modal-badge" id="loader-preview-badge">${escapeHtml(activeObj.badge)}</span>
+                </div>
+                <div class="loader-style-modal-split">
+                    <!-- Left Column: Interactive Options List -->
+                    <div class="loader-style-options-column" id="modal-loader-options-list">
+                        ${styles
+                .map(
+                    (s) => `
+                            <button class="loader-style-option-btn ${currentStyle === s.id ? 'selected' : ''}" 
+                                    data-style="${s.id}"
+                                    data-name="${escapeHtml(s.name)}"
+                                    data-desc="${escapeHtml(s.description)}"
+                                    data-badge="${escapeHtml(s.badge)}"
+                                    tabindex="0"
+                                    data-focusable="true">
+                                <div class="loader-style-option-info">
+                                    <span class="loader-style-option-title">${escapeHtml(s.name)}</span>
+                                    <span class="loader-style-option-desc">${escapeHtml(s.description)}</span>
+                                </div>
+                                <span class="loader-style-option-pill">${escapeHtml(s.badge)}</span>
+                                <span class="loader-style-check-icon">
+                                    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                                        <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                                    </svg>
+                                </span>
+                            </button>
+                        `
+                )
+                .join('')}
+                    </div>
+
+                    <!-- Right Column: Live Animated Preview Stage -->
+                    <div class="loader-style-preview-stage">
+                        <div class="loader-preview-card" id="loader-preview-card">
+                            <div class="loader-preview-pedestal">
+                                <div class="loader-preview-spinner-mount" id="loader-preview-spinner-mount">
+                                    ${this._renderLoaderPreviewSample(activeObj.id)}
+                                </div>
+                            </div>
+                            <div class="loader-preview-meta">
+                                <div class="loader-preview-title" id="loader-preview-title">${escapeHtml(activeObj.name)}</div>
+                                <div class="loader-preview-subtitle" id="loader-preview-desc">${escapeHtml(activeObj.description)}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-actions">
+                    <button class="modal-action-btn" id="btn-modal-cancel" tabindex="0" data-i18n="ButtonCancel">${i18n.t('ButtonCancel') || 'Cancel'}</button>
+                </div>
+            </div>
+        `;
+
+        // Reveal modal overlay with smooth backdrop transition
+        overlay.classList.add('visible');
+        overlay.setAttribute('aria-hidden', 'false');
+
+        const previewMount = overlay.querySelector('#loader-preview-spinner-mount');
+        const previewTitle = overlay.querySelector('#loader-preview-title');
+        const previewDesc = overlay.querySelector('#loader-preview-desc');
+        const previewBadge = overlay.querySelector('#loader-preview-badge');
+
+        // Centralized preview updater function
+        const updatePreviewForStyle = (styleId, name, desc, badge) => {
+            if (previewMount) {
+                previewMount.innerHTML = this._renderLoaderPreviewSample(styleId);
+            }
+            if (previewTitle && name) previewTitle.textContent = name;
+            if (previewDesc && desc) previewDesc.textContent = desc;
+            if (previewBadge && badge) previewBadge.textContent = badge;
+        };
+
+        // Bind interactive event handlers for style option buttons
+        overlay.querySelectorAll('.loader-style-option-btn').forEach((btn) => {
+            const styleId = btn.dataset.style;
+            const name = btn.dataset.name;
+            const desc = btn.dataset.desc;
+            const badge = btn.dataset.badge;
+
+            // Live preview update on pointer hover or focus
+            const handleFocusOrHover = () => {
+                updatePreviewForStyle(styleId, name, desc, badge);
+            };
+
+            btn.addEventListener('focus', handleFocusOrHover);
+            btn.addEventListener('mouseenter', handleFocusOrHover);
+
+            // Selection confirmation on click / enter press
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                layoutManager.setLoaderStyle(styleId);
+
+                // Update settings trigger button label
+                const triggerLabel = this.$('#loader-style-btn-label');
+                if (triggerLabel) triggerLabel.textContent = name;
+
+                this._closeSelectionModal();
+            });
+        });
+
+        // Listen for FocusManager remote D-pad changes (Tizen / webOS spatial navigation)
+        if (this._modalFocusChangedHandler) {
+            eventBus.off('focus:changed', this._modalFocusChangedHandler);
+        }
+        this._modalFocusChangedHandler = (focusedEl) => {
+            if (!focusedEl) return;
+            const optionBtn = focusedEl.closest ? focusedEl.closest('.loader-style-option-btn') : null;
+            if (optionBtn && optionBtn.dataset) {
+                // Ensure the focused item is visible in the scrollable options column
+                if (typeof optionBtn.scrollIntoView === 'function') {
+                    optionBtn.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+                }
+                updatePreviewForStyle(
+                    optionBtn.dataset.style,
+                    optionBtn.dataset.name,
+                    optionBtn.dataset.desc,
+                    optionBtn.dataset.badge
+                );
+            }
+        };
+        eventBus.on('focus:changed', this._modalFocusChangedHandler);
+
+        // Cancel button dismisses modal and restores previous focus
+        overlay.querySelector('#btn-modal-cancel').addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._closeSelectionModal();
+        });
+
+        // Register Focus Section for the options column
+        this.registerFocusSection('modal-loader-options', overlay.querySelector('#modal-loader-options-list'), {
+            orientation: 'vertical',
+            leaveDown: 'modal-actions',
+            enterTo: 'last-focused'
+        });
+
+        // Register Focus Section for modal actions (Cancel button)
+        this.registerFocusSection('modal-actions', overlay.querySelector('.modal-actions'), {
+            orientation: 'horizontal',
+            leaveUp: 'modal-loader-options',
+            onMove: (direction) => {
+                if (direction === 'up') {
+                    focusManager.setActiveSection('modal-loader-options', true, null, { enterTo: 'last-focused' });
+                    return true;
+                }
+                return false;
+            }
+        });
+
+        // Set initial focus to the currently selected style option button
+        focusManager.setActiveSection('modal-loader-options');
+        setTimeout(() => {
+            const activeBtn =
+                overlay.querySelector('.loader-style-option-btn.selected') ||
+                overlay.querySelector('.loader-style-option-btn');
+            if (activeBtn) {
+                focusManager.focusElement(activeBtn);
+            }
+        }, 50);
+    }
+
+    /**
+     * Render isolated live preview spinner markup for a specific style ID.
+     * This creates a pure preview stage decoupled from outer page attributes.
+     *
+     * @param {string} styleId - Style identifier ('dots' | 'ring')
+     * @returns {string} HTML markup string
+     */
+    _renderLoaderPreviewSample(styleId) {
+        if (styleId === 'ring') {
+            return `
+                <div class="loader-preview-sample loader-preview-sample--ring">
+                    <div class="preview-spinner-ring"></div>
+                </div>
+            `;
+        }
+        if (styleId === 'dual-ring') {
+            return `
+                <div class="loader-preview-sample loader-preview-sample--dual-ring">
+                    <div class="preview-spinner-dual-ring"></div>
+                </div>
+            `;
+        }
+        if (styleId === 'orbit') {
+            return `
+                <div class="loader-preview-sample loader-preview-sample--orbit">
+                    <div class="preview-spinner-orbit"></div>
+                </div>
+            `;
+        }
+        if (styleId === 'satellite') {
+            return `
+                <div class="loader-preview-sample loader-preview-sample--satellite">
+                    <div class="preview-spinner-satellite"></div>
+                </div>
+            `;
+        }
+        if (styleId === 'triple-ring') {
+            return `
+                <div class="loader-preview-sample loader-preview-sample--triple-ring">
+                    <div class="preview-spinner-triple-ring"></div>
+                </div>
+            `;
+        }
+        if (styleId === 'dotted-ring') {
+            return `
+                <div class="loader-preview-sample loader-preview-sample--dotted-ring">
+                    <div class="preview-spinner-dotted-ring"></div>
+                </div>
+            `;
+        }
+        if (styleId === 'eclipse-sweep') {
+            return `
+                <div class="loader-preview-sample loader-preview-sample--eclipse-sweep">
+                    <div class="preview-spinner-eclipse-sweep"></div>
+                </div>
+            `;
+        }
+        if (styleId === 'sonar-ring') {
+            return `
+                <div class="loader-preview-sample loader-preview-sample--sonar-ring">
+                    <div class="preview-spinner-sonar-ring"></div>
+                </div>
+            `;
+        }
+        if (styleId === 'push-pulse') {
+            return `
+                <div class="loader-preview-sample loader-preview-sample--push-pulse">
+                    <div class="preview-spinner-push-pulse"></div>
+                </div>
+            `;
+        }
+        if (styleId === 'horizontal-dots') {
+            return `
+                <div class="loader-preview-sample loader-preview-sample--horizontal-dots">
+                    <div class="preview-spinner-horizontal-dots"></div>
+                </div>
+            `;
+        }
+        if (styleId === 'pulsing-grid') {
+            return `
+                <div class="loader-preview-sample loader-preview-sample--pulsing-grid">
+                    <div class="preview-spinner-pulsing-grid"></div>
+                </div>
+            `;
+        }
+        // Default to signature pulsing dots
+        return `
+            <div class="loader-preview-sample loader-preview-sample--dots">
+                <div class="preview-spinner-dots"></div>
+            </div>
+        `;
+    }
+
     _bindDropdownEvents() {
         // Use a map to handle setting IDs to storage keys/methods easily
         const settingsMap = {
@@ -8172,12 +11380,17 @@ class SettingsPage extends Page {
             'layout-direction-select': { key: 'layout_direction', type: 'local' },
             'media-rows-layout-select': { key: 'pref:mediaRowsLayout', type: 'local', triggerEvent: true },
             'login-page-layout-select': { key: 'pref:loginPageLayout', type: 'local', triggerEvent: true },
+            'alpha-picker-position-select': { key: 'pref:alphaPickerPosition', type: 'local', triggerEvent: true },
             'sidebar-layout-select': { key: 'pref:sidebarLayoutMode', type: 'local', triggerEvent: true },
             'classic-card-size-scale-select': {
-                key:
-                    layoutManager.getMediaRowsLayout() === 'modern'
-                        ? 'pref:modernCardSizeScale'
-                        : 'pref:classicCardSizeScale',
+                key: (() => {
+                    const layout = layoutManager.getMediaRowsLayout();
+                    if (layout === 'expanded') return 'pref:expandedCardSizeScale';
+                    if (layout === 'modern-posters') return 'pref:modernPostersCardSizeScale';
+                    if (layout === 'modern') return 'pref:modernCardSizeScale';
+                    if (layout === 'expanding') return 'pref:expandingCardSizeScale';
+                    return 'pref:classicCardSizeScale';
+                })(),
                 type: 'local',
                 triggerEvent: true
             },
@@ -8197,9 +11410,13 @@ class SettingsPage extends Page {
             'max-bitrate-select': { key: 'maxBitrateInternet', type: 'player' },
             'trailer-playback-select': { key: 'trailerPlaybackMode', type: 'player' },
             'audio-lang-select': { key: 'pref:audioLang', type: 'local' },
+            'audio-fallback-lang-1-select': { key: 'pref:audioLangFallback1', type: 'local' },
+            'audio-fallback-lang-2-select': { key: 'pref:audioLangFallback2', type: 'local' },
+            'audio-fallback-lang-3-select': { key: 'pref:audioLangFallback3', type: 'local' },
             'subtitle-lang-select': { key: 'pref:subtitleLang', type: 'local' },
             'skip-forward-select': { key: 'skipForwardLength', type: 'player' },
             'skip-back-select': { key: 'skipBackLength', type: 'player' },
+            'resume-rewind-select': { key: 'resumeRewindLength', type: 'player' },
             'subtitle-mode-select': { key: 'subtitleMode', type: 'player' },
             // Subtitle delivery mode — drives SubtitleProfiles in DeviceProfile
             'subtitle-burn-in-select': { key: 'subtitleBurnIn', type: 'player' },
@@ -8225,6 +11442,7 @@ class SettingsPage extends Page {
             'subtitle-letter-spacing': { key: 'subtitleLetterSpacing', type: 'player' },
             'subtitle-bottom-offset': { key: 'subtitleBottomOffset', type: 'player' },
             'subtitle-force-text-toggle': { key: 'disableAssStyling', type: 'player' },
+            'subtitle-override-colors-toggle': { key: 'subtitleOverrideColors', type: 'player' },
             'debug-width-select': { key: 'debug_width', type: 'debug' },
             'debug-height-select': { key: 'debug_height', type: 'debug' },
             'debug-position-select': { key: 'debug_position', type: 'debug' },
@@ -8250,6 +11468,8 @@ class SettingsPage extends Page {
             'transcode-audio-codec-select': { type: 'player', key: 'transcodeAudioCodec' },
             /* Maximum audio channels — used by all three device profiles (Tizen, WebOS, Web) */
             'allowed-audio-channels-select': { type: 'player', key: 'allowedAudioChannels' },
+            /* Transcoding maximum audio channels — output channels for transcoded audio */
+            'transcode-max-audio-channels-select': { type: 'player', key: 'transcodeMaxAudioChannels' },
             /* EAC3 force-state override — corrects broken canPlayType probes on WebOS and some browsers */
             'eac3-force-select': { type: 'player', key: 'enableEac3' },
             /* MP2 force-state override — corrects false positives or forces transcoding to avoid stalls */
@@ -8266,6 +11486,7 @@ class SettingsPage extends Page {
             'next-up-dialog-style-select': { type: 'player', key: 'nextUpDialogStyle' },
             'next-up-dialog-scale-select': { type: 'player', key: 'nextUpDialogScale' },
             'next-up-dialog-trigger-select': { type: 'player', key: 'nextUpTriggerMode' },
+            'watched-threshold-select': { type: 'player', key: 'watchedThreshold' },
 
             // Per-segment-type skip action — read by the skip-intro plugin on each onPlayerStart
             'segment-source-select': { type: 'player', key: 'skipSegmentSource' },
@@ -8287,25 +11508,33 @@ class SettingsPage extends Page {
             'html5-segment-length-select': { type: 'player', key: 'html5SegmentLength' },
 
             'text-scale-select': { key: 'litefin:textScale', type: 'local' },
+            'display-scale-select': { key: 'pref:displayScale', type: 'local' },
             'home-rows-limit-select': { key: 'pref:homeRowsLimit', type: 'local', triggerEvent: true },
             'next-up-max-days-select': { key: 'pref:nextUpMaxDays', type: 'local' },
             'score-visibility-select': { key: 'pref:scoreVisibility', type: 'local' },
             'details-title-style-select': { key: 'pref:detailsTitleStyle', type: 'local' },
+            'details-overview-max-lines-select': { key: 'pref:detailsOverviewMaxLines', type: 'local' },
+            'watch-provider-region-select': { key: 'pref:watchProviderRegion', type: 'local' },
             'details-layout-select': { key: 'pref:detailsLayout', type: 'local' },
+            'season-episode-details-layout-select': { key: 'pref:seasonEpisodeDetailsLayout', type: 'local' },
             'episode-layout-select': { key: 'pref:episodeLayout', type: 'local' },
             'show-dates-select': { key: 'pref:showDates', type: 'local' },
             'rich-metadata-select': { key: 'pref:richMetadataStyle', type: 'local' },
-            'library-page-size-select': { key: 'pref:libraryPageSize', type: 'local' },
+            'library-page-size-select': { key: 'pref:libraryPageSize', type: 'local', triggerEvent: true },
+            'play-queue-episode-limit-select': { type: 'player', key: 'playQueueEpisodeLimit' },
             'hero-carousel-style-select': { key: 'pref:heroCarouselStyle', type: 'local' },
+            'hero-carousel-indicator-style-select': { key: 'pref:heroCarouselIndicatorStyle', type: 'local' },
             'hero-image-quality-select': { key: 'pref:heroImageQuality', type: 'local' },
             'hero-carousel-interval-select': { key: 'pref:heroCarouselInterval', type: 'local' },
             'hero-carousel-count-select': { key: 'pref:heroCarouselCount', type: 'local' },
+            'hero-carousel-vignette-select': { key: 'pref:heroCarouselVignette', type: 'local' },
             'sidebar-mode-select': { key: 'pref:sidebarMode', type: 'local' },
             'icon-style-select': { key: 'pref:iconStyle', type: 'local', triggerEvent: true },
             'icon-variant-select': { key: 'pref:iconVariant', type: 'local', triggerEvent: true },
             'hover-border-style-select': { key: 'litefin:hoverBorderStyle', type: 'local' },
             'sidebar-selected-color-select': { key: 'litefin:sidebarSelectedColor', type: 'local' },
             'sidebar-unselected-color-select': { key: 'litefin:sidebarUnselectedColor', type: 'local' },
+            'sidebar-logo-color-select': { key: 'litefin:sidebarLogoColor', type: 'local' },
             'osd-button-style-select': { key: 'litefin:osdButtonStyle', type: 'local' },
             'osd-focus-border-style-select': { key: 'litefin:osdFocusBorderStyle', type: 'local' },
             'osd-button-shape-select': { key: 'litefin:osdButtonShape', type: 'local' },
@@ -8315,10 +11544,12 @@ class SettingsPage extends Page {
             'theme-song-volume-select': { key: 'pref:themeSongVolume', type: 'local' },
             'collapsed-sidebar-color-select': { key: 'pref:collapsedSidebarColor', type: 'local', triggerEvent: true },
             'expanded-sidebar-color-select': { key: 'pref:expandedSidebarColor', type: 'local', triggerEvent: true },
+            'bottom-nav-bar-color-select': { key: 'pref:bottomNavBarColor', type: 'local', triggerEvent: true },
             'sidebar-logo-settings-select': { key: 'pref:logoSettings', type: 'local', triggerEvent: true },
             'sidebar-items-align-select': { key: 'pref:sidebarItemsAlign', type: 'local', triggerEvent: true },
             'trending-movies-collection-select': { key: 'pref:trendingMoviesCollection', type: 'local', triggerEvent: true },
-            'trending-series-collection-select': { key: 'pref:trendingSeriesCollection', type: 'local', triggerEvent: true }
+            'trending-series-collection-select': { key: 'pref:trendingSeriesCollection', type: 'local', triggerEvent: true },
+            'default-livetv-tab-select': { key: 'pref:defaultLiveTvTab', type: 'local' }
         };
 
         this.$$('.select-btn').forEach((btn) => {
@@ -8333,7 +11564,27 @@ class SettingsPage extends Page {
                 const title =
                     btn.closest('.setting-item')?.querySelector('.setting-name')?.textContent || i18n.t('SelectOption');
 
-                if (id === 'trending-movies-collection-select' || id === 'trending-series-collection-select') {
+                if (id === 'watch-provider-region-select') {
+                    btn.classList.add('disabled');
+                    try {
+                        const countries = await api.get('/Localization/Countries');
+                        options = countries
+                            .filter((country) => country && /^[A-Z]{2}$/.test(country.TwoLetterISORegionName))
+                            .map((country) => ({
+                                value: country.TwoLetterISORegionName,
+                                label: watchProviderRegionName(country.TwoLetterISORegionName, i18n.currentLang)
+                            }))
+                            .sort((a, b) => a.label.localeCompare(b.label));
+                        if (!options.length) throw new Error('No countries returned');
+                        btn.dataset.options = JSON.stringify(options);
+                    } catch (err) {
+                        log.warn('Unable to load streaming availability countries', err);
+                        toast.error(i18n.t('WatchProvidersCountriesError'));
+                        return;
+                    } finally {
+                        btn.classList.remove('disabled');
+                    }
+                } else if (id === 'trending-movies-collection-select' || id === 'trending-series-collection-select') {
                     btn.classList.add('disabled');
                     try {
                         const collectionsRes = await api.getItems({
@@ -8395,7 +11646,10 @@ class SettingsPage extends Page {
 
                     // Save Setting based on type
                     if (settingConfig) {
-                        if (id === 'badge-style-select') {
+                        if (id === 'alpha-picker-position-select') {
+                            // SPECIAL CASE: Alphabet Selector Position handled by LayoutManager
+                            layoutManager.setAlphaPickerPosition(newValue);
+                        } else if (id === 'badge-style-select') {
                             // SPECIAL CASE: Badge Style handled by LayoutManager
                             layoutManager.setBadgeStyle(newValue);
                         } else if (id === 'button-style-select') {
@@ -8413,6 +11667,9 @@ class SettingsPage extends Page {
                         } else if (id === 'sidebar-unselected-color-select') {
                             // SPECIAL CASE: Sidebar Unselected Color handled by LayoutManager
                             layoutManager.setSidebarUnselectedColor(newValue);
+                        } else if (id === 'sidebar-logo-color-select') {
+                            // SPECIAL CASE: Sidebar Logo Color handled by LayoutManager
+                            layoutManager.setSidebarLogoColor(newValue);
                         } else if (id === 'osd-button-style-select') {
                             // SPECIAL CASE: OSD Button Style handled by LayoutManager
                             layoutManager.setOsdButtonStyle(newValue);
@@ -8433,6 +11690,14 @@ class SettingsPage extends Page {
                             layoutManager.setOsdSeekBarProgressColor(newValue);
                         } else if (id === 'theme-mode-select') {
                             layoutManager.setThemeMode(newValue);
+                            this._updateLighterBackgroundVisibility();
+                        } else if (id === 'watched-threshold-select') {
+                            PlayerSettings.set('watchedThreshold', newValue);
+                            if (newValue === 'server') {
+                                api.getServerConfiguration({ silent: true }).catch((err) => {
+                                    log.debug('Failed to background fetch server config for MaxResumePct:', err);
+                                });
+                            }
                         } else if (id === 'ui-font-select') {
                             // SPECIAL CASE: Font changes handled by LayoutManager
                             layoutManager.setUiFont(newValue);
@@ -8443,8 +11708,22 @@ class SettingsPage extends Page {
                         } else if (id === 'text-scale-select') {
                             // SPECIAL CASE: Text Scale handled by LayoutManager
                             layoutManager.setTextScale(parseFloat(newValue));
+                        } else if (id === 'display-scale-select') {
+                            // Viewport display scaling factor handled by LayoutManager
+                            layoutManager.setDisplayScale(newValue);
                         } else if (id === 'media-rows-layout-select') {
                             layoutManager.setMediaRowsLayout(newValue);
+                            if (newValue === 'expanded') {
+                                storage.setItem('pref:expandedCardSizeScale', '1.2');
+                            } else if (newValue === 'modern-posters') {
+                                storage.setItem('pref:modernPostersCardSizeScale', '1.2');
+                            } else if (newValue === 'modern') {
+                                storage.setItem('pref:modernCardSizeScale', '1.2');
+                            } else if (newValue === 'expanding') {
+                                storage.setItem('pref:expandingCardSizeScale', '1');
+                            } else if (newValue === 'classic') {
+                                storage.setItem('pref:classicCardSizeScale', '1');
+                            }
                             this._triggerHardReload();
                         } else if (id === 'login-page-layout-select') {
                             layoutManager.setLoginPageLayout(newValue);
@@ -8465,6 +11744,12 @@ class SettingsPage extends Page {
                             focusManager.invalidateCache('settings-content');
                         } else if (id === 'card-label-scale-select') {
                             layoutManager.setCardLabelScale(parseFloat(newValue));
+                        } else if (id === 'hero-carousel-vignette-select') {
+                            /* 
+                              Applies real-time update of the hero carousel text vignette contrast
+                              and persists the selected opacity to local storage.
+                            */
+                            layoutManager.setHeroVignette(newValue);
                         } else if (id === 'sidebar-mode-select') {
                             storage.setItem('pref:sidebarMode', newValue);
                             document.body.classList.toggle('sidebar-mode-hidden', newValue === 'hidden');
@@ -8484,6 +11769,9 @@ class SettingsPage extends Page {
                                 eventBus.emit('prefChanged:hideSidebarLibraryHeader', true);
                             }
 
+                            // Emit event to notify Sidebar and other components immediately
+                            eventBus.emit('pref:sidebarMode', newValue);
+
                             focusManager.invalidateCache('sidebar');
                             focusManager.invalidateCache('home');
                         } else if (id === 'icon-style-select') {
@@ -8500,10 +11788,12 @@ class SettingsPage extends Page {
                             storage.setItem(settingConfig.key, newValue);
 
                             // Invalidate the homepage page cache if settings that affect the home page contents change.
-                            // This ensures the next navigation to the home page has fresh content loaded.
+                            // This ensures the next navigation to the home page has fresh content loaded with the correct row limit.
                             const homepageLocalKeys = [
+                                'pref:homeRowsLimit',
                                 'pref:nextUpMaxDays',
                                 'pref:heroCarouselStyle',
+                                'pref:heroCarouselIndicatorStyle',
                                 'pref:heroCarouselCount',
                                 'pref:heroCarouselInterval'
                             ];
@@ -8514,8 +11804,29 @@ class SettingsPage extends Page {
                                 state.delete('home:pageCache');
                             }
 
-                            if (settingConfig.key === 'pref:detailsLayout') {
-                                this._updateDetailsTitleStyleVisibility(newValue);
+                            if (settingConfig.key === 'pref:heroCarouselIndicatorStyle') {
+                                const animToggleItem = this.$('#hero-carousel-indicator-animation-item');
+                                if (animToggleItem) {
+                                    const isCarouselEnabled = storage.getItem('pref:heroCarousel') !== 'false';
+                                    animToggleItem.style.display = isCarouselEnabled && newValue === 'progress' ? '' : 'none';
+                                }
+                            }
+
+                            /* -------------------------------------------------------------
+                             * Dynamic Sub-Setting Visibility for Library Page Size
+                             * When 'unlimited' is selected, reveal the alphabet scroll mode toggle;
+                             * otherwise, hide it to maintain a clean minimal layout.
+                             * ------------------------------------------------------------- */
+                            if (settingConfig.key === 'pref:libraryPageSize') {
+                                const alphaScrollItem = this.$('#alpha-picker-scroll-mode-item');
+                                if (alphaScrollItem) {
+                                    alphaScrollItem.style.display = String(newValue) === 'unlimited' ? '' : 'none';
+                                    focusManager.invalidateCache('settings-content');
+                                }
+                            }
+
+                            if (settingConfig.key === 'pref:detailsLayout' || settingConfig.key === 'pref:seasonEpisodeDetailsLayout') {
+                                this._updateDetailsTitleStyleVisibility();
                             }
 
                             if (settingConfig.triggerEvent) {
@@ -8528,7 +11839,9 @@ class SettingsPage extends Page {
                                 settingConfig.key === 'layout_direction' ||
                                 settingConfig.key === 'app_language' ||
                                 settingConfig.key === 'pref:classicCardSizeScale' ||
-                                settingConfig.key === 'pref:modernCardSizeScale'
+                                settingConfig.key === 'pref:modernCardSizeScale' ||
+                                settingConfig.key === 'pref:expandedCardSizeScale' ||
+                                settingConfig.key === 'pref:modernPostersCardSizeScale'
                             ) {
                                 this._triggerHardReload();
                             }
@@ -8547,6 +11860,7 @@ class SettingsPage extends Page {
                                     pageCache.thumbUrls = {};
                                     state.set('home:pageCache', pageCache);
                                 }
+                                CardRenderer.clearCache();
                             }
 
                             if (id === 'screensaver-type-select') {
@@ -8576,6 +11890,7 @@ class SettingsPage extends Page {
                             const intKeys = [
                                 'skipForwardLength',
                                 'skipBackLength',
+                                'resumeRewindLength',
                                 'maxBitrateInternet',
                                 'webosStallRecovery',
                                 'webosSegmentLength',
@@ -8584,7 +11899,8 @@ class SettingsPage extends Page {
                                 'tizenSegmentLength',
                                 'html5MaxBufferLength',
                                 'html5MaxMaxBufferLength',
-                                'html5SegmentLength'
+                                'html5SegmentLength',
+                                'playQueueEpisodeLimit'
                             ];
 
                             let val = newValue;
@@ -8694,12 +12010,12 @@ class SettingsPage extends Page {
                                 focusManager.invalidateCache('settings-content');
                             }
 
-                            // FONT LOADING: Trigger download if needed
+                            // FONT LOADING: Trigger download if needed (forcing reload for explicit user change)
                             if (
                                 (settingConfig.key === 'subtitleFont' || settingConfig.key === 'subtitleFontAss') &&
                                 newValue
                             ) {
-                                FontLoader.loadFont(newValue).then((loaded) => {
+                                FontLoader.loadFont(newValue, true).then((loaded) => {
                                     if (loaded) {
                                         log.debug(`Font loaded: ${newValue}`);
                                     } else {
@@ -8720,7 +12036,7 @@ class SettingsPage extends Page {
                     }
 
                     log.debug(`Setting ${id} saved: ${newValue}`);
-                });
+                }, id);
             });
         });
 
@@ -8733,6 +12049,18 @@ class SettingsPage extends Page {
                 PlayerSettings.set('disableAssStyling', newValue);
                 forceTextToggle.classList.toggle('active', newValue);
                 log.info(`Force Text Mode set to: ${newValue}`);
+            });
+        }
+
+        // Toggle Switch for Override Subtitle Colors
+        const overrideColorsToggle = this.$('#subtitle-override-colors-toggle');
+        if (overrideColorsToggle) {
+            overrideColorsToggle.addEventListener('click', () => {
+                const currentValue = PlayerSettings.get('subtitleOverrideColors') === true;
+                const newValue = !currentValue;
+                PlayerSettings.set('subtitleOverrideColors', newValue);
+                overrideColorsToggle.classList.toggle('active', newValue);
+                log.info(`Override Subtitle Colors set to: ${newValue}`);
             });
         }
 
@@ -8948,6 +12276,35 @@ class SettingsPage extends Page {
             });
         }
 
+        const showWatchProvidersToggle = this.$('#toggle-show-watch-providers');
+        if (showWatchProvidersToggle) {
+            showWatchProvidersToggle.addEventListener('click', () => {
+                const enabled = storage.getItem('pref:showWatchProviders') !== 'true';
+                storage.setItem('pref:showWatchProviders', String(enabled));
+                showWatchProvidersToggle.classList.toggle('active', enabled);
+                showWatchProvidersToggle.setAttribute('aria-checked', String(enabled));
+            });
+        }
+
+        // ---------------------------------------------------------------------
+        // Toggle Switch for Seerr Recommendations on Details Pages
+        // ---------------------------------------------------------------------
+        // Defaults to enabled (true) unless explicitly toggled off by user.
+        const showSeerrRecsToggle = this.$('#toggle-show-seerr-recommendations');
+        if (showSeerrRecsToggle) {
+            showSeerrRecsToggle.addEventListener('click', () => {
+                // Read current setting (treated as true unless strictly 'false')
+                const isCurrentlyActive = storage.getItem('pref:SeerrRecommendations') !== 'false';
+                const nextVal = !isCurrentlyActive;
+                // Save updated preference to persistent storage
+                storage.setItem('pref:SeerrRecommendations', String(nextVal));
+                // Update button visual state and accessibility attributes
+                showSeerrRecsToggle.classList.toggle('active', nextVal);
+                showSeerrRecsToggle.setAttribute('aria-checked', String(nextVal));
+                log.info(`Show Seerr Recommendations set to: ${nextVal}`);
+            });
+        }
+
         // Toggle Switch for Trailer Auto-Chain
         const trailerAutoChainToggle = this.$('#toggle-trailer-auto-chain');
         if (trailerAutoChainToggle) {
@@ -8960,13 +12317,50 @@ class SettingsPage extends Page {
             });
         }
 
-        // Toggle Switch for Seek With Arrows
+        // Toggle Switch for Confirm Seek With OK
         const confirmSeekToggle = this.$('#toggle-confirm-seek');
         if (confirmSeekToggle) {
             confirmSeekToggle.addEventListener('click', () => {
                 const enabled = !PlayerSettings.get('confirmSeekWithOK');
                 PlayerSettings.set('confirmSeekWithOK', enabled);
                 confirmSeekToggle.classList.toggle('active', enabled);
+            });
+        }
+
+        // Toggle Switch for Pause Playback While Scrubbing
+        const pauseOnScrubToggle = this.$('#toggle-pause-on-scrub');
+        if (pauseOnScrubToggle) {
+            pauseOnScrubToggle.addEventListener('click', () => {
+                const enabled = !PlayerSettings.get('pausePlaybackOnScrub');
+                PlayerSettings.set('pausePlaybackOnScrub', enabled);
+                pauseOnScrubToggle.classList.toggle('active', enabled);
+                log.info(`Pause Playback On Scrub set to: ${enabled}`);
+            });
+        }
+
+        // Toggle Switch for Enable Seek Acceleration
+        // Governs progressive timeline scrubbing acceleration (up to 10x)
+        const enableSeekAccelerationToggle = this.$('#toggle-enable-seek-acceleration');
+        if (enableSeekAccelerationToggle) {
+            enableSeekAccelerationToggle.addEventListener('click', () => {
+                // Invert current boolean preference in PlayerSettings
+                const enabled = !PlayerSettings.get('enableSeekAcceleration');
+                PlayerSettings.set('enableSeekAcceleration', enabled);
+
+                // Update visual active class on toggle switch
+                enableSeekAccelerationToggle.classList.toggle('active', enabled);
+                log.info(`Enable Seek Acceleration set to: ${enabled}`);
+            });
+        }
+
+        // Toggle Switch for Reset Seek Speed on Direction Change
+        const resetSeekSpeedToggle = this.$('#toggle-reset-seek-speed-on-direction-change');
+        if (resetSeekSpeedToggle) {
+            resetSeekSpeedToggle.addEventListener('click', () => {
+                const enabled = !PlayerSettings.get('resetSeekSpeedOnDirectionChange');
+                PlayerSettings.set('resetSeekSpeedOnDirectionChange', enabled);
+                resetSeekSpeedToggle.classList.toggle('active', enabled);
+                log.info(`Reset Seek Speed on Direction Change set to: ${enabled}`);
             });
         }
 
@@ -9150,6 +12544,51 @@ class SettingsPage extends Page {
             });
         }
 
+        // ==========================================
+        // ABOUT TAB INTERACTIVE RESOURCE CARDS
+        // ==========================================
+        const btnAboutDeviceInfo = this.$('#btn-about-device-info');
+        if (btnAboutDeviceInfo) {
+            btnAboutDeviceInfo.addEventListener('click', () => {
+                this._showDeviceInformationDialog();
+            });
+        }
+
+        const btnAboutGithub = this.$('#btn-about-github');
+        if (btnAboutGithub) {
+            btnAboutGithub.addEventListener('click', () => {
+                this._showGitHubDialog('repo');
+            });
+        }
+
+        const btnAboutIssues = this.$('#btn-about-issues');
+        if (btnAboutIssues) {
+            btnAboutIssues.addEventListener('click', () => {
+                this._showGitHubDialog('issues');
+            });
+        }
+
+        const btnAboutPlugins = this.$('#btn-about-plugins');
+        if (btnAboutPlugins) {
+            btnAboutPlugins.addEventListener('click', () => {
+                this._showPluginsDialog();
+            });
+        }
+
+        const btnAboutDiscord = this.$('#btn-about-discord');
+        if (btnAboutDiscord) {
+            btnAboutDiscord.addEventListener('click', () => {
+                this._showDiscordDialog();
+            });
+        }
+
+        const btnAboutSupport = this.$('#btn-about-support');
+        if (btnAboutSupport) {
+            btnAboutSupport.addEventListener('click', () => {
+                this._showSupportDialog();
+            });
+        }
+
         // Toggle Switch for Auto Update Check
         const autoUpdateToggle = this.$('#toggle-check-updates');
         if (autoUpdateToggle) {
@@ -9275,6 +12714,43 @@ class SettingsPage extends Page {
             });
         }
 
+        // ---------------------------------------------------------------------
+        // Movi Player Engine Logs Toggle
+        // ---------------------------------------------------------------------
+        // Governs output from low-level WebAssembly demuxer, FFmpeg, and decoding
+        // pipelines within the movi-player backend. Disabled by default to avoid
+        // saturating console and debug ring buffers during normal playback.
+        // ---------------------------------------------------------------------
+        const toggleMoviLogs = this.$('#toggle-debug-movi-logs');
+        if (toggleMoviLogs) {
+            toggleMoviLogs.addEventListener('click', () => {
+                // Determine new state based on current class list
+                const newState = !toggleMoviLogs.classList.contains('active');
+                toggleMoviLogs.classList.toggle('active');
+
+                // Persist selection directly into application storage
+                storage.setItem('debug_movi_logs', newState);
+
+                // Broadcast change event across application
+                eventBus.emit('prefChanged:debug_movi_logs', newState);
+            });
+        }
+
+        // ---------------------------------------------------------------------
+        // ExoPlayer Native Debug Logs Toggle
+        // ---------------------------------------------------------------------
+        // Governs low-level logging from Media3 ExoPlayer Android native bridge.
+        // ---------------------------------------------------------------------
+        const toggleExoLogs = this.$('#toggle-debug-exoplayer-logs');
+        if (toggleExoLogs) {
+            toggleExoLogs.addEventListener('click', () => {
+                const newState = !toggleExoLogs.classList.contains('active');
+                toggleExoLogs.classList.toggle('active');
+                storage.setItem('debug_exoplayer_logs', newState);
+                eventBus.emit('prefChanged:debug_exoplayer_logs', newState);
+            });
+        }
+
         // Enable All Filters
         const btnEnableAll = this.$('#btn-enable-all-filters');
         const btnDisableAll = this.$('#btn-disable-all-filters');
@@ -9317,6 +12793,265 @@ class SettingsPage extends Page {
                 debugOverlay.toggleModule(module, newState);
             });
         });
+
+        // Manage Favorite Languages Button
+        const manageFavLangBtn = this.$('#btn-manage-favorite-languages');
+        if (manageFavLangBtn) {
+            manageFavLangBtn.addEventListener('click', () => {
+                this._showFavoriteLanguagesModal();
+            });
+        }
+    }
+
+    /**
+     * Display dedicated Favorite Languages management modal with search,
+     * quick popular language chips, full culture/UI list, and instant toggle states.
+     */
+    _showFavoriteLanguagesModal() {
+        const overlay = this.$('#modal-overlay');
+        if (!overlay) return;
+
+        // Save focus context
+        this._prevFocus = focusManager.getFocused();
+        this._prevSection = focusManager.getActiveSection();
+
+        // Build comprehensive master list of all known languages without duplicates
+        const allLangs = [];
+        const seenKeys = new Set();
+
+        /**
+         * Helper to normalize and add language entry while strictly preventing
+         * duplicate entries across 2-letter codes, 3-letter codes, aliases, and names.
+         * @param {any} item - Language object, culture entry, or dropdown option
+         */
+        const addLanguageEntry = (item) => {
+            if (!item) return;
+
+            // Normalize item into canonical structure { code, twoLetter, name, nativeName }
+            const norm = languageManager.normalizeLanguage(item);
+            if (!norm || !norm.code) return;
+
+            const canonicalCode = (norm.code || '').toLowerCase();
+            const twoLetterCode = (norm.twoLetter || '').toLowerCase();
+            const englishName = (norm.name || '').toLowerCase();
+
+            // Check if this language has already been registered under any representation
+            if (seenKeys.has(canonicalCode) || (twoLetterCode && seenKeys.has(twoLetterCode)) || (englishName && seenKeys.has(englishName))) {
+                return;
+            }
+
+            // Register all variations in lookup set to prevent subsequent aliases/duplicates
+            seenKeys.add(canonicalCode);
+            if (twoLetterCode) seenKeys.add(twoLetterCode);
+            if (englishName) seenKeys.add(englishName);
+            if (norm.altCodes && Array.isArray(norm.altCodes)) {
+                norm.altCodes.forEach((alt) => seenKeys.add(alt.toLowerCase()));
+            }
+
+            allLangs.push(norm);
+        };
+
+        // 1. Add standard common languages (highest quality baseline)
+        languageManager.getAllStandardLanguages().forEach(addLanguageEntry);
+
+        // 2. Add Jellyfin server cultures if available
+        if (cachedCultures && Array.isArray(cachedCultures)) {
+            cachedCultures.forEach(addLanguageEntry);
+        }
+
+        // 3. Add client UI languages if available
+        if (this.uiLanguages && Array.isArray(this.uiLanguages)) {
+            this.uiLanguages.forEach(addLanguageEntry);
+        }
+
+        // Sort alphabetically by English name
+        allLangs.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+        let searchQuery = '';
+
+        const renderModal = () => {
+            // Filter all languages based on real-time search query
+            const filteredLangs = searchQuery
+                ? allLangs.filter((l) => {
+                    const q = searchQuery.toLowerCase();
+                    return (l.name && l.name.toLowerCase().includes(q)) ||
+                        (l.nativeName && l.nativeName.toLowerCase().includes(q)) ||
+                        (l.code && l.code.toLowerCase().includes(q)) ||
+                        (l.twoLetter && l.twoLetter.toLowerCase().includes(q));
+                })
+                : allLangs;
+
+            // Generate full language rows with star toggle badges
+            const langRowsHtml = filteredLangs.map((l) => {
+                const isFav = languageManager.isFavorite(l);
+                const codeBadge = (l.twoLetter || l.code).toUpperCase();
+                const nativeStr = (l.nativeName && l.nativeName !== l.name) ? ` (${escapeHtml(l.nativeName)})` : '';
+                return `
+                    <button class="modal-option-btn fav-lang-row ${isFav ? 'selected' : ''}" data-code="${l.code}" tabindex="0">
+                        <div class="fav-lang-info">
+                            <span class="track-badge">${codeBadge}</span>
+                            <span class="fav-lang-name">${escapeHtml(l.name)}${nativeStr}</span>
+                        </div>
+                        <div class="fav-lang-star ${isFav ? 'active' : ''}">${isFav ? '★' : '☆'}</div>
+                    </button>
+                `;
+            }).join('');
+
+            overlay.innerHTML = `
+                <div class="settings-modal fav-languages-modal" role="dialog" aria-modal="true">
+                    <div class="modal-header">
+                        <h2 data-i18n="FavoriteLanguages">${i18n.t('FavoriteLanguages') || 'Favorite Languages'}</h2>
+                    </div>
+                    
+                    <!-- Search Input -->
+                    <div class="fav-lang-search-box">
+                        <input type="text" id="fav-lang-search-input" class="fav-lang-search-input" 
+                               placeholder="${i18n.t('SearchLanguages') || 'Search languages...'}" 
+                               value="${escapeHtml(searchQuery)}" tabindex="0" />
+                    </div>
+
+                    <!-- Full Language List -->
+                    <div class="modal-options fav-lang-list" id="fav-lang-list">
+                        ${langRowsHtml || `<div class="modal-no-options" data-i18n="NoResultsFound">${i18n.t('NoResultsFound') || 'No languages found'}</div>`}
+                    </div>
+
+                    <div class="modal-actions">
+                        <button class="modal-action-btn" id="btn-fav-lang-clear" tabindex="0" data-i18n="ClearAll">${i18n.t('ClearAll') || 'Clear All'}</button>
+                    </div>
+                </div>
+            `;
+
+            // Bind Row Toggles in-place without destroying DOM or losing scroll/focus
+            overlay.querySelectorAll('.fav-lang-row').forEach((row) => {
+                row.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const code = row.dataset.code;
+                    const match = allLangs.find((l) => l.code === code) || code;
+                    const isNowFav = languageManager.toggleFavorite(match);
+
+                    // Update UI in-place
+                    row.classList.toggle('selected', isNowFav);
+                    const starEl = row.querySelector('.fav-lang-star');
+                    if (starEl) {
+                        starEl.classList.toggle('active', isNowFav);
+                        starEl.textContent = isNowFav ? '★' : '☆';
+                    }
+                });
+            });
+
+            // Bind Search Input
+            const searchInput = overlay.querySelector('#fav-lang-search-input');
+            if (searchInput) {
+                searchInput.addEventListener('input', (e) => {
+                    searchQuery = e.target.value;
+                    renderModal();
+                    // Restore input focus
+                    const updatedInput = overlay.querySelector('#fav-lang-search-input');
+                    if (updatedInput) {
+                        updatedInput.focus();
+                        updatedInput.setSelectionRange(updatedInput.value.length, updatedInput.value.length);
+                    }
+                });
+            }
+
+            // Bind Clear All in-place
+            overlay.querySelector('#btn-fav-lang-clear').addEventListener('click', (e) => {
+                e.stopPropagation();
+                languageManager.clearFavorites();
+                overlay.querySelectorAll('.fav-lang-row').forEach((row) => {
+                    row.classList.remove('selected');
+                    const starEl = row.querySelector('.fav-lang-star');
+                    if (starEl) {
+                        starEl.classList.remove('active');
+                        starEl.textContent = '☆';
+                    }
+                });
+            });
+
+            // Allow exiting modal by clicking the backdrop outside dialog
+            overlay.onclick = (e) => {
+                if (e.target === overlay) {
+                    e.stopPropagation();
+                    this._closeFavoriteLanguagesModal();
+                }
+            };
+
+            // Register Focus Sections: Search -> List -> Actions
+            this.registerFocusSection('fav-search', overlay.querySelector('.fav-lang-search-box'), {
+                orientation: 'horizontal',
+                leaveDown: 'fav-list'
+            });
+
+            this.registerFocusSection('fav-list', overlay.querySelector('#fav-lang-list'), {
+                orientation: 'vertical',
+                leaveUp: 'fav-search',
+                leaveDown: 'fav-actions'
+            });
+
+            this.registerFocusSection('fav-actions', overlay.querySelector('.modal-actions'), {
+                orientation: 'horizontal',
+                leaveUp: 'fav-list'
+            });
+
+            // Initial focus to search input or first item in language list
+            focusManager.setActiveSection('fav-search');
+            setTimeout(() => {
+                const searchEl = overlay.querySelector('#fav-lang-search-input');
+                if (searchEl) focusManager.focusElement(searchEl);
+            }, 50);
+        };
+
+        // Show Overlay
+        overlay.classList.add('visible');
+        overlay.setAttribute('aria-hidden', 'false');
+
+        renderModal();
+    }
+
+    _closeFavoriteLanguagesModal() {
+        const overlay = this.$('#modal-overlay');
+        if (!overlay || !overlay.classList.contains('visible')) return;
+
+        // Detach backdrop click listener
+        overlay.onclick = null;
+
+        overlay.classList.remove('visible');
+        overlay.setAttribute('aria-hidden', 'true');
+        overlay.innerHTML = '';
+
+        // Unregister modal focus sections from both Page and FocusManager
+        this.unregisterFocusSection('fav-search');
+        this.unregisterFocusSection('fav-list');
+        this.unregisterFocusSection('fav-actions');
+        focusManager.unregister('fav-search');
+        focusManager.unregister('fav-list');
+        focusManager.unregister('fav-actions');
+
+        // Update settings button label badge
+        const countLabel = this.$('#favorite-languages-count-label');
+        if (countLabel) {
+            countLabel.innerText = languageManager.hasFavorites()
+                ? i18n.t('LanguagesSelected', [languageManager.getFavorites().length])
+                : (i18n.t('AllLanguages') || 'All Languages');
+        }
+
+        // Restore active section and focus
+        const targetSection = this._prevSection || 'settings-display';
+        focusManager.setActiveSection(targetSection, false);
+
+        if (this._prevFocus && document.contains(this._prevFocus)) {
+            focusManager.focusElement(this._prevFocus);
+        } else {
+            const manageBtn = this.$('#btn-manage-favorite-languages');
+            if (manageBtn) {
+                focusManager.focusElement(manageBtn);
+            } else {
+                focusManager.focusFirstInActiveSection();
+            }
+        }
+
+        this._prevFocus = null;
+        this._prevSection = null;
     }
 
     _triggerHardReload() {
@@ -9356,6 +13091,85 @@ class SettingsPage extends Page {
         window.location.href = entryUrl;
     }
 
+    /**
+     * Reveals the full settings detail screen for a selected category tab in mobile portrait.
+     * Transitions from Screen 1 (categories) to Screen 2 (tab details).
+     * @param {string} tabId - Identifier of the tab to reveal
+     * @private
+     */
+    _openMobileTab(tabId) {
+        this._mobileDetailOpen = true;
+        this._switchTab(tabId, true, false);
+        this._updateMobileViewState();
+
+        // Push history entry so system back gestures or browser back pop to tab selection
+        try {
+            window.history.pushState({ litefinSettingsDetail: true }, '', window.location.href);
+        } catch (e) {
+            // Safe fallback if history API is restricted in environment
+        }
+    }
+
+    /**
+     * Navigates back from the tab detail screen to the category selection list in mobile portrait.
+     * Transitions from Screen 2 (tab details) back to Screen 1 (categories).
+     * @param {boolean} [shouldPopHistory=true] - Whether to pop window history state
+     * @private
+     */
+    _closeMobileDetail(shouldPopHistory = true) {
+        this._mobileDetailOpen = false;
+        this._updateMobileViewState();
+
+        // If history entry was pushed, pop it cleanly
+        if (shouldPopHistory && window.history.state?.litefinSettingsDetail) {
+            window.history.back();
+        }
+
+        // Return focus to the active tab button only in landscape/desktop
+        // In mobile portrait, we strictly avoid focusing or enlarging any tabs
+        if (!this._isPortraitMode()) {
+            const activeBtn = this.$(`.settings-menu-btn[data-tab="${this.activeTab}"]`);
+            if (activeBtn) {
+                activeBtn.focus();
+                if (typeof focusManager !== 'undefined') {
+                    focusManager.focusElement(activeBtn);
+                }
+            }
+        }
+    }
+
+    /**
+     * Synchronizes mobile portrait layout classes and viewport state.
+     * Toggles .mobile-portrait and .mobile-detail-open on the root page element,
+     * and sets body modifier to ensure pure uninhibited vertical touch scrolling.
+     * @private
+     */
+    _updateMobileViewState() {
+        if (!this.el) return;
+        const isPortrait = this._isPortraitMode();
+
+        // Apply portrait layout modifier
+        this.el.classList.toggle('mobile-portrait', isPortrait);
+
+        // Apply detail screen visibility state
+        this.el.classList.toggle('mobile-detail-open', isPortrait && this._mobileDetailOpen);
+
+        // Toggle body modifier to prevent #app from hijacking vertical touch scrolling
+        if (typeof document !== 'undefined' && document.body) {
+            document.body.classList.toggle('settings-mobile-portrait', isPortrait);
+        }
+
+        // Notify topbar and navigation components of detail view state transitions
+        eventBus.emit('mobile:detail-state-change', { isOpen: Boolean(isPortrait && this._mobileDetailOpen) });
+
+        // Invalidate spatial navigation caches on orientation shift
+        if (typeof focusManager !== 'undefined') {
+            focusManager.invalidateCache('settings-sidebar');
+            focusManager.invalidateCache('settings-content');
+        }
+        this._setupFocus();
+    }
+
     _switchTab(tabId, force = false, focusContent = false) {
         if (this.activeTab === tabId && !force) return;
         this.activeTab = tabId;
@@ -9365,10 +13179,16 @@ class SettingsPage extends Page {
             btn.classList.toggle('active', btn.dataset.tab === tabId);
         });
 
-        // Re-render content panel
+        // Re-render content panel for portrait view
         const panel = this.$('#settings-content-panel');
         if (panel) {
-            panel.innerHTML = this._renderActiveTabContent();
+            panel.innerHTML = `
+                <div class="settings-tab-body" id="settings-tab-body">
+                    ${this._renderActiveTabContent()}
+                    <!-- Bottom scrolling buffer so mobile navigation bar never obstructs the last setting control -->
+                    <div class="settings-bottom-spacer" aria-hidden="true"></div>
+                </div>
+            `;
             panel.scrollTop = 0; // Reset scroll position to top on tab change
 
             // Apply translations to the newly rendered content
@@ -9380,6 +13200,8 @@ class SettingsPage extends Page {
                 this._setupHomeLayoutUI();
             } else if (tabId === 'sidebar') {
                 this._setupSidebarLayoutUI();
+            } else if (tabId === 'libraries') {
+                this._setupLibrariesTabUI();
             } else if (tabId === 'backup') {
                 this._updateBackupStatusDisplay();
             } else if (tabId === 'plugins') {
@@ -9593,6 +13415,212 @@ class SettingsPage extends Page {
         }
     }
 
+    /**
+     * Initialize and bind events for the admin Libraries tab.
+     * Fetches media library views, renders library cards with their icons,
+     * wires global scan triggers, and handles metadata refresh option modals.
+     */
+    async _setupLibrariesTabUI() {
+        // Ensure user is an administrator before executing server queries
+        const user = auth.getCurrentUser();
+        if (!user?.Policy?.IsAdministrator) return;
+
+        const listContainer = this.$('#libraries-admin-list');
+        const countBadge = this.$('#libraries-count-badge');
+        const scanAllBtn = this.$('#btn-scan-all-libraries');
+
+        // ====================================================================
+        // Global Scan All Libraries Handler
+        // ====================================================================
+        if (scanAllBtn) {
+            scanAllBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                try {
+                    // Temporarily visually disable button to avoid duplicate clicks
+                    scanAllBtn.disabled = true;
+                    scanAllBtn.style.opacity = '0.6';
+
+                    // Trigger server-wide library scan: POST /Library/Refresh
+                    await api.refreshAllLibraries();
+
+                    // Display success feedback toast to the administrator
+                    toast.show(
+                        i18n.t('LibraryScanQueued') || 'Library scan queued for all libraries.',
+                        3500,
+                        { type: 'info' }
+                    );
+                } catch (err) {
+                    log.error('Failed to trigger scan of all libraries:', err);
+                    toast.show(
+                        i18n.t('LibraryScanFailed') || 'Failed to trigger library scan.',
+                        4000,
+                        { type: 'error' }
+                    );
+                } finally {
+                    // Restore button state after short debounce
+                    setTimeout(() => {
+                        if (scanAllBtn) {
+                            scanAllBtn.disabled = false;
+                            scanAllBtn.style.opacity = '1';
+                        }
+                    }, 1200);
+                }
+            });
+        }
+
+        if (!listContainer) return;
+
+        // ====================================================================
+        // Load & Render Media Libraries
+        // ====================================================================
+        try {
+            // Fetch live user library views from Jellyfin API
+            const viewsResponse = await api.getUserViews();
+            const libraries = viewsResponse.Items || [];
+
+            // Update header count badge with total libraries count
+            if (countBadge) {
+                const countText = libraries.length === 1
+                    ? (i18n.t('Library') || 'Library')
+                    : (i18n.t('Libraries') || 'Libraries');
+                countBadge.textContent = `${libraries.length} ${countText}`;
+            }
+
+            // Handle empty library state
+            if (libraries.length === 0) {
+                listContainer.innerHTML = `
+                    <div class="library-admin-loading" data-i18n="NoLibrariesFound">
+                        ${i18n.t('NoLibrariesFound') || 'No media libraries found.'}
+                    </div>
+                `;
+                return;
+            }
+
+            // Build HTML cards for each library
+            listContainer.innerHTML = libraries.map((lib) => {
+                const colTypeLabel = lib.CollectionType || 'library';
+
+                return `
+                    <div class="setting-item library-setting-row" data-id="${lib.Id}">
+                        <div class="setting-label">
+                            <span class="setting-name">${escapeHtml(lib.Name)}</span>
+                            <span class="setting-description library-admin-type">${escapeHtml(colTypeLabel)}</span>
+                        </div>
+                        <div class="setting-control">
+                            <button class="btn btn-option btn-library-refresh-options" 
+                                    id="btn-refresh-${lib.Id}"
+                                    data-id="${lib.Id}" 
+                                    data-name="${escapeHtml(lib.Name)}" 
+                                    tabindex="0" 
+                                    data-focusable="true">
+                                <svg class="icon-outline btn-icon-svg" viewBox="0 0 24 24"><path fill="currentColor" d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6c0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6c0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4l-4-4v3z"/></svg>
+                                <svg class="icon-filled btn-icon-svg" viewBox="0 0 24 24"><path fill="currentColor" d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6c0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6c0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4l-4-4v3z"/></svg>
+                                <span class="btn-label">${i18n.t('Refresh') || 'Refresh...'}</span>
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            // ================================================================
+            // Bind Individual Library Refresh Modal Triggers
+            // ================================================================
+            listContainer.querySelectorAll('.btn-library-refresh-options').forEach((btn) => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const libId = btn.dataset.id;
+                    const libName = btn.dataset.name || i18n.t('Library') || 'Library';
+
+                    // 3 metadata refresh options matching Jellyfin refresh modes
+                    const options = [
+                        {
+                            value: 'ValidationOnly',
+                            label: i18n.t('ScanNewUpdatedFiles') || 'Scan for new and updated files'
+                        },
+                        {
+                            value: 'Default',
+                            label: i18n.t('SearchMissingMetadata') || 'Search for missing metadata'
+                        },
+                        {
+                            value: 'FullRefresh',
+                            label: i18n.t('ReplaceAllMetadata') || 'Replace all metadata'
+                        }
+                    ];
+
+                    // Open the selection modal dialog
+                    this._renderSelectionModal(
+                        `${libName} — ${i18n.t('RefreshMode') || 'Refresh mode'}`,
+                        options,
+                        'ValidationOnly',
+                        async (selectedMode) => {
+                            try {
+                                let refreshParams = {};
+
+                                // Map selected mode to appropriate Jellyfin API refresh options
+                                if (selectedMode === 'ValidationOnly') {
+                                    // Scan for new and updated files without replacing existing data
+                                    refreshParams = {
+                                        MetadataRefreshMode: 'ValidationOnly',
+                                        ImageRefreshMode: 'ValidationOnly',
+                                        ReplaceAllMetadata: false,
+                                        ReplaceAllImages: false,
+                                        Recursive: true
+                                    };
+                                } else if (selectedMode === 'FullRefresh') {
+                                    // Full refresh: replace all metadata and images from providers
+                                    refreshParams = {
+                                        MetadataRefreshMode: 'FullRefresh',
+                                        ImageRefreshMode: 'FullRefresh',
+                                        ReplaceAllMetadata: true,
+                                        ReplaceAllImages: true,
+                                        Recursive: true
+                                    };
+                                } else {
+                                    // Search for missing metadata & missing images only
+                                    refreshParams = {
+                                        MetadataRefreshMode: 'Default',
+                                        ImageRefreshMode: 'Default',
+                                        ReplaceAllMetadata: false,
+                                        ReplaceAllImages: false,
+                                        Recursive: true
+                                    };
+                                }
+
+                                // Send POST /Items/{libId}/Refresh request
+                                await api.refreshItem(libId, refreshParams);
+
+                                // Display success toast notification
+                                toast.show(
+                                    `${i18n.t('RefreshQueued') || 'Refresh queued for'} ${libName}`,
+                                    3500,
+                                    { type: 'info' }
+                                );
+                            } catch (refreshErr) {
+                                log.error(`Failed to refresh metadata for library ${libName} (${libId}):`, refreshErr);
+                                toast.show(
+                                    `${i18n.t('RefreshFailed') || 'Refresh failed for'} ${libName}`,
+                                    4000,
+                                    { type: 'error' }
+                                );
+                            }
+                        }
+                    );
+                });
+            });
+
+            // Re-invalidate and register focus sections for TV remote navigation
+            focusManager.invalidateCache('settings-content');
+            this._setupFocus();
+        } catch (err) {
+            log.error('Failed to load libraries in admin tab:', err);
+            listContainer.innerHTML = `
+                <div class="library-admin-loading" data-i18n="ErrorLoadingLibraries">
+                    ${i18n.t('ErrorLoadingLibraries') || 'Error loading media libraries.'}
+                </div>
+            `;
+        }
+    }
+
     async _setupHomeLayoutUI() {
         const container = this.$('#home-layout-container');
         if (!container) return;
@@ -9650,6 +13678,24 @@ class SettingsPage extends Page {
                     title: i18n.t('LatestFromLibrary', [lib.Name])
                 });
             });
+
+            // Add custom collection descriptors
+            try {
+                const rawCustom = storage.getItem('pref:customCollectionRows');
+                if (rawCustom) {
+                    const customList = JSON.parse(rawCustom);
+                    if (Array.isArray(customList)) {
+                        customList.forEach((c) => {
+                            if (c && c.id) {
+                                descriptors.push({
+                                    id: `collection-${c.id}`,
+                                    title: c.name || 'Collection'
+                                });
+                            }
+                        });
+                    }
+                }
+            } catch (e) { }
 
             // Reconcile with saved layout
             const layoutVars = homeLayoutManager.buildSettingsLayout(descriptors);
@@ -9763,13 +13809,279 @@ class SettingsPage extends Page {
         }
     }
 
+    /**
+     * Helper to get the human-readable summary of custom collections selected
+     * @returns {string}
+     */
+    _getCustomCollectionsLabel() {
+        try {
+            const raw = storage.getItem('pref:customCollectionRows');
+            const list = raw ? JSON.parse(raw) : [];
+            const count = Array.isArray(list) ? list.length : 0;
+            return count > 0
+                ? i18n.t('CollectionsSelected', [count])
+                : i18n.t('NoCollectionsSelected') || 'None Selected';
+        } catch (_) {
+            return i18n.t('NoCollectionsSelected') || 'None Selected';
+        }
+    }
+
+    async _showCustomCollectionsModal() {
+        const overlay = this.$('#modal-overlay');
+        if (!overlay) return;
+
+        // Save focus context
+        this._prevFocus = focusManager.getFocused();
+        this._prevSection = focusManager.getActiveSection();
+
+        // Parse selected collections from storage
+        let selectedCols = [];
+        try {
+            const raw = storage.getItem('pref:customCollectionRows');
+            selectedCols = raw ? JSON.parse(raw) : [];
+            if (!Array.isArray(selectedCols)) selectedCols = [];
+        } catch (_) {
+            selectedCols = [];
+        }
+
+        const selectedMap = new Map();
+        selectedCols.forEach((c) => {
+            if (c && c.id) selectedMap.set(c.id, { id: c.id, name: c.name || '' });
+        });
+
+        // Show loading state in overlay
+        overlay.classList.add('visible');
+        overlay.setAttribute('aria-hidden', 'false');
+        overlay.innerHTML = `
+            <div class="settings-modal custom-collections-modal" role="dialog" aria-modal="true">
+                <div class="modal-header">
+                    <h2 data-i18n="ManageCollections">${i18n.t('ManageCollections') || 'Manage Collections'}</h2>
+                </div>
+                <div class="modal-loading-spinner" style="padding: 40px; text-align: center; color: var(--jf-text-secondary);">
+                    ${i18n.t('Loading') || 'Loading...'}
+                </div>
+            </div>
+        `;
+
+        let collections = [];
+        try {
+            const res = await api.getItems({
+                IncludeItemTypes: 'BoxSet,Playlist',
+                Recursive: true,
+                EnableTotalRecordCount: false
+            });
+            collections = res?.Items || [];
+            collections.sort((a, b) => (a.Name || '').localeCompare(b.Name || ''));
+        } catch (err) {
+            log.error('Failed to fetch collections for custom rows modal', err);
+        }
+
+        // If overlay was closed while fetching
+        if (!overlay.classList.contains('visible')) return;
+
+        let searchQuery = '';
+
+        const saveSelection = () => {
+            const arrayToSave = Array.from(selectedMap.values());
+            storage.setItem('pref:customCollectionRows', JSON.stringify(arrayToSave));
+            const countLabel = this.$('#custom-collections-count-label');
+            if (countLabel) {
+                countLabel.innerText = this._getCustomCollectionsLabel();
+            }
+        };
+
+        const renderModal = () => {
+            const filteredCols = searchQuery
+                ? collections.filter((c) => (c.Name || '').toLowerCase().includes(searchQuery.toLowerCase()))
+                : collections;
+
+            const colRowsHtml = filteredCols
+                .map((c) => {
+                    const isSelected = selectedMap.has(c.Id);
+                    return `
+                    <button class="modal-option-btn check-btn ${isSelected ? 'selected' : ''}" data-id="${c.Id}" data-name="${escapeHtml(c.Name || '')}" tabindex="0">
+                        <div class="checkbox-box"><span class="check-mark">&#10003;</span></div>
+                        <span class="modal-option-label">${escapeHtml(c.Name || '')}</span>
+                    </button>
+                `;
+                })
+                .join('');
+
+            overlay.innerHTML = `
+                <div class="settings-modal custom-collections-modal" role="dialog" aria-modal="true">
+                    <div class="modal-header">
+                        <h2 data-i18n="ManageCollections">${i18n.t('ManageCollections') || 'Manage Collections'}</h2>
+                    </div>
+
+                    <!-- Search Input -->
+                    <div class="fav-lang-search-box">
+                        <input type="text" id="custom-col-search-input" class="fav-lang-search-input" 
+                               placeholder="${i18n.t('Search') || 'Search...'}" 
+                               value="${escapeHtml(searchQuery)}" tabindex="0" />
+                    </div>
+
+                    <!-- Collections List -->
+                    <div class="modal-options custom-col-list" id="custom-col-list" style="max-height: 50vh; overflow-y: auto;">
+                        ${colRowsHtml || `<div class="modal-no-options" data-i18n="NoCollectionsFound">${i18n.t('NoCollectionsFound') || 'No collections or playlists found'}</div>`}
+                    </div>
+
+                    <div class="modal-actions">
+                        <button class="modal-action-btn" id="btn-custom-col-clear" tabindex="0" data-i18n="ClearAll">${i18n.t('ClearAll') || 'Clear All'}</button>
+                        <button class="modal-action-btn primary" id="btn-custom-col-done" tabindex="0" data-i18n="Done">${i18n.t('Done') || 'Done'}</button>
+                    </div>
+                </div>
+            `;
+
+            // Bind checkbox row clicks
+            overlay.querySelectorAll('.custom-col-list .check-btn').forEach((btn) => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const id = btn.dataset.id;
+                    const name = btn.dataset.name;
+                    if (selectedMap.has(id)) {
+                        selectedMap.delete(id);
+                        btn.classList.remove('selected');
+                    } else {
+                        selectedMap.set(id, { id, name });
+                        btn.classList.add('selected');
+                    }
+                    saveSelection();
+                });
+            });
+
+            // Bind search input
+            const searchInput = overlay.querySelector('#custom-col-search-input');
+            if (searchInput) {
+                searchInput.addEventListener('input', (e) => {
+                    searchQuery = e.target.value;
+                    renderModal();
+                    const updatedInput = overlay.querySelector('#custom-col-search-input');
+                    if (updatedInput) {
+                        updatedInput.focus();
+                        updatedInput.setSelectionRange(updatedInput.value.length, updatedInput.value.length);
+                    }
+                });
+            }
+
+            // Bind Clear All
+            const clearBtn = overlay.querySelector('#btn-custom-col-clear');
+            if (clearBtn) {
+                clearBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    selectedMap.clear();
+                    overlay
+                        .querySelectorAll('.custom-col-list .check-btn')
+                        .forEach((b) => b.classList.remove('selected'));
+                    saveSelection();
+                });
+            }
+
+            // Bind Done
+            const doneBtn = overlay.querySelector('#btn-custom-col-done');
+            if (doneBtn) {
+                doneBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this._closeCustomCollectionsModal();
+                });
+            }
+
+            // Allow exiting modal by clicking the backdrop outside dialog
+            overlay.onclick = (e) => {
+                if (e.target === overlay) {
+                    e.stopPropagation();
+                    this._closeCustomCollectionsModal();
+                }
+            };
+
+            // Register Focus Sections: Search -> List -> Actions
+            this.registerFocusSection('custom-col-search', overlay.querySelector('.fav-lang-search-box'), {
+                orientation: 'horizontal',
+                leaveDown: 'custom-col-list'
+            });
+
+            this.registerFocusSection('custom-col-list', overlay.querySelector('#custom-col-list'), {
+                orientation: 'vertical',
+                leaveUp: 'custom-col-search',
+                leaveDown: 'custom-col-actions'
+            });
+
+            this.registerFocusSection('custom-col-actions', overlay.querySelector('.modal-actions'), {
+                orientation: 'horizontal',
+                leaveUp: 'custom-col-list'
+            });
+
+            // Initial focus
+            const firstOption = overlay.querySelector('#custom-col-list .check-btn');
+            if (firstOption) {
+                focusManager.setActiveSection('custom-col-list');
+                setTimeout(() => {
+                    focusManager.focusElement(firstOption);
+                }, 50);
+            } else {
+                focusManager.setActiveSection('custom-col-search');
+                setTimeout(() => {
+                    const searchEl = overlay.querySelector('#custom-col-search-input');
+                    if (searchEl) focusManager.focusElement(searchEl);
+                }, 50);
+            }
+        };
+
+        renderModal();
+    }
+
+    _closeCustomCollectionsModal() {
+        const overlay = this.$('#modal-overlay');
+        if (!overlay || !overlay.classList.contains('visible')) return;
+
+        overlay.onclick = null;
+        overlay.classList.remove('visible');
+        overlay.setAttribute('aria-hidden', 'true');
+        overlay.innerHTML = '';
+
+        this.unregisterFocusSection('custom-col-search');
+        this.unregisterFocusSection('custom-col-list');
+        this.unregisterFocusSection('custom-col-actions');
+        focusManager.unregister('custom-col-search');
+        focusManager.unregister('custom-col-list');
+        focusManager.unregister('custom-col-actions');
+
+        const countLabel = this.$('#custom-collections-count-label');
+        if (countLabel) {
+            countLabel.innerText = this._getCustomCollectionsLabel();
+        }
+
+        // Re-render Home Layout UI to immediately reflect newly selected/deselected custom collection rows
+        this._setupHomeLayoutUI();
+        focusManager.invalidateCache('settings-content');
+
+        // Restore active section and focus
+        const targetSection = this._prevSection || 'settings-display';
+        focusManager.setActiveSection(targetSection, false);
+
+        if (this._prevFocus && document.contains(this._prevFocus)) {
+            focusManager.focusElement(this._prevFocus);
+        } else {
+            const manageBtn = this.$('#btn-manage-custom-collections');
+            if (manageBtn) {
+                focusManager.focusElement(manageBtn);
+            } else {
+                focusManager.focusFirstInActiveSection();
+            }
+        }
+
+        this._prevFocus = null;
+        this._prevSection = null;
+    }
+
     _setupFocus() {
         // Navigation: Sidebar <-> Content
         // We define these purely logically (LTR space).
         // FocusManager automatically inverts 'leaveLeft' and 'leaveRight' when document dir is 'rtl'.
+        const isPortrait = this._isPortraitMode();
+
         this.registerFocusSection('settings-sidebar', this.$('#settings-sidebar'), {
             orientation: 'vertical',
-            leaveRight: 'settings-content',
+            leaveRight: isPortrait ? null : 'settings-content',
             leaveLeft: 'sidebar',
             enterTo: 'last-focused',
             defaultFocusSelector: '.settings-menu-btn.active'
@@ -9777,7 +14089,7 @@ class SettingsPage extends Page {
 
         this.registerFocusSection('settings-content', this.$('#settings-content-panel'), {
             orientation: 'grid',
-            leaveLeft: 'settings-sidebar',
+            leaveLeft: isPortrait ? null : 'settings-sidebar',
             leaveRight: null,
             enterTo: 'first',
             onMove: (direction, currentElement) => {
@@ -9812,7 +14124,28 @@ class SettingsPage extends Page {
                             return true; // Handled
                         }
                     } else {
-                        // If not in a setting-item (fallback), just escape
+                        // Check if navigating inside the About action cards grid
+                        const aboutGrid = currentElement.closest('.about-actions-grid');
+                        if (aboutGrid) {
+                            // Collect focusable cards inside the grid
+                            const focusSelector = 'a, button, input, select, [tabindex]:not([tabindex="-1"])';
+                            const candidates = Array.from(aboutGrid.querySelectorAll(focusSelector)).filter(
+                                (el) => el.tabIndex !== -1 && !el.disabled && el.offsetParent !== null
+                            );
+
+                            // Check if there is another card to the left within the grid
+                            const nextInGrid = spatialNavigator.findNext(currentElement, candidates, 'left');
+                            if (nextInGrid) {
+                                focusManager.focusElement(nextInGrid);
+                                return true;
+                            }
+
+                            // If on the leftmost column, smoothly transition to the settings sidebar
+                            focusManager._leaveSection('left');
+                            return true;
+                        }
+
+                        // If not in a setting-item or about-actions-grid (fallback), just escape
                         focusManager._leaveSection('left');
                         return true;
                     }
@@ -10064,12 +14397,53 @@ class SettingsPage extends Page {
     onBack() {
         const overlay = this.$('#modal-overlay');
         if (overlay && overlay.classList.contains('visible')) {
+            // Check if Favorite Languages modal is open
+            if (overlay.querySelector('.fav-languages-modal')) {
+                this._closeFavoriteLanguagesModal();
+                return true;
+            }
+            // Check if Custom Collections modal is open
+            if (overlay.querySelector('.custom-collections-modal')) {
+                this._closeCustomCollectionsModal();
+                return true;
+            }
+            // Check if About dialog modal is open
+            if (overlay.querySelector('.about-dialog-modal')) {
+                this._closeAboutDialog();
+                return true;
+            }
             this._closeSelectionModal();
+            return true;
+        }
+
+        // Mobile portrait 2-page navigation:
+        // If the user is currently viewing the details of a tab,
+        // pressing Back returns them to the category tab selection list.
+        if (this._mobileDetailOpen) {
+            this._closeMobileDetail(true);
             return true;
         }
 
         router.back();
         return true;
+    }
+
+    onBeforeDestroy() {
+        // Detach viewport resize observer to avoid memory leaks
+        if (this._onResize) {
+            window.removeEventListener('resize', this._onResize);
+            window.removeEventListener('orientationchange', this._onResize);
+            this._onResize = null;
+        }
+        if (this._onPopState) {
+            window.removeEventListener('popstate', this._onPopState);
+            this._onPopState = null;
+        }
+        if (typeof document !== 'undefined' && document.body) {
+            document.body.classList.remove('settings-mobile-portrait');
+        }
+        // Notify navigation components that Settings page is unmounting
+        eventBus.emit('mobile:detail-state-change', { isOpen: false });
     }
 
     _renderUserAvatar(user) {

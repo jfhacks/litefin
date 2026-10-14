@@ -8,6 +8,7 @@
     height: 100vh;
     box-sizing: border-box;
     overflow: hidden;
+    position: relative;
 }
 
 /* --- Scroll Container --- */
@@ -105,8 +106,8 @@
  * and text variables to follow user display customization preferences.
  */
 .tab-btn.active {
-    background-color: var(--jf-btn-primary-bg) !important;
-    color: var(--jf-btn-primary-color) !important;
+    background-color: var(--jf-btn-primary-color) !important;
+    color: var(--jf-btn-primary-bg) !important; 
     border-color: var(--jf-btn-primary-border) !important;
 }
 
@@ -562,13 +563,118 @@ html[data-layout-tier="ultra-legacy"] .alpha-btn::before {
 }
 
 /* Ensure images and fallbacks use the larger 'LG' radius for a modern feel */
-.library-grid .media-card .card-image,
-.library-grid .media-card .media-fallback {
+.library-grid .media-card .card-image {
     border-radius: var(--jf-border-radius-lg);
 }
 
-.library-grid .media-card .card-image img {
-    border-radius: calc(var(--jf-border-radius-lg) - 3px);
+.library-grid .media-card .card-image img,
+.library-grid .media-card .media-fallback {
+    border-radius: inherit;
+    -webkit-border-radius: inherit;
+}
+
+/* Modern Layouts: 24px Rounded Corners for Library Grids */
+html[data-layout-media-rows="modern"] .library-grid .media-card .card-image,
+html[data-layout-media-rows="expanded"] .library-grid .media-card .card-image,
+html[data-layout-media-rows="modern-posters"] .library-grid .media-card .card-image {
+    border-radius: 24px !important;
+    -webkit-border-radius: 24px !important;
+    border: none !important;
+    background: var(--jf-surface, rgba(255, 255, 255, 0.05));
+    overflow: hidden !important;
+    position: relative !important;
+}
+
+html[data-layout-media-rows="modern"] .library-grid .media-card .card-image img,
+html[data-layout-media-rows="expanded"] .library-grid .media-card .card-image img,
+html[data-layout-media-rows="modern-posters"] .library-grid .media-card .card-image img,
+html[data-layout-media-rows="modern"] .library-grid .media-card .media-fallback,
+html[data-layout-media-rows="expanded"] .library-grid .media-card .media-fallback,
+html[data-layout-media-rows="modern-posters"] .library-grid .media-card .media-fallback {
+    border-radius: 24px !important;
+    -webkit-border-radius: 24px !important;
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.library-grid .media-card .media-fallback {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center !important;
+    box-sizing: border-box !important;
+    z-index: 1 !important;
+}
+
+html[data-layout-media-rows="modern"] .library-grid .media-card:focus .card-image,
+html[data-layout-media-rows="modern"] .library-grid .media-card.focused .card-image,
+html[data-layout-media-rows="expanded"] .library-grid .media-card:focus .card-image,
+html[data-layout-media-rows="expanded"] .library-grid .media-card.focused .card-image,
+html[data-layout-media-rows="modern-posters"] .library-grid .media-card:focus .card-image,
+html[data-layout-media-rows="modern-posters"] .library-grid .media-card.focused .card-image {
+    border: none !important;
+    outline: none !important;
+}
+
+/* Modern Layouts: Library Grid Overlay Focus Ring */
+html[data-layout-media-rows="modern"] .library-grid .media-card:focus .card-image::after,
+html[data-layout-media-rows="modern"] .library-grid .media-card.focused .card-image::after,
+html[data-layout-media-rows="expanded"] .library-grid .media-card:focus .card-image::after,
+html[data-layout-media-rows="expanded"] .library-grid .media-card.focused .card-image::after,
+html[data-layout-media-rows="modern-posters"] .library-grid .media-card:focus .card-image::after,
+html[data-layout-media-rows="modern-posters"] .library-grid .media-card.focused .card-image::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    border-radius: 24px;
+    -webkit-border-radius: 24px;
+    border: 4px solid var(--jf-focus-border-color, var(--jf-accent));
+    box-sizing: border-box;
+    z-index: 10;
+    pointer-events: none;
+}
+
+/* Modern Layouts: Banner & List View Radius */
+html[data-layout-media-rows="modern"] .library-grid.view-banner .media-card,
+html[data-layout-media-rows="expanded"] .library-grid.view-banner .media-card,
+html[data-layout-media-rows="modern-posters"] .library-grid.view-banner .media-card,
+html[data-layout-media-rows="modern"] .library-grid.view-banner .card-image,
+html[data-layout-media-rows="expanded"] .library-grid.view-banner .card-image,
+html[data-layout-media-rows="modern-posters"] .library-grid.view-banner .card-image {
+    border-radius: 24px !important;
+    -webkit-border-radius: 24px !important;
+}
+
+html[data-layout-media-rows="modern"] .library-grid.view-list .media-card,
+html[data-layout-media-rows="expanded"] .library-grid.view-list .media-card,
+html[data-layout-media-rows="modern-posters"] .library-grid.view-list .media-card {
+    border-radius: 20px !important;
+    -webkit-border-radius: 20px !important;
+}
+
+html[data-layout-media-rows="modern"] .library-grid.view-list .media-card .card-image,
+html[data-layout-media-rows="expanded"] .library-grid.view-list .media-card .card-image,
+html[data-layout-media-rows="modern-posters"] .library-grid.view-list .media-card .card-image {
+    border-radius: 20px 0 0 20px !important;
+    -webkit-border-radius: 20px 0 0 20px !important;
+}
+
+/* Live TV Channel Card Contain Override for Library Grids */
+.library-grid .media-card[data-type="TvChannel"] .card-image img,
+.library-grid .media-card[data-item-type="TvChannel"] .card-image img,
+.library-grid .media-card.tv-channel-card .card-image img {
+    object-fit: contain !important;
+    padding: 24px !important;
+    box-sizing: border-box !important;
 }
 
 /* ── View mode: Small Poster ─────────────────────────────────────── */
@@ -793,6 +899,18 @@ html[data-layout-tier="ultra-legacy"] .alpha-btn::before {
     -webkit-border-radius: inherit !important;
     object-fit: cover !important;
     display: block !important;
+}
+
+/* List View: Proportion center video play badge to fit compact 75x110 thumbnail */
+.library-grid.view-list .media-card .video-badge {
+    width: 36px !important;
+    height: 36px !important;
+}
+
+.library-grid.view-list .media-card .video-badge svg {
+    width: 18px !important;
+    height: 18px !important;
+    margin-left: 3px !important;
 }
 
 /* List: Ensure fallbacks don't overflow the tiny 75x110 block */
@@ -1071,6 +1189,166 @@ html[data-layout-tier="ultra-legacy"] .library-grid.view-list .media-card {
     border: 2px solid var(--jf-btn-primary-focus-border) !important;
     /* Promote only the one focused button to its own compositor layer */
     will-change: transform;
+}
+
+/*
+ * =============================================================================
+ * ── RIGHT-SIDE VERTICAL ALPHABET SELECTOR ────────────────────────────────────
+ * =============================================================================
+ * Floating right-docked vertical alphabetical index for auxiliary navigation:
+ * - Floating glassmorphism pill with dynamic backdrop-filter blur and subtle border
+ * - Fixed screen docking, keeping quick-jump accessible while browsing long grids
+ * - Spring-damper physics curve for tactile focus transitions
+ * - Dynamic safety buffers on content and headers to prevent card occlusion
+ * =============================================================================
+ */
+
+html[data-alpha-picker-position="right"] .alpha-picker-container {
+    /* Fixed right docking vertically centered on the viewport */
+    position: fixed !important;
+    top: 50% !important;
+    right: 20px !important;
+    transform: translateY(-50%) !important;
+    -webkit-transform: translateY(-50%) !important;
+    width: auto !important;
+    height: auto !important;
+    min-height: auto !important;
+    max-height: 96vh !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    z-index: 100 !important;
+    pointer-events: auto !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+
+html[data-alpha-picker-position="right"] .alpha-picker {
+    /* Vertical columnar stack with all letters visible */
+    display: flex !important;
+    flex-direction: column !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: auto !important;
+    height: auto !important;
+    max-height: 96vh !important;
+    overflow: visible !important;
+    /* Glassmorphism frosted aesthetic */
+    background: rgba(18, 18, 22, 0.75) !important;
+    -webkit-backdrop-filter: blur(24px) saturate(180%) !important;
+    backdrop-filter: blur(24px) saturate(180%) !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    border-radius: 28px !important;
+    -webkit-border-radius: 28px !important;
+    padding: 8px 4px !important;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.15) !important;
+}
+
+html[data-alpha-picker-position="right"] .alpha-btn {
+    /* Compact vertical pill sizing calibrated for TV viewports */
+    flex-shrink: 0 !important;
+    width: 30px !important;
+    height: 30px !important;
+    height: 3.1vh !important;
+    min-height: 20px !important;
+    max-height: 32px !important;
+    margin: 1px 0 !important;
+    padding: 0 !important;
+    font-size: 13px !important;
+    font-weight: 600 !important;
+    line-height: 1 !important;
+    text-align: center !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    border-radius: 15px !important;
+    -webkit-border-radius: 15px !important;
+    /* Tactile spring animation curve */
+    transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1),
+                background-color 0.18s ease,
+                color 0.18s ease,
+                box-shadow 0.22s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+
+html[data-alpha-picker-position="right"] .alpha-btn.active {
+    /* Active filter letter highlight with subtle glow */
+    color: var(--jf-btn-primary-bg, #6b6ede) !important;
+    font-weight: 800 !important;
+    background: rgba(255, 255, 255, 0.12) !important;
+    transform: scale(1.18) !important;
+    -webkit-transform: scale(1.18) !important;
+}
+
+html[data-alpha-picker-position="right"] .alpha-btn:focus,
+html[data-alpha-picker-position="right"] .alpha-btn.focused,
+html[data-alpha-picker-position="right"] .alpha-btn:hover {
+    /* Tactile pop out to the left towards the content with luminous border */
+    outline: none !important;
+    color: var(--jf-btn-primary-focus-color) !important;
+    background-color: var(--jf-btn-primary-focus-bg) !important;
+    border: 2px solid var(--jf-btn-primary-focus-border) !important;
+    transform: scale(1.35) translateX(-4px) !important;
+    -webkit-transform: scale(1.35) translateX(-4px) !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.55), 0 0 12px var(--jf-btn-primary-focus-border, rgba(255, 255, 255, 0.5)) !important;
+    z-index: 10 !important;
+    will-change: transform;
+}
+
+/*
+ * Safe Right Margins for Library Content when Right-Side Selector is active.
+ * Ensures media cards, header controls, and pagination have ample breathing room.
+ */
+html[data-alpha-picker-position="right"] .library-page .library-header,
+html[data-alpha-picker-position="right"] .library-page .library-content,
+html[data-alpha-picker-position="right"] .library-page .library-pagination {
+    padding-right: 80px !important;
+}
+
+/*
+ * RTL (Right-to-Left) Localization Mirroring
+ * On Arabic / Hebrew layouts, mirror the vertical dock to the left side of the screen.
+ */
+[dir="rtl"] html[data-alpha-picker-position="right"] .alpha-picker-container,
+html[dir="rtl"][data-alpha-picker-position="right"] .alpha-picker-container {
+    right: auto !important;
+    left: 20px !important;
+}
+
+[dir="rtl"] html[data-alpha-picker-position="right"] .alpha-btn:focus,
+[dir="rtl"] html[data-alpha-picker-position="right"] .alpha-btn.focused,
+[dir="rtl"] html[data-alpha-picker-position="right"] .alpha-btn:hover,
+html[dir="rtl"][data-alpha-picker-position="right"] .alpha-btn:focus,
+html[dir="rtl"][data-alpha-picker-position="right"] .alpha-btn.focused,
+html[dir="rtl"][data-alpha-picker-position="right"] .alpha-btn:hover {
+    transform: scale(1.35) translateX(4px) !important;
+    -webkit-transform: scale(1.35) translateX(4px) !important;
+}
+
+[dir="rtl"] html[data-alpha-picker-position="right"] .library-page .library-header,
+[dir="rtl"] html[data-alpha-picker-position="right"] .library-page .library-content,
+[dir="rtl"] html[data-alpha-picker-position="right"] .library-page .library-pagination,
+html[dir="rtl"][data-alpha-picker-position="right"] .library-page .library-header,
+html[dir="rtl"][data-alpha-picker-position="right"] .library-page .library-content,
+html[dir="rtl"][data-alpha-picker-position="right"] .library-page .library-pagination {
+    padding-right: 50px !important;
+    padding-left: 80px !important;
+}
+
+/*
+ * Ultra-Legacy Low VRAM Overrides (Tizen 2.x/3.x / WebKit <538)
+ */
+html[data-layout-tier="ultra-legacy"][data-alpha-picker-position="right"] .alpha-picker {
+    background: rgba(20, 20, 24, 0.95) !important;
+    border: 1px solid rgba(255, 255, 255, 0.2) !important;
+}
+
+html[data-layout-tier="ultra-legacy"][data-alpha-picker-position="right"] .alpha-btn {
+    display: block !important;
+    height: 30px !important;
+    width: 30px !important;
+    line-height: 30px !important;
 }
 
 /* --- Pagination Footer --- */
@@ -1619,21 +1897,19 @@ html[data-layout-tier="ultra-legacy"] .library-grid.view-list .media-card {
 }
 
 /* Horizontal Scroll Container (Upcoming, Suggestions) */
-.row-items {
+.library-content .row-items {
     display: block; /* Match layout.css stable block layout */
     overflow: hidden; 
     padding: 10px 0;
     /* scrollbar-width handled by layout.css */
 }
 
-.media-card {
+.library-content .row-items .media-card {
     margin-right: 20px;
 }
 
-
-
 /* Ensure focus rings don't clip */
-.media-card {
+.library-content .media-card {
     margin: 5px;
     /* Extra robustness */
 
@@ -1766,4 +2042,55 @@ html[data-layout-tier="ultra-legacy"] .library-row {
     font-weight: 600;
     text-align: center;
     line-height: 1.2;
+}
+
+/*
+ * =============================================================================
+ * INFINITE SCROLL LOADER
+ * =============================================================================
+ * Subtle activity indicator displayed at the bottom of the grid while the next
+ * batch of media cards streams asynchronously from the server.
+ * - Minimalist glassmorphic container with fluid opacity transitions
+ * - Smooth CSS spinning indicator calibrated for 60fps TV compositors
+ * =============================================================================
+ */
+.infinite-scroll-loader {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 30px 20px 50px 20px;
+    width: 100%;
+    box-sizing: border-box;
+    transition: opacity 0.25s ease;
+}
+
+.infinite-scroll-loader.hidden {
+    display: none !important;
+}
+
+.infinite-spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid rgba(255, 255, 255, 0.15);
+    border-top-color: var(--jf-btn-primary-bg, #6b6ede);
+    border-radius: 50%;
+    -webkit-border-radius: 50%;
+    animation: infinite-spin 0.8s linear infinite;
+    -webkit-animation: infinite-spin 0.8s linear infinite;
+}
+
+@keyframes infinite-spin {
+    to { transform: rotate(360deg); }
+}
+
+@-webkit-keyframes infinite-spin {
+    to { -webkit-transform: rotate(360deg); }
+}
+
+.infinite-loader-text {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--jf-text-secondary, rgba(255, 255, 255, 0.6));
+    letter-spacing: 0.02em;
 }

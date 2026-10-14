@@ -16,6 +16,7 @@ import { buildJellyfinProfile } from '../../api/DeviceProfile.js';
 import FontLoader from '../../utils/FontLoader.js';
 import SubtitleStyles from '../../utils/SubtitleStyles.js';
 import { platformInfo } from '../../utils/PlatformInfo.js';
+import { resolveBestAudioStream, doesAudioTrackRequireDirectStream } from './JellyfinPlayer.js';
 
 const log = logger.create('PrewarmManager');
 
@@ -59,8 +60,23 @@ export class PrewarmManager {
 
         // Resolve target media source ID (specified override or first available source)
         const targetMediaSourceId = prewarmOptions.mediaSourceId || item.MediaSources?.[0]?.Id || null;
-        // Resolve target audio track (specified override or null/default)
-        const targetAudioIndex = prewarmOptions.audioStreamIndex ?? null;
+
+        // Resolve target audio track (specified override or auto-resolved DirectPlay track)
+        let targetAudioIndex = prewarmOptions.audioStreamIndex ?? null;
+        if (targetAudioIndex === null && item.MediaSources && typeof resolveBestAudioStream === 'function') {
+            const fallbackSource = item.MediaSources[0];
+            const ms = item.MediaSources.find((m) => m.Id === targetMediaSourceId) || fallbackSource;
+            if (ms) {
+                const bestStream = resolveBestAudioStream(ms);
+                if (bestStream) {
+                    targetAudioIndex = bestStream.Index;
+                    log.info(
+                        `[Prewarm] Auto-resolved DirectPlay audio track for "${item.Name}": Index ${targetAudioIndex} (${bestStream.Codec})`
+                    );
+                }
+            }
+        }
+
         // Resolve target subtitle track (specified override or null/default)
         const targetSubtitleIndex = prewarmOptions.subtitleStreamIndex ?? null;
 
@@ -107,32 +123,89 @@ export class PrewarmManager {
 
         // 2. Pre-fetch PlaybackInfo from Jellyfin server using ApiClient
         try {
-            // Determine video player backend configuration based on platform
-            const playerBackendSetting = PlayerSettings.get('playerBackend') || 'auto';
+            // Determine video player backend configuration based on user setting or platform recommendation
+            const playerBackendSetting = PlayerSettings.get('playerBackend') || 'html5';
             let backendType = 'html5';
-            if (playerBackendSetting === 'avplay' || (playerBackendSetting === 'auto' && platformInfo.isTizen)) {
+            if (playerBackendSetting === 'exoplayer') {
+                backendType = 'exoplayer';
+            } else if (playerBackendSetting === 'movi' && platformInfo.hasWebCodecsSupport) {
+                // Prewarm Movi backend when configured and WebCodecs hardware decode is supported
+                backendType = 'movi';
+            } else if (playerBackendSetting === 'avplay') {
                 backendType = 'avplay';
-            } else if (playerBackendSetting === 'webos' || (playerBackendSetting === 'auto' && platformInfo.isWebOS)) {
+            } else if (playerBackendSetting === 'webos') {
                 backendType = 'webos';
             }
 
             // Retrieve maximum streaming bitrate configured by user or default to 120Mbps
             const manualBitrate = PlayerSettings.get('maxBitrateInternet') || 120000000;
+
+            // Resolve target MediaSource object for track requirement analysis
+            const targetSource = targetMediaSourceId && item.MediaSources
+                ? item.MediaSources.find(m => m.Id === targetMediaSourceId)
+                : (item.MediaSources ? item.MediaSources[0] : null);
+
+            // Determine if the prewarmed audio track requires remuxing (DirectStream)
+            // on WebOS / HTML5 to prevent prewarming in DirectPlay and falling back to AC3
+            const needsRemux = targetSource && targetAudioIndex !== null && targetAudioIndex !== undefined &&
+                doesAudioTrackRequireDirectStream(targetSource, targetAudioIndex, backendType);
+
+            const prewarmPlaybackMode = needsRemux ? 'remux' : 'auto';
+
             // Build the device profile according to player capabilities and platform
             const deviceProfile = buildJellyfinProfile({
                 manualBitrate,
-                playbackMode: 'auto',
+                playbackMode: prewarmPlaybackMode,
                 backend: backendType
             });
 
+            // If remux is needed for this audio track, disable DirectPlay in profile
+            if (needsRemux) {
+                deviceProfile.DirectPlayProfiles = [];
+            }
+
+            // =================================================================
+            // MKV → MP4 Remux Preference Alignment
+            // =================================================================
+            // When "Remux MKV to MP4" is active and the prewarmed item is an MKV container,
+            // strip 'mkv' from DirectPlayProfiles so the prewarmed response aligns with
+            // DirectStream remuxing instead of caching a raw DirectPlay response.
+            // Check targetSource, item.Container, and nested MediaSources[0].Container.
+            const remuxMkvToMp4 = PlayerSettings.get('remuxMkvToMp4');
+            const itemContainer = (
+                targetSource?.Container ||
+                item.Container ||
+                item.MediaSources?.[0]?.Container ||
+                ''
+            ).toLowerCase();
+            const isMkvItem = itemContainer === 'mkv' || itemContainer === 'matroska' || itemContainer.includes('mkv');
+            if (remuxMkvToMp4 && !needsRemux && isMkvItem && Array.isArray(deviceProfile.DirectPlayProfiles)) {
+                for (const profile of deviceProfile.DirectPlayProfiles) {
+                    if (typeof profile.Container === 'string') {
+                        const containers = profile.Container.split(',').filter(c => c.trim() !== 'mkv');
+                        profile.Container = containers.join(',');
+                    }
+                }
+                deviceProfile.DirectPlayProfiles = deviceProfile.DirectPlayProfiles.filter(
+                    p => typeof p.Container !== 'string' || p.Container.length > 0
+                );
+            }
+
             // Clone profile to prevent accidental external mutations
             const clonedProfile = JSON.parse(JSON.stringify(deviceProfile));
-            // Assemble base PlaybackInfo request payload
+            // Assemble base PlaybackInfo request payload.
+            // If the item has saved progress, align the prewarm StartTimeTicks with the
+            // configured resume rewind offset so transcoded playback aligns perfectly.
+            const rawResumeTicks = item.UserData?.PlaybackPositionTicks || 0;
+            const defaultStartTicks = rawResumeTicks > 0
+                ? PlayerSettings.getAdjustedResumePositionTicks(rawResumeTicks)
+                : 0;
+
             const requestBody = {
                 DeviceProfile: clonedProfile,
                 UserId: api.userId,
                 MaxStreamingBitrate: manualBitrate,
-                StartTimeTicks: prewarmOptions.startPositionTicks ?? (item.UserData?.PlaybackPositionTicks || 0),
+                StartTimeTicks: prewarmOptions.startPositionTicks ?? defaultStartTicks,
                 AutoOpenLiveStream: true,
                 IsPlayback: true,
                 EnableDirectPlay: true,
@@ -226,34 +299,55 @@ export class PrewarmManager {
                 }
             }
 
-            // 3. Validate AudioStreamIndex: If a specific audio track was chosen and differs from prewarm
-            if (options.audioStreamIndex !== undefined && options.audioStreamIndex !== null) {
-                if (
-                    this._prewarmParams?.audioStreamIndex !== null &&
-                    this._prewarmParams?.audioStreamIndex !== undefined &&
-                    options.audioStreamIndex !== this._prewarmParams.audioStreamIndex
-                ) {
-                    log.info(
-                        `[Prewarm] Audio stream mismatch (prewarmed: ${this._prewarmParams.audioStreamIndex}, requested: ${options.audioStreamIndex}). Discarding prewarm.`
-                    );
-                    this.clear();
-                    return null;
-                }
+            // =================================================================
+            // 3. Validate AudioStreamIndex Parity
+            // =================================================================
+            // When prewarming occurs, the server-side PlaybackInfo endpoint generates
+            // direct-stream or transcoding URLs specifically prepared for the chosen
+            // audio track index. If playback is requested with an audio index that
+            // differs from what was prewarmed (e.g. prewarmed default vs commentary),
+            // consuming the prewarmed data would route playback to the wrong audio stream.
+            // Discard the prewarm cache immediately so a clean PlaybackInfo is resolved.
+            // =================================================================
+            // Compare prewarmed audio index with requested index using type-safe Number coercion
+            const prewarmedAudio =
+                this._prewarmParams?.audioStreamIndex !== null && this._prewarmParams?.audioStreamIndex !== undefined
+                    ? Number(this._prewarmParams.audioStreamIndex)
+                    : null;
+            const requestedAudio =
+                options.audioStreamIndex !== null && options.audioStreamIndex !== undefined
+                    ? Number(options.audioStreamIndex)
+                    : null;
+            if (prewarmedAudio !== requestedAudio) {
+                log.info(
+                    `[Prewarm] Audio stream mismatch (prewarmed: ${prewarmedAudio}, requested: ${requestedAudio}). Discarding prewarm.`
+                );
+                this.clear();
+                return null;
             }
 
-            // 4. Validate SubtitleStreamIndex: If a specific subtitle track was chosen and differs from prewarm
-            if (options.subtitleStreamIndex !== undefined && options.subtitleStreamIndex !== null) {
-                if (
-                    this._prewarmParams?.subtitleStreamIndex !== null &&
-                    this._prewarmParams?.subtitleStreamIndex !== undefined &&
-                    options.subtitleStreamIndex !== this._prewarmParams.subtitleStreamIndex
-                ) {
-                    log.info(
-                        `[Prewarm] Subtitle stream mismatch (prewarmed: ${this._prewarmParams.subtitleStreamIndex}, requested: ${options.subtitleStreamIndex}). Discarding prewarm.`
-                    );
-                    this.clear();
-                    return null;
-                }
+            // =================================================================
+            // 4. Validate SubtitleStreamIndex Parity
+            // =================================================================
+            // Mirroring the audio track guard above, verify that the requested subtitle
+            // track matches the prewarmed parameters. If the user selected an alternative
+            // subtitle or explicitly toggled subtitles Off (-1), discard the cached prewarm
+            // to avoid rendering mismatched or unwanted subtitle streams.
+            // =================================================================
+            const prewarmedSubtitle =
+                this._prewarmParams?.subtitleStreamIndex !== null && this._prewarmParams?.subtitleStreamIndex !== undefined
+                    ? Number(this._prewarmParams.subtitleStreamIndex)
+                    : null;
+            const requestedSubtitle =
+                options.subtitleStreamIndex !== null && options.subtitleStreamIndex !== undefined
+                    ? Number(options.subtitleStreamIndex)
+                    : null;
+            if (prewarmedSubtitle !== requestedSubtitle) {
+                log.info(
+                    `[Prewarm] Subtitle stream mismatch (prewarmed: ${prewarmedSubtitle}, requested: ${requestedSubtitle}). Discarding prewarm.`
+                );
+                this.clear();
+                return null;
             }
 
             log.info(`[Prewarm] Zero-Latency Cache Hit! Consuming prewarmed PlaybackInfo for: ${itemId}`);
@@ -263,6 +357,22 @@ export class PrewarmManager {
             return promise;
         }
         return null;
+    }
+
+    /**
+     * Invalidate and clear all cached prewarm data and in-flight requests.
+     *
+     * Semantic alias for clear() used when playback configuration (such as
+     * audio or subtitle tracks) changes during playback. This guarantees that
+     * stale prewarmed metadata holding old track defaults will not be consumed
+     * on subsequent launches of the media item.
+     */
+    invalidateCache() {
+        // Log cache invalidation event for playback diagnostics
+        log.info('[Prewarm] Invalidate cache requested — clearing prewarm manager memory and aborting requests');
+
+        // Flush all cached data and abort any ongoing network pre-fetches
+        this.clear();
     }
 
     /**

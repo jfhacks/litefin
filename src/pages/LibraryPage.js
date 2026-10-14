@@ -10,6 +10,7 @@ import Page from './Page.js';
 import { api } from '../api/index.js';
 import { router } from '../core/Router.js';
 import { focusManager } from '../ui/FocusManager.js';
+import { layoutManager } from '../ui/LayoutManager.js';
 import { scrollController } from '../ui/ScrollController.js';
 import CardRenderer from '../utils/CardRenderer.js';
 import { imageService } from '../utils/ImageService.js';
@@ -54,7 +55,11 @@ class LibraryPage extends Page {
 
             // Pagination
             startIndex: 0,
-            limit: parseInt(storage.getItem('pref:libraryPageSize') || 100, 10),
+            isInfinite: storage.getItem('pref:libraryPageSize') === 'unlimited',
+            limit:
+                storage.getItem('pref:libraryPageSize') === 'unlimited'
+                    ? 100
+                    : parseInt(storage.getItem('pref:libraryPageSize') || 100, 10),
             totalRecordCount: 0,
 
             // Data Cache
@@ -98,7 +103,7 @@ class LibraryPage extends Page {
              */
             viewMode: 'poster',
             gridMode: 'dynamic',
-            gridColumns: 5
+            gridColumns: 7
         };
 
         // Bindings
@@ -107,9 +112,17 @@ class LibraryPage extends Page {
         this._onPageChange = this._handlePageChange.bind(this);
         this._onGridClick = this._handleGridClick.bind(this);
 
+        // Alphabet quick-jump sequence token and offset cache (Unlimited Scroll Mode)
+        this._scrollLetterSeq = 0;
+        this._letterOffsetCache = new Map();
+
         // Mark as async page for Navigation State
         // (Page.init won't restore scroll/focus until we call restoreScrollFocusWhenReady)
         this._isAsyncPage = true;
+
+        // Restoration guard flag: suppresses reactive grid eviction and scroll calculations
+        // while the saved focus position and DOM window boundaries are settling
+        this._isRestoringFocus = false;
     }
 
     render() {
@@ -214,6 +227,12 @@ class LibraryPage extends Page {
                             <!-- VirtualGrid / CardRenderer items here -->
                         </div>
                         
+                        <!-- Infinite Scroll Loader -->
+                        <div class="infinite-scroll-loader hidden" id="infinite-scroll-loader">
+                            <div class="infinite-spinner"></div>
+                            <span class="infinite-loader-text" data-i18n="LoadingMore">${i18n.t('LoadingMore') || 'Loading more items...'}</span>
+                        </div>
+                        
                         <!-- Empty State -->
                         <div class="empty-state hidden" id="empty-state">
                             <div class="empty-state-content">
@@ -281,7 +300,107 @@ class LibraryPage extends Page {
                 return 1;
             case 'poster':
             default:
-                return 5;
+                return 7;
+        }
+    }
+
+    /**
+     * ANDROID PORTRAIT column override (portrait-only; landscape/TV untouched).
+     * On a scaled Android portrait viewport the 750px design canvas is far too
+     * narrow for the TV column counts (7 poster columns => ~61px cards with
+     * unreadable titles). Return phone-appropriate column counts so posters
+     * render large and the page scrolls vertically instead. Returns null on
+     * every other platform and on landscape viewports, so callers keep the
+     * stock values and landscape rendering is byte-identical.
+     * @param {string} mode - Grid view mode ('poster', 'thumb', ...)
+     * @returns {number|null} Portrait column count, or null to keep stock.
+     * @private
+     */
+    /**
+     * Single source of truth for the effective dynamic-grid column count.
+     * Used by _renderGrid, the chunk-size computation, AND the Android
+     * portrait rotation handler, so every consumer always agrees.
+     * Reproduces the stock resolution (user preference > forced-landscape
+     * thumb > default-per-mode) and then applies the ANDROID PORTRAIT
+     * override, which returns null for landscape viewports so stock values
+     * pass through untouched.
+     * @param {string} viewMode - Current grid view mode
+     * @returns {number} Effective column count for the current viewport.
+     * @private
+     */
+    _resolveDynamicGridColumns(viewMode) {
+        const isForcedLandscape =
+            this.state.viewType === 'Episodes' ||
+            this.state.viewType === 'Upcoming' ||
+            this.state.viewType === 'Networks' ||
+            this.params.includeItemTypes === 'Episode';
+        const effectiveMode = isForcedLandscape ? 'thumb' : viewMode;
+        let columns = this.state.gridColumns;
+        if (isForcedLandscape && viewMode !== 'thumb') {
+            const isSeerr = this.state.libraryId === 'seerr' || this.state.libraryInfo?.CollectionType === 'seerr';
+            const savedThumbCols = parseInt(
+                storage.getItem(
+                    isSeerr ? 'pref:seerr:gridColumns:thumb' : `pref:library:gridColumns:${this.state.libraryId}:thumb`
+                ),
+                10
+            );
+            columns = !isNaN(savedThumbCols) ? savedThumbCols : this._getDefaultColumnsForMode('thumb');
+        } else if (!columns) {
+            columns = this._getDefaultColumnsForMode(effectiveMode);
+        }
+        // ANDROID PORTRAIT: phone column counts on the scaled portrait canvas
+        // (bigger posters, vertical scrolling). Landscape viewports return
+        // null here — every stock value passes through unchanged.
+        const portraitCols = this._getPortraitColumnOverride(effectiveMode);
+        if (portraitCols) columns = portraitCols;
+        return columns;
+    }
+
+    /**
+     * ANDROID PORTRAIT rotation handler. The --grid-columns custom property
+     * is computed once at render time, so rotating the device would leave
+     * the grid sized for the previous orientation. Re-renders the grid from
+     * cached items (no refetch) — but ONLY when the effective column count
+     * for the current viewport actually differs. TVs never fire resize
+     * events and unscaled viewports resolve stock counts, so this is a
+     * no-op everywhere except a scaled Android viewport that rotated.
+     * @private
+     */
+    _onViewportColumnsChanged() {
+        try {
+            const grid = this.$('#library-grid');
+            if (!grid || !grid.classList.contains('mode-dynamic')) return;
+            if (!this.state.items || this.state.items.length === 0) return;
+            const expected = this._resolveDynamicGridColumns(this.state.viewMode);
+            const current = parseInt(grid.style.getPropertyValue('--grid-columns'), 10);
+            if (!isNaN(current) && expected && expected !== current) {
+                this._renderGrid(this.state.items);
+            }
+        } catch (e) {
+            log.warn('Grid rotation re-render failed:', e);
+        }
+    }
+
+    _getPortraitColumnOverride(mode) {
+        try {
+            // Only the Android shell sets data-litefin-scaled (display scaling)
+            if (!document.documentElement.hasAttribute('data-litefin-scaled')) return null;
+            // Landscape viewports keep stock column counts
+            if (window.innerWidth >= window.innerHeight) return null;
+            switch (mode) {
+                case 'poster':
+                    return 3;
+                case 'small-poster':
+                    return 4;
+                case 'thumb':
+                    return 2;
+                case 'banner':
+                    return 2;
+                default:
+                    return null; // 'list' and unknown modes untouched
+            }
+        } catch (_) {
+            return null;
         }
     }
 
@@ -291,11 +410,25 @@ class LibraryPage extends Page {
 
     async onInit() {
         this.setLoading(true);
+
+        // ANDROID PORTRAIT: re-resolve grid columns when the viewport rotates.
+        // Self-limiting — a no-op on TVs/unscaled viewports (see handler).
+        this._boundViewportColumnsChanged = this._onViewportColumnsChanged.bind(this);
+        window.addEventListener('resize', this._boundViewportColumnsChanged, { passive: true });
+
+        // Reset alphabet quick-jump offset cache on fresh library load
+        this._scrollLetterSeq = 0;
+        this._letterOffsetCache = new Map();
+        this._letterOffsetCache.set('#', 0);
         this.state.libraryId = this.params.id;
 
         // Special handling for 'virtual' library IDs (e.g. 'all' for search expansion, 'seerr' for Seerr discovery)
         const isVirtualLibrary = this.state.libraryId === 'all';
         const isSeerrLibrary = this.state.libraryId === 'seerr';
+
+        if (this.params.char) {
+            this.state.nameStartsWith = decodeURIComponent(this.params.char);
+        }
 
         if (this.params.page) {
             const pageNum = parseInt(this.params.page, 10);
@@ -307,7 +440,8 @@ class LibraryPage extends Page {
 
         if (isSeerrLibrary) {
             const rawMediaType = this.params.mediaType || (this.params.seerrType === 'network' ? 'tv' : 'movie');
-            const mediaType = (rawMediaType === 'tv' || rawMediaType === 'series' || rawMediaType === 'tvshows') ? 'tv' : 'movie';
+            const mediaType =
+                rawMediaType === 'tv' || rawMediaType === 'series' || rawMediaType === 'tvshows' ? 'tv' : 'movie';
             let seerrTitle = this.params.name ? decodeURIComponent(this.params.name) : '';
             const gId = this.params.genreId || this.params.genre;
             if (!seerrTitle) {
@@ -385,11 +519,37 @@ class LibraryPage extends Page {
         const cacheKey = this._getCacheKey();
 
         // State Rehydration Check
-        const savedState = state.get(cacheKey);
+        // Priority 1: Check memory state cache for full rehydration
+        let savedState = state.get(cacheKey);
+
+        // Priority 2: Fallback to items restored via navigation history
+        // If the route was restored or re-entered and items were preserved in state,
+        // construct a synthetic savedState so the page rehydrates instead of dropping lazy-loaded items
+        if (!savedState && this.state.items && this.state.items.length > 0) {
+            // Extract target item ID from CSS selector if present (e.g. data-item-id="...")
+            let fallbackItemId = null;
+            if (this._pendingNavState?.focusElementSelector) {
+                const match = this._pendingNavState.focusElementSelector.match(/data-(?:item-)?id="([^"]+)"/);
+                fallbackItemId = match ? match[1] : this._pendingNavState.focusElementSelector.replace(/^#/, '');
+            }
+
+            savedState = {
+                stateData: this.state,
+                focusSectionId: this._pendingNavState?.focusSectionName || 'library-grid',
+                focusItemId: fallbackItemId
+            };
+        }
 
         if (savedState) {
             // Merge cached state properties
             Object.assign(this.state, savedState.stateData);
+
+            // Restore the server query context. This path bypasses _loadItems(),
+            // which is the only place it is built, and letter jumps / infinite
+            // batch fetching both depend on it.
+            if (savedState.lastFetchContext) {
+                this._lastFetchContext = savedState.lastFetchContext;
+            }
 
             // ------------------------------------------------------------------
             // Load persisted view mode, sort configurations, and active filters.
@@ -419,6 +579,8 @@ class LibraryPage extends Page {
             this._updateHeaderVisibility();
             i18n.translateDOM(this.el);
             this._bindEvents();
+
+            // Alphabet selector position updates are bound centrally in _bindEvents()
 
             // =========================================================================
             // FAVORITES TITLE DECORATION (CACHE)
@@ -455,9 +617,17 @@ class LibraryPage extends Page {
             }
 
             this._updatePaginationUI();
-            this.setLoading(false);
+
+            // ------------------------------------------------------------------
+            // Keep loading overlay active during focus restoration so the user
+            // does not see an intermediate focus snap or jump from page top.
+            // ------------------------------------------------------------------
 
             // 3. Restore Focus
+            // Mark restoration active so intermediate scroll events and layout shifts
+            // do not trigger eviction or window sync before focus has landed
+            this._isRestoringFocus = true;
+
             requestAnimationFrame(() => {
                 let restoredFocus = false;
                 const targetId = storage.getItem('pref:disableFocusRestore') === 'true' ? null : savedState.focusItemId;
@@ -468,36 +638,58 @@ class LibraryPage extends Page {
                     const sectionConfig = focusManager.getSectionConfig(sectionId);
                     const sectionContainer = sectionConfig ? sectionConfig.container : this.el;
 
-                    // If the saved focus item is beyond the first rendered chunk,
-                    // expand the rendered window so the card element exists in the
-                    // DOM and can be found by querySelector. Without this, focus
-                    // restoration silently fails for items past the initial chunk.
-                    const grid = this.$('#library-grid');
-                    if (grid && this.state.items && this.state._gridColumns) {
-                        const itemIndex = this.state.items.findIndex((item) => item.Id === targetId);
-                        if (itemIndex >= 0) {
-                            const columns = this.state._gridColumns;
-                            while (
-                                itemIndex >= this.state.gridWindowEnd &&
-                                this.state.gridWindowEnd < this.state.items.length
-                            ) {
-                                this._appendGridChunk(grid, this.state.items, columns);
-                            }
-                            while (itemIndex < this.state.gridWindowStart && this.state.gridWindowStart > 0) {
-                                this._prependGridChunk(grid, this.state.items, columns);
-                            }
+                    // Ensure the target item AND forward buffer rows ahead of it
+                    // are fully rendered into the DOM so the screen below the focused
+                    // card is populated rather than blank.
+                    const itemIndex = this._ensureGridWindowEncompassesItem(targetId);
+
+                    // =========================================================================
+                    // TWO-PHASE LAYOUT FLUSH (TIZEN / WEBKIT DOM SETTLE)
+                    // =========================================================================
+                    // When cards are injected via insertAdjacentHTML, WebKit has not calculated
+                    // their layout geometries (offsetParent, offsetTop, and bounding rects).
+                    // Calling focusElement in the same tick causes ScrollController to read an
+                    // offsetTop of 0, instantly snapping scrollTop to 0 and triggering bottom
+                    // eviction in _syncGridWindow, destroying the target card.
+                    // A second requestAnimationFrame flushes layout so geometry is 100% stable.
+                    // =========================================================================
+                    requestAnimationFrame(() => {
+                        const savedElement = sectionContainer.querySelector(
+                            `[data-item-id="${targetId}"], [data-id="${targetId}"], [id="${targetId}"]`
+                        );
+
+                        if (savedElement) {
+                            this.setActiveSection(sectionId, false);
+                            focusManager.focusElement(savedElement, { instantScroll: true });
+                            restoredFocus = true;
                         }
-                    }
 
-                    const savedElement = sectionContainer.querySelector(
-                        `[data-item-id="${targetId}"], [data-id="${targetId}"], [id="${targetId}"]`
-                    );
+                        // If element was not found in DOM, fallback to standard section setup
+                        if (!restoredFocus) {
+                            this._setupFocus();
+                        }
 
-                    if (savedElement) {
-                        this.setActiveSection(sectionId, false);
-                        focusManager.focusElement(savedElement, { instantScroll: true });
-                        restoredFocus = true;
-                    }
+                        // Evict state entry once consumed to prevent stale reapplications
+                        state.delete(cacheKey);
+                        this._pendingNavState = null;
+
+                        // Reveal page and remove loading overlay once focus has securely landed
+                        this.setLoading(false);
+                        this.markReady();
+
+                        // Release restoration guard on the following frame once layout has stabilized
+                        requestAnimationFrame(() => {
+                            this._isRestoringFocus = false;
+                            // Synchronize sliding window and alphabet position to newly focused item
+                            if (itemIndex >= 0) {
+                                const grid = this.$('#library-grid');
+                                const columns = this.state._gridColumns || 7;
+                                const currentRow = Math.floor(itemIndex / columns);
+                                this._syncGridWindow(grid, this.state.items, columns, currentRow, itemIndex);
+                            }
+                        });
+                    });
+                    return;
                 }
 
                 if (!restoredFocus) {
@@ -505,7 +697,10 @@ class LibraryPage extends Page {
                 }
 
                 state.delete(cacheKey);
+                this._pendingNavState = null;
+                this.setLoading(false);
                 this.markReady();
+                this._isRestoringFocus = false;
             });
 
             return;
@@ -612,6 +807,23 @@ class LibraryPage extends Page {
                 const title = i18n.t('SearchResultsFor', [query]);
                 this.$('#library-title').textContent = title;
                 this.title = title;
+            } else if (this.params.parentId && this.state.libraryId === 'all') {
+                try {
+                    // Resolve parent item title (e.g. Season 1 or Album) for deep-linked virtual library views
+                    const parentItem = await api.getItem(this.params.parentId);
+                    if (parentItem && parentItem.Name) {
+                        const fullTitle = parentItem.SeriesName
+                            ? `${parentItem.SeriesName} - ${parentItem.Name}`
+                            : parentItem.Name;
+                        this.$('#library-title').textContent = fullTitle;
+                        this.title = fullTitle;
+                        if (this.state.libraryInfo) {
+                            this.state.libraryInfo.Name = fullTitle;
+                        }
+                    }
+                } catch (e) {
+                    log.warn('Failed to fetch parent info for virtual library title', e);
+                }
             }
         })();
 
@@ -619,7 +831,30 @@ class LibraryPage extends Page {
         // above synchronously, so _loadItems() is guaranteed to see the correct value.
         await Promise.all([infoFetchPromise, this._loadItems()]);
 
-        this._setupFocus();
+        // If router provided pending navigation state (cache miss or fallback),
+        // restore scroll/focus via NavigationState instead of blindly resetting to top.
+        if (this._pendingNavState) {
+            // Expand grid window to include target item and forward buffer rows
+            const pending = this._pendingNavState;
+            let targetId = null;
+            if (pending.focusElementSelector) {
+                const match = pending.focusElementSelector.match(/data-(?:item-)?id="([^"]+)"/);
+                targetId = match ? match[1] : pending.focusElementSelector.replace(/^#/, '');
+            }
+            if (targetId && (pending.focusSectionName === 'library-grid' || !pending.focusSectionName)) {
+                this._ensureGridWindowEncompassesItem(targetId, pending.focusElementIndex);
+            }
+
+            this.restoreScrollFocusWhenReady();
+            // Safety fallback timer: guarantees loading overlay is unhidden if restoration
+            // is skipped or takes unexpectedly long on slow network/hardware
+            this._focusRestoreSafetyTimeout = setTimeout(() => {
+                this.setLoading(false);
+            }, 1000);
+        } else {
+            this._setupFocus();
+            this.setLoading(false);
+        }
 
         // Mark the page as rendered, fulfilling the Promise for NavigationState
         // to restore scroll/focus
@@ -706,6 +941,64 @@ class LibraryPage extends Page {
         this.$('#btn-view-mode')?.addEventListener('click', this._handleViewMode.bind(this));
         this.$('#btn-quick-reset')?.addEventListener('click', this._handleResetFilters.bind(this));
         this.$('#alpha-picker')?.addEventListener('click', this._handleAlphaClick.bind(this));
+
+        // Listen for dynamic alphabet selector position updates from settings
+        if (!this._onAlphaPickerPositionChanged) {
+            this._onAlphaPickerPositionChanged = () => {
+                this._renderAlphaPicker();
+                this._updateNavigation();
+            };
+            eventBus.on('alphaPickerPosition:changed', this._onAlphaPickerPositionChanged);
+        }
+
+        // Listen for dynamic library page size / unlimited infinite pagination changes
+        if (!this._onLibraryPageSizeChanged) {
+            this._onLibraryPageSizeChanged = (newSize) => {
+                const isInfinite = newSize === 'unlimited';
+                this.state.isInfinite = isInfinite;
+                this.state.limit = isInfinite ? 100 : parseInt(newSize, 10) || 100;
+                this.state.startIndex = 0;
+                this._loadItems();
+            };
+            eventBus.on('pref:libraryPageSize:changed', this._onLibraryPageSizeChanged);
+        }
+
+        // Listen for dynamic alphabet quick-jump scroll mode toggles
+        if (!this._onAlphaPickerScrollModeChanged) {
+            this._onAlphaPickerScrollModeChanged = () => {
+                this.state.scrollAlphaChar = null;
+                this._renderAlphaPicker();
+            };
+            eventBus.on('pref:alphaPickerScrollMode:changed', this._onAlphaPickerScrollModeChanged);
+        }
+
+        // =========================================================================
+        // BACKGROUND AND SCREEN SLEEP LIFECYCLE HANDLERS
+        // =========================================================================
+        // When the TV turns off the screen or the app is sent to the background,
+        // save the full library state (including all lazy-loaded batches and active focus)
+        // so that returning does not leave the collection incomplete.
+        if (!this._onAppHidden) {
+            this._onAppHidden = () => {
+                const focused = focusManager.getFocused();
+                const sectionId = focusManager.getSectionForElement(focused);
+                const focusItemId = focused?.dataset?.itemId || focused?.id || null;
+                this._saveState(sectionId, focusItemId);
+            };
+            eventBus.on('app:hidden', this._onAppHidden);
+        }
+
+        // Re-affirm active focus when returning to foreground / waking from sleep
+        if (!this._onAppVisible) {
+            this._onAppVisible = () => {
+                const current = focusManager.getFocused();
+                if (!current || !document.contains(current)) {
+                    this._setupFocus();
+                }
+            };
+            eventBus.on('app:visible', this._onAppVisible);
+        }
+
         this.$('#btn-prev')?.addEventListener('click', () => this._handlePageChange(-1));
         this.$('#btn-next')?.addEventListener('click', () => this._handlePageChange(1));
         this.$('#btn-prev-top')?.addEventListener('click', () => this._handlePageChange(-1));
@@ -782,12 +1075,20 @@ class LibraryPage extends Page {
 
     _getCacheKey() {
         const parts = [`library:state:${this.params.id}`];
+        if (this.params.parentId) parts.push(`parent:${this.params.parentId}`);
+        if (this.params.includeItemTypes) parts.push(`types:${this.params.includeItemTypes}`);
         if (this.params.genreId) parts.push(`genre:${this.params.genreId}`);
         if (this.params.studioId) parts.push(`studio:${this.params.studioId}`);
         if (this.params.networkId) parts.push(`network:${this.params.networkId}`);
         if (this.params.year) parts.push(`year:${this.params.year}`);
         if (this.params.personId) parts.push(`person:${this.params.personId}`);
         if (this.params.tagName) parts.push(`tag:${this.params.tagName}`);
+        if (this.params.searchTerm) parts.push(`search:${this.params.searchTerm}`);
+        if (this.params.viewModeIndex !== undefined) parts.push(`vmIdx:${this.params.viewModeIndex}`);
+        if (this.params.viewMode) parts.push(`vm:${this.params.viewMode}`);
+        // Fall back to state.nameStartsWith if route params have not been synced yet
+        const char = this.params.char || this.state?.nameStartsWith;
+        if (char) parts.push(`char:${char}`);
         if (this.params.page) parts.push(`page:${this.params.page}`);
         return parts.join(':');
     }
@@ -797,7 +1098,8 @@ class LibraryPage extends Page {
         state.set(this._getCacheKey(), {
             stateData: this.state,
             focusSectionId: storage.getItem('pref:disableFocusRestore') === 'true' ? null : focusSectionId,
-            focusItemId: storage.getItem('pref:disableFocusRestore') === 'true' ? null : focusItemId
+            focusItemId: storage.getItem('pref:disableFocusRestore') === 'true' ? null : focusItemId,
+            lastFetchContext: this._lastFetchContext
         });
     }
 
@@ -807,9 +1109,16 @@ class LibraryPage extends Page {
 
     /**
      * Get page state for navigation history.
-     * Saves filters, sort, pagination, tab selection, AND view mode.
+     * Saves filters, sort, pagination, tab selection, view mode, grid sizing config,
+     * and loaded items for seamless infinite scroll restoration.
      */
     getNavigationState() {
+        // Persist full library state into state manager cache prior to navigation
+        const focused = focusManager.getFocused();
+        const sectionId = focusManager.getSectionForElement(focused);
+        const focusItemId = focused?.dataset?.itemId || focused?.id || null;
+        this._saveState(sectionId, focusItemId);
+
         return {
             viewType: this.state.viewType,
             sortBy: this.state.sortBy,
@@ -818,7 +1127,14 @@ class LibraryPage extends Page {
             nameStartsWith: this.state.nameStartsWith,
             startIndex: this.state.startIndex,
             limit: this.state.limit,
-            viewMode: this.state.viewMode
+            viewMode: this.state.viewMode,
+            gridMode: this.state.gridMode,
+            gridColumns: this.state.gridColumns,
+            // Preserve loaded media items and total count across router navigation
+            items: this.state.items ? [...this.state.items] : null,
+            totalRecordCount: this.state.totalRecordCount,
+            // Keep the active server query so letter jumps keep working after back navigation
+            lastFetchContext: this._lastFetchContext
         };
     }
 
@@ -839,15 +1155,91 @@ class LibraryPage extends Page {
             nameStartsWith: savedState.nameStartsWith || null,
             startIndex: savedState.startIndex || 0,
             limit: savedState.limit || this.state.limit,
-            // Restore view mode from nav state (set before _renderGrid runs)
-            viewMode: savedState.viewMode || this.state.viewMode
+            // Restore view mode and column layouts from nav state
+            viewMode: savedState.viewMode || this.state.viewMode,
+            gridMode: savedState.gridMode || this.state.gridMode,
+            gridColumns: savedState.gridColumns || this.state.gridColumns
         });
+
+        // Restore loaded item collection if preserved in navigation state
+        if (savedState.items && savedState.items.length > 0) {
+            this.state.items = savedState.items;
+            this.state.totalRecordCount = savedState.totalRecordCount || savedState.items.length;
+        }
+
+        // Restore query context for infinite scrolling and letter jump calculation
+        if (savedState.lastFetchContext) {
+            this._lastFetchContext = savedState.lastFetchContext;
+        }
 
         log.info('Navigation state restored:', savedState);
     }
 
+    /**
+     * =========================================================================
+     * SCROLL / FOCUS RESTORATION COMPLETION HOOK
+     * =========================================================================
+     * Invoked by NavigationState after scroll offset has been synchronized and
+     * focus has landed securely on the restored target item.
+     *
+     * By releasing the loading overlay here instead of at the end of data fetch,
+     * the intermediate state (where focus temporarily rests at the top of the
+     * page before snapping to the restored item) remains completely hidden.
+     * =========================================================================
+     */
+    onScrollFocusRestored() {
+        // Clear safety fallback timer since restoration completed normally
+        if (this._focusRestoreSafetyTimeout) {
+            clearTimeout(this._focusRestoreSafetyTimeout);
+            this._focusRestoreSafetyTimeout = null;
+        }
+
+        // Release pending navigation state reference
+        this._pendingNavState = null;
+
+        // Reveal page layout now that focus has securely landed on target item
+        this.setLoading(false);
+    }
+
     destroy() {
         super.destroy();
+
+        // ANDROID PORTRAIT: viewport rotation handler
+        if (this._boundViewportColumnsChanged) {
+            window.removeEventListener('resize', this._boundViewportColumnsChanged);
+            this._boundViewportColumnsChanged = null;
+        }
+        // Clear focus restoration safety fallback timer (upstream)
+        if (this._focusRestoreSafetyTimeout) {
+            clearTimeout(this._focusRestoreSafetyTimeout);
+            this._focusRestoreSafetyTimeout = null;
+        }
+
+        // Clean up alphabet selector position listener
+        if (this._onAlphaPickerPositionChanged) {
+            eventBus.off('alphaPickerPosition:changed', this._onAlphaPickerPositionChanged);
+            this._onAlphaPickerPositionChanged = null;
+        }
+        if (this._onLibraryPageSizeChanged) {
+            eventBus.off('pref:libraryPageSize:changed', this._onLibraryPageSizeChanged);
+            this._onLibraryPageSizeChanged = null;
+        }
+
+        if (this._onAlphaPickerScrollModeChanged) {
+            eventBus.off('pref:alphaPickerScrollMode:changed', this._onAlphaPickerScrollModeChanged);
+            this._onAlphaPickerScrollModeChanged = null;
+        }
+
+        // Clean up background and sleep listeners
+        if (this._onAppHidden) {
+            eventBus.off('app:hidden', this._onAppHidden);
+            this._onAppHidden = null;
+        }
+        if (this._onAppVisible) {
+            eventBus.off('app:visible', this._onAppVisible);
+            this._onAppVisible = null;
+        }
+
         this.$('#library-tabs')?.removeEventListener('click', this._onTabClick);
         this.$('#alpha-picker')?.removeEventListener('click', this._onAlphaClick);
 
@@ -859,7 +1251,12 @@ class LibraryPage extends Page {
         if (this._onGridScroll) {
             const scrollContainer = this.$('#library-scroll-container') || this.el?.querySelector('.page-content');
             scrollContainer?.removeEventListener('scroll', this._onGridScroll);
+            scrollContainer?.removeEventListener('wheel', this._onGridWheel);
+            scrollContainer?.removeEventListener('touchmove', this._onGridTouch);
+            window.removeEventListener('scroll', this._onGridScroll);
             this._onGridScroll = null;
+            this._onGridWheel = null;
+            this._onGridTouch = null;
         }
         if (this._gridEvalFrameId) {
             cancelAnimationFrame(this._gridEvalFrameId);
@@ -868,6 +1265,9 @@ class LibraryPage extends Page {
         this._gridEvalPending = false;
         this._gridFocusElement = null;
         this._gridScrollTop = null;
+        this._pendingFocusEval = false;
+        this._pendingScrollEval = false;
+        this._isRestoringFocus = false;
     }
 
     // ========================================================================
@@ -885,8 +1285,10 @@ class LibraryPage extends Page {
             // If the libraryId is a deep link to an Album/Artist/Series, it won't have a CollectionType.
             // Fake it so the LibraryPage behaves like it's inside that specific library type.
             if (!item.CollectionType) {
-                // Expanded list of types that imply a specific collection context
-                if (['MusicAlbum', 'MusicArtist', 'Audio', 'MusicGenre', 'Artist'].includes(item.Type)) {
+                // Inherit parent collectionType from route parameter if available
+                if (this.params.collectionType) {
+                    item.CollectionType = this.params.collectionType;
+                } else if (['MusicAlbum', 'MusicArtist', 'Audio', 'MusicGenre', 'Artist'].includes(item.Type)) {
                     item.CollectionType = 'music';
                 } else if (['Series', 'Season', 'Episode', 'TvChannel', 'TvProgram'].includes(item.Type)) {
                     item.CollectionType = 'tvshows';
@@ -894,19 +1296,69 @@ class LibraryPage extends Page {
                     item.CollectionType = 'musicvideos';
                 } else if (['Movie', 'BoxSet', 'Video'].includes(item.Type)) {
                     item.CollectionType = 'movies';
+                } else if (['Photo', 'PhotoAlbum'].includes(item.Type)) {
+                    item.CollectionType = 'photos';
+                } else if (item.Type === 'Book') {
+                    item.CollectionType = 'books';
                 }
             }
 
-            // Flag this as a folder-based library if it matches 'folders' type
-            // or is a generic collection without a specific media type.
-            this.state.isFolderLibrary =
-                item.CollectionType === 'folders' ||
-                (!item.CollectionType &&
-                    (item.Type === 'CollectionFolder' || item.Type === 'UserView' || item.Type === 'Folder'));
+            // Identify media collections that must NEVER be misidentified as game libraries
+            const isMediaCol =
+                item.CollectionType === 'homevideos' ||
+                item.CollectionType === 'photos' ||
+                item.CollectionType === 'movies' ||
+                item.CollectionType === 'tvshows' ||
+                item.CollectionType === 'music' ||
+                item.CollectionType === 'musicvideos' ||
+                item.CollectionType === 'playlists' ||
+                item.CollectionType === 'boxsets';
+
+            // Detect Game libraries (JellyEmu collections or libraries specifically named after games/roms using word boundaries)
+            const libNameLower = (item.Name || '').toLowerCase();
+            const isGameKeyword = /\b(games?|roms?|emulators?|emulation|jellyemu|retroarch|retrogames?)\b/i.test(
+                libNameLower
+            );
+
+            if (
+                !isMediaCol &&
+                (item.CollectionType === 'games' ||
+                    (isGameKeyword && item.CollectionType !== 'books') ||
+                    this.params.isGame === 'true')
+            ) {
+                this.state.isGameLibrary = true;
+            } else {
+                this.state.isGameLibrary = false;
+            }
 
             // If the item fetched is a Folder, we are in a sub-folder view.
             this.state.isSubFolder =
                 item.Type === 'Folder' || (item.Type === 'CollectionFolder' && !item.CollectionType && item.ParentId);
+
+            // Inherit isGameLibrary if we are inside a verified games library
+            // or if the console folder explicitly matches a gaming console name under an existing game context.
+            if (!isMediaCol && !this.state.isGameLibrary && this.state.isSubFolder && this.params.isGame === 'true') {
+                const isConsoleName =
+                    /\b(nintendo|sega|sony|atari|game boy|gameboy|gba|gbc|snes|nes|n64|playstation|psx|ps1|ps2|genesis|megadrive|game gear|dreamcast|mame|arcade|neogeo)\b/i.test(
+                        libNameLower
+                    );
+                if (isConsoleName) {
+                    this.state.isGameLibrary = true;
+                }
+            }
+
+            // Flag this as a folder-based library if it matches 'folders' type,
+            // or is a generic collection without a specific media type.
+            // For game libraries: ONLY the root library is treated as folders (to list console folders).
+            // Once inside a console folder, isFolderLibrary is false so all games are loaded directly/recursively.
+            this.state.isFolderLibrary =
+                (this.state.isGameLibrary && !this.state.isSubFolder) ||
+                (!this.state.isGameLibrary &&
+                    (item.CollectionType === 'folders' ||
+                        item.CollectionType === 'homevideos' ||
+                        item.CollectionType === 'photos' ||
+                        (!item.CollectionType &&
+                            (item.Type === 'CollectionFolder' || item.Type === 'UserView' || item.Type === 'Folder'))));
 
             this.state.libraryInfo = item;
             let title = item.Name;
@@ -935,16 +1387,15 @@ class LibraryPage extends Page {
         if (this.state.libraryId === 'seerr') {
             const seerrType = this.params.seerrType;
             const rawMediaType = this.params.mediaType || (seerrType === 'network' ? 'tv' : 'movie');
-            const mediaType = (rawMediaType === 'tv' || rawMediaType === 'series' || rawMediaType === 'tvshows') ? 'tv' : 'movie';
+            const mediaType =
+                rawMediaType === 'tv' || rawMediaType === 'series' || rawMediaType === 'tvshows' ? 'tv' : 'movie';
             const selectedGenre =
                 this.state.filters.genre !== undefined
                     ? this.state.filters.genre
                     : this.params.genreId || this.params.genre;
             const genreId = selectedGenre;
             const language =
-                this.state.filters.language !== undefined
-                    ? this.state.filters.language
-                    : this.params.language;
+                this.state.filters.language !== undefined ? this.state.filters.language : this.params.language;
             const certification =
                 this.state.filters.certification !== undefined
                     ? this.state.filters.certification
@@ -975,21 +1426,43 @@ class LibraryPage extends Page {
             const sortField = this.state.sortBy || 'popularity';
             const sortDir = (this.state.sortOrder || 'Descending').toLowerCase().startsWith('asc') ? 'asc' : 'desc';
             // Only send sortBy parameter if it differs from the upstream default (popularity.desc)
-            const seerrSortBy = (sortField === 'popularity' && sortDir === 'desc') ? null : `${sortField}.${sortDir}`;
+            const seerrSortBy = sortField === 'popularity' && sortDir === 'desc' ? null : `${sortField}.${sortDir}`;
 
             let items = [];
             try {
                 if (seerrType === 'keyword' || seerrType === 'tag' || keywordId) {
                     if (mediaType === 'tv') {
-                        items = await seerr.discoverTv(seerrPage, { keywords: keywordId, genre: genreId, language, certification, sortBy: seerrSortBy });
+                        items = await seerr.discoverTv(seerrPage, {
+                            keywords: keywordId,
+                            genre: genreId,
+                            language,
+                            certification,
+                            sortBy: seerrSortBy
+                        });
                     } else {
-                        items = await seerr.discoverMovies(seerrPage, { keywords: keywordId, genre: genreId, language, certification, sortBy: seerrSortBy });
+                        items = await seerr.discoverMovies(seerrPage, {
+                            keywords: keywordId,
+                            genre: genreId,
+                            language,
+                            certification,
+                            sortBy: seerrSortBy
+                        });
                     }
                 } else if (genreId || language || certification || seerrType === 'genre') {
                     if (mediaType === 'tv') {
-                        items = await seerr.discoverTv(seerrPage, { genre: genreId, language, certification, sortBy: seerrSortBy });
+                        items = await seerr.discoverTv(seerrPage, {
+                            genre: genreId,
+                            language,
+                            certification,
+                            sortBy: seerrSortBy
+                        });
                     } else {
-                        items = await seerr.discoverMovies(seerrPage, { genre: genreId, language, certification, sortBy: seerrSortBy });
+                        items = await seerr.discoverMovies(seerrPage, {
+                            genre: genreId,
+                            language,
+                            certification,
+                            sortBy: seerrSortBy
+                        });
                     }
                 } else if (seerrType === 'studio' || studioId) {
                     items = await seerr.moviesByStudio(studioId, seerrPage);
@@ -1007,9 +1480,24 @@ class LibraryPage extends Page {
                 items = [];
             }
 
+            this._lastFetchContext = {
+                viewType: 'seerr',
+                isSeerr: true,
+                seerrType,
+                mediaType,
+                keywordId,
+                genreId,
+                language,
+                certification,
+                studioId,
+                networkId,
+                seerrSortBy
+            };
             this.state.items = items || [];
             this.state.limit = 100;
-            this.state.totalRecordCount = items.totalResults || (items.totalPages ? items.totalPages * 100 : (items.length ? (seerrPage + 1) * 100 : 0));
+            this.state.totalRecordCount =
+                items.totalResults ||
+                (items.totalPages ? items.totalPages * 100 : items.length ? (seerrPage + 1) * 100 : 0);
 
             const grid = this.$('#library-grid');
             if (grid) {
@@ -1017,7 +1505,9 @@ class LibraryPage extends Page {
                 this._renderGrid(this.state.items);
             }
             this._updatePaginationUI();
-            this.setLoading(false);
+            if (!this._pendingNavState) {
+                this.setLoading(false);
+            }
             return;
         }
 
@@ -1071,23 +1561,61 @@ class LibraryPage extends Page {
         }
 
         if (grid && !isHorizontalLayout) {
-            // Show a skeleton whose shape matches the active view mode.
-            // For forced landscape tab types, ignore viewMode and show landscape skeletons.
-            const skeletonMode = isLandscape ? 'thumb' : this.state.viewMode;
+            /*
+             * ================================================================
+             * Skeleton Layout Resolution
+             * ================================================================
+             * Render skeleton placeholders matching the active layout mode.
+             * Defaults to 'thumb' for landscape collections when not set.
+             * ================================================================
+             */
+            const skeletonMode = this.state.viewMode || (isLandscape ? 'thumb' : 'poster');
             const hideLibraryLabels = storage.getItem('pref:hideLibraryLabels') === 'true';
             const isModern = document.documentElement.getAttribute('data-layout-media-rows') === 'modern';
             const isLibraryView =
                 this.state.viewMode === 'library' || this.state.libraryInfo?.CollectionType === 'folders';
             const shouldHideLabels = (isLibraryView && hideLibraryLabels) || (isLibraryView && isModern);
 
-            grid.innerHTML = CardRenderer.createSkeletonHtml(12, isLandscape, skeletonMode, shouldHideLabels);
+            // Pass landscape boolean only if the active mode is thumb layout
+            grid.innerHTML = CardRenderer.createSkeletonHtml(
+                12,
+                skeletonMode === 'thumb' && isLandscape,
+                skeletonMode,
+                shouldHideLabels
+            );
+        }
+
+        // Check infinite pagination preference (unlimited setting)
+        const isInfinite = storage.getItem('pref:libraryPageSize') === 'unlimited';
+        this.state.isInfinite = isInfinite;
+        if (isInfinite) {
+            this.state.limit = 100;
+        } else if (!this.state.limit || this.state.limit < 1) {
+            this.state.limit = parseInt(storage.getItem('pref:libraryPageSize') || 100, 10);
         }
 
         // Align limit to grid columns so the last rendered row is always full.
-        // Avoids visual partial-row gaps when navigating the grid via D-pad.
-        const alignCols = this.state.gridMode === 'dynamic' ? this.state.gridColumns : 0;
+        // For list view, column count is always 1 (upstream fix).
+        const effectiveLimitCols = this.state.viewMode === 'list'
+            ? 1
+            : (isLandscape && this.state.viewMode !== 'thumb'
+                ? this._getDefaultColumnsForMode('thumb')
+                : this.state.gridColumns || this._getDefaultColumnsForMode(this.state.viewMode));
+        // ANDROID PORTRAIT: apply the portrait column override AFTER the stock
+        // resolution above, so landscape and TV behavior are untouched.
+        const portraitLimitCols =
+            this.state.gridMode === 'dynamic' ? this._getPortraitColumnOverride(this.state.viewMode) : null;
+        const alignCols = this.state.gridMode === 'dynamic' ? portraitLimitCols || effectiveLimitCols : 0;
         if (alignCols > 0) {
             this.state.limit = Math.ceil(this.state.limit / alignCols) * alignCols;
+        }
+
+        // Keep startIndex aligned with the effective limit if a specific page was requested
+        if (this.params.page) {
+            const pageNum = parseInt(this.params.page, 10);
+            if (!isNaN(pageNum) && pageNum > 0) {
+                this.state.startIndex = (pageNum - 1) * this.state.limit;
+            }
         }
 
         try {
@@ -1097,9 +1625,17 @@ class LibraryPage extends Page {
                 StartIndex: this.state.startIndex,
                 Limit: this.state.limit,
                 Recursive: true,
-                Fields: 'DateCreated,ProductionYear,CommunityRating,OfficialRating,MediaSourceCount',
+                Fields: 'DateCreated,ProductionYear,CommunityRating,OfficialRating,MediaSourceCount,Tags,ProviderIds,SortName',
                 ImageTypeLimit: 1,
-                EnableImageTypes: 'Primary,Backdrop,Thumb'
+                EnableImageTypes: 'Primary,Backdrop,Thumb',
+                EnableTotalRecordCount: true
+            };
+
+            // Store active query context for infinite scroll batch fetching
+            this._lastFetchContext = {
+                viewType: capturedViewType,
+                params,
+                isSeerr: false
             };
 
             // Only set ParentId if it's not the virtual 'all' library
@@ -1122,12 +1658,22 @@ class LibraryPage extends Page {
 
             // If it's a folder-based library (generic/Home Videos) or we are explicitly
             // in a "Folders" tab, disable recursion so we can browse the hierarchy.
+            // When inside a Game console subfolder, ensure Recursive is true so all games within are loaded.
             if (this.state.isFolderLibrary || this.state.viewType === 'Folders') {
                 params.Recursive = false;
+            } else if (this.state.isGameLibrary && this.state.isSubFolder) {
+                params.Recursive = true;
             }
 
             // Apply Filters
-            if (this.state.nameStartsWith) {
+            /* -------------------------------------------------------------
+             * Alphabet Filter vs Scroll Mode:
+             * In unlimited scroll mode, the full library is loaded without
+             * single-letter NameStartsWith filtering so users can scroll
+             * seamlessly across the entire collection.
+             * ------------------------------------------------------------- */
+            const isScrollToLetterMode = isInfinite && storage.getItem('pref:alphaPickerScrollMode') !== 'false';
+            if (this.state.nameStartsWith && !isScrollToLetterMode) {
                 if (this.state.nameStartsWith === '#') {
                     params.NameLessThan = 'A';
                 } else {
@@ -1144,8 +1690,15 @@ class LibraryPage extends Page {
             const isTv =
                 info?.CollectionType === 'tvshows' ||
                 ['Series', 'Season', 'Episode', 'TvChannel', 'TvProgram'].includes(info?.Type);
+            const isGame =
+                this.state.isGameLibrary ||
+                (info?.CollectionType === 'games' &&
+                    info?.CollectionType !== 'homevideos' &&
+                    info?.CollectionType !== 'photos');
 
-            if (isMusic) {
+            if (isGame || info?.CollectionType === 'books') {
+                subViewItemTypes = 'Book';
+            } else if (isMusic) {
                 subViewItemTypes = 'MusicAlbum,Audio';
             } else if (isTv) {
                 subViewItemTypes = 'Series';
@@ -1230,12 +1783,53 @@ class LibraryPage extends Page {
                 if (f.Is4K) params.Is4K = true;
                 if (f.Is3D) params.Is3D = true;
 
-                // Multi-value params
-                if (f.Genres) params.Genres = f.Genres.replace(/,/g, '|');
-                if (f.OfficialRatings) params.OfficialRatings = f.OfficialRatings.replace(/,/g, '|');
-                if (f.Tags) params.Tags = f.Tags.replace(/,/g, '|');
+                // ------------------------------------------------------------------
+                // Multi-Value Query Filters (Genres, Years, Ratings, Tags, Languages)
+                // ------------------------------------------------------------------
+                if (f.Genres) {
+                    // Pipe-delimited genre names are accepted universally across Jellyfin 10.x - 12.0+
+                    // (bound via PipeDelimitedCollectionModelBinder directly to InternalItemsQuery.Genres).
+                    // Split on either pipe or legacy comma to handle current and previously stored filters.
+                    const genreList = (f.Genres.includes('|') ? f.Genres.split('|') : f.Genres.split(','))
+                        .map((g) => g.trim())
+                        .filter(Boolean);
+
+                    // Filter out any stale raw GUIDs that were stored during early JF12 test sessions
+                    const validGenres = genreList.filter(
+                        (g) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(g)
+                    );
+
+                    // Only attach parameter if valid genre names remain after sanitization
+                    if (validGenres.length > 0) {
+                        params.Genres = validGenres.join('|');
+                    }
+                }
                 if (f.Years) params.Years = f.Years;
-                if (f.VideoTypes) params.VideoTypes = f.VideoTypes;
+                if (f.OfficialRatings) {
+                    // Pipe-delimited parental ratings as expected by Jellyfin's PipeDelimitedCollectionModelBinder
+                    const ratingsList = (
+                        f.OfficialRatings.includes('|') ? f.OfficialRatings.split('|') : f.OfficialRatings.split(',')
+                    )
+                        .map((r) => r.trim())
+                        .filter(Boolean);
+                    if (ratingsList.length > 0) {
+                        params.OfficialRatings = ratingsList.join('|');
+                    }
+                }
+                if (f.Tags) {
+                    // Pipe-delimited tag names as expected by Jellyfin's PipeDelimitedCollectionModelBinder
+                    const tagsList = (f.Tags.includes('|') ? f.Tags.split('|') : f.Tags.split(','))
+                        .map((t) => t.trim())
+                        .filter(Boolean);
+                    if (tagsList.length > 0) {
+                        params.Tags = tagsList.join('|');
+                    }
+                }
+                if (f.Studios) params.StudioIds = f.Studios;
+
+                // Jellyfin 12+ Audio & Subtitle Language track filters (Comma-delimited collection binder)
+                if (f.AudioLanguages) params.AudioLanguages = f.AudioLanguages;
+                if (f.SubtitleLanguages) params.SubtitleLanguages = f.SubtitleLanguages;
             }
 
             // Handle View Types
@@ -1249,8 +1843,19 @@ class LibraryPage extends Page {
                 });
             } else if (viewType === 'Items' || viewType === 'Movies' || viewType === 'Shows') {
                 // Standard Item Fetch
-                // For TV Shows library, 'Shows' -> IncludeItemTypes: 'Series'
-                if (this.state.libraryInfo?.CollectionType === 'tvshows') {
+                if (this.state.isGameLibrary || this.state.libraryInfo?.CollectionType === 'games') {
+                    // When browsing a Game library at root as folders, do not restrict to 'Book'
+                    // so that Jellyfin returns top-level console Folders.
+                    // Inside subfolders, query 'Book' items (game ROMs).
+                    if (this.state.isSubFolder) {
+                        params.IncludeItemTypes = 'Book';
+                    } else {
+                        // At root folder level: leave IncludeItemTypes empty to return console Folders
+                        params.IncludeItemTypes = '';
+                    }
+                } else if (this.state.libraryInfo?.CollectionType === 'books') {
+                    params.IncludeItemTypes = 'Book';
+                } else if (this.state.libraryInfo?.CollectionType === 'tvshows') {
                     params.IncludeItemTypes = 'Series';
                 } else if (this.state.libraryInfo?.CollectionType === 'movies') {
                     params.IncludeItemTypes = 'Movie';
@@ -1772,14 +2377,20 @@ class LibraryPage extends Page {
             log.error('Failed to load items', e);
             this.$('#library-grid').innerHTML = `<p class="error-msg">${i18n.t('FailedToLoadContent')}</p>`;
         } finally {
-            this.setLoading(false);
+            // Keep loading active if focus restoration is pending;
+            // onScrollFocusRestored or the safety timer will release it once focus settles.
+            if (!this._pendingNavState) {
+                this.setLoading(false);
+            }
             // Apply Header visibility and specialization AFTER content is loaded
             this._updateControlsVisibility();
             this._updateHeaderVisibility();
 
             // Force Focus Check - Ensure we don't drop focus after load
-            // Especially for BoxSets where tabs are hidden and initial focus might be lost
-            if (!document.activeElement || document.activeElement === document.body) {
+            // Especially for BoxSets where tabs are hidden and initial focus might be lost.
+            // Check focusManager.getFocused() as native focus is disabled across the app.
+            const currentFocused = focusManager.getFocused();
+            if (!currentFocused || !document.contains(currentFocused)) {
                 const collectionType = this.state.libraryInfo?.CollectionType;
                 if (collectionType === 'boxsets' || collectionType === 'playlists') {
                     // Force controls or grid
@@ -1788,24 +2399,41 @@ class LibraryPage extends Page {
                     } else {
                         this.setActiveSection('library-grid');
                     }
-                } else {
-                    // Try to restore valid focus or default
-                    if (this.$('#library-tabs')?.style.display !== 'none') {
-                        // Don't force tabs if we are deep in pagination, but on loadItems usually tabs or grid
-                    }
                 }
             }
         }
     }
 
     _updatePaginationUI() {
+        const grid = this.$('#library-grid');
+        if (this.state.isInfinite) {
+            if (grid) grid.style.paddingBottom = 'calc(100vh - 250px)';
+            const footer = this.$('#library-pagination');
+            if (footer) footer.style.display = 'none';
+
+            const btnPrevTop = this.$('#btn-prev-top');
+            const btnNextTop = this.$('#btn-next-top');
+            if (btnPrevTop) btnPrevTop.style.display = 'none';
+            if (btnNextTop) btnNextTop.style.display = 'none';
+
+            const countIndicator = this.$('#count-indicator');
+            if (countIndicator) {
+                const total = this.state.totalRecordCount || this.state.items.length;
+                countIndicator.textContent = i18n.t('ListPaging', [1, this.state.items.length, total]);
+            }
+            return;
+        }
+
         const { startIndex, limit, totalRecordCount } = this.state;
-        const currentPage = Math.floor(startIndex / limit) + 1;
-        const totalPages = Math.ceil(totalRecordCount / limit);
+        const pageParam = this.params.page ? parseInt(this.params.page, 10) : null;
+        const currentPage = !isNaN(pageParam) && pageParam > 0 ? pageParam : Math.floor(startIndex / (limit || 1)) + 1;
+        const totalPages = Math.ceil(totalRecordCount / (limit || 1));
 
         this.$('#pagination-info').textContent = i18n.t('PageNumberXOfY', [currentPage, totalPages || 1]);
 
         // Hide/Show logic for single page or horizontal row views (Genres/Suggestions)
+        if (grid) grid.style.paddingBottom = '';
+
         const isHorizontalView =
             this.state.viewType === 'Genres' ||
             this.state.viewType === 'MusicGenres' ||
@@ -1861,38 +2489,63 @@ class LibraryPage extends Page {
     _loadPersistedViewMode() {
         const validModes = ['poster', 'small-poster', 'thumb', 'banner', 'list'];
 
-        // If an initial viewing mode index is provided in the URL, use it and don't persist it.
+        // Determine if the current tab/collection defaults to 16:9 landscape orientation
+        const isLandscape =
+            this.state.viewType === 'Episodes' ||
+            this.state.viewType === 'Upcoming' ||
+            this.state.viewType === 'Networks' ||
+            this.state.libraryInfo?.CollectionType === 'musicvideos' ||
+            this.state.libraryInfo?.CollectionType === 'homevideos' ||
+            this.state.libraryInfo?.CollectionType === 'photos' ||
+            (this.params.includeItemTypes && this.params.includeItemTypes.includes('Episode'));
+
+        const isSeerr = this.state.libraryId === 'seerr' || this.state.libraryInfo?.CollectionType === 'seerr';
+
+        /*
+         * =====================================================================
+         * Tab-Specific & Sub-View Storage Key Resolution
+         * =====================================================================
+         * Preserve separate view mode preferences for non-default tabs
+         * (e.g., Episodes tab in TV Shows, Photos/Videos in Home Videos).
+         * =====================================================================
+         */
+        const isTabSpecific = Boolean(this.state.viewType && this.state.viewType !== 'Items');
+        const tabStorageKey = isTabSpecific ? `pref:library:viewMode:${this.state.libraryId}:${this.state.viewType}` : null;
+        const libStorageKey = isSeerr ? 'pref:seerr:viewMode' : `pref:library:viewMode:${this.state.libraryId}`;
+
+        // ---------------------------------------------------------------------
+        // 1. Resolve Active View Mode
+        // ---------------------------------------------------------------------
+        // Priority order:
+        //  a) Explicit URL numerical index (?viewModeIndex=2 -> 'thumb')
+        //  b) Explicit URL string (?viewMode=thumb)
+        //  c) Saved local storage preference for this tab / library
+        //  d) Standard fallback: 'thumb' for landscape collections, 'poster' otherwise
+        // ---------------------------------------------------------------------
         if (this.params.viewModeIndex !== undefined) {
             const index = parseInt(this.params.viewModeIndex, 10);
             if (!isNaN(index) && validModes[index]) {
                 this.state.viewMode = validModes[index];
                 log.info(`[ViewMode] Loaded view mode index from URL: ${index} -> ${this.state.viewMode}`);
-                return;
+            }
+        } else if (this.params.viewMode && validModes.includes(this.params.viewMode)) {
+            this.state.viewMode = this.params.viewMode;
+            log.info(`[ViewMode] Loaded view mode string from URL: ${this.state.viewMode}`);
+        } else {
+            // Retrieve saved preference (checking tab-specific key before library-level key)
+            const saved = (tabStorageKey && storage.getItem(tabStorageKey)) || storage.getItem(libStorageKey);
+
+            if (saved) {
+                // Validate the value is still a known picker option (guards against stale data)
+                const allowedModes = isSeerr ? ['poster', 'small-poster'] : validModes;
+                this.state.viewMode = allowedModes.includes(saved) ? saved : (isLandscape ? 'thumb' : 'poster');
+            } else {
+                // Universal default is 'thumb' for landscape collections/tabs, 'poster' for portrait
+                this.state.viewMode = isLandscape ? 'thumb' : 'poster';
             }
         }
 
-        const isSeerr = this.state.libraryId === 'seerr' || this.state.libraryInfo?.CollectionType === 'seerr';
-
-        if (this._isSubView() && !isSeerr) {
-            // Sub-views for standard Jellyfin libraries always reset to poster default
-            this.state.viewMode = 'poster';
-            return;
-        }
-
-        const storageKey = isSeerr ? 'pref:seerr:viewMode' : `pref:library:viewMode:${this.state.libraryId}`;
-        const saved = storage.getItem(storageKey);
-
-        if (saved) {
-            // Validate the value is still a known picker option (guards against stale data)
-            const validModes = isSeerr ? ['poster', 'small-poster'] : ['poster', 'small-poster', 'thumb', 'banner', 'list'];
-            this.state.viewMode = validModes.includes(saved) ? saved : 'poster';
-        } else {
-            // No preference saved — universal default is 'poster'.
-            // Music albums show as square cards via _resolveCardType(), not via viewMode.
-            this.state.viewMode = 'poster';
-        }
-
-        log.info(`[ViewMode] Loaded view mode: ${this.state.viewMode} for library ${this.state.libraryId}`);
+        log.info(`[ViewMode] Active view mode: ${this.state.viewMode} for library ${this.state.libraryId} (tab: ${this.state.viewType || 'Items'})`);
 
         /*
          * =========================================================================
@@ -1902,15 +2555,18 @@ class LibraryPage extends Page {
          * custom column counts selected for this viewMode.
          * =========================================================================
          */
-        const modeKey = isSeerr ? 'pref:seerr:gridMode' : `pref:library:gridMode:${this.state.libraryId}`;
-        const savedMode = storage.getItem(modeKey);
+        const tabModeKey = isTabSpecific ? `pref:library:gridMode:${this.state.libraryId}:${this.state.viewType}` : null;
+        const libModeKey = isSeerr ? 'pref:seerr:gridMode' : `pref:library:gridMode:${this.state.libraryId}`;
+        const savedMode = (tabModeKey && storage.getItem(tabModeKey)) || storage.getItem(libModeKey);
         this.state.gridMode = savedMode === 'static' ? 'static' : 'dynamic';
 
+        const effectiveMode = this.state.viewMode;
+        const tabColsKey = isTabSpecific ? `pref:library:gridColumns:${this.state.libraryId}:${this.state.viewType}:${effectiveMode}` : null;
         const colsKey = isSeerr
-            ? `pref:seerr:gridColumns:${this.state.viewMode}`
-            : `pref:library:gridColumns:${this.state.libraryId}:${this.state.viewMode}`;
-        const savedCols = parseInt(storage.getItem(colsKey), 10);
-        this.state.gridColumns = !isNaN(savedCols) ? savedCols : this._getDefaultColumnsForMode(this.state.viewMode);
+            ? `pref:seerr:gridColumns:${effectiveMode}`
+            : `pref:library:gridColumns:${this.state.libraryId}:${effectiveMode}`;
+        const savedCols = parseInt((tabColsKey && storage.getItem(tabColsKey)) || storage.getItem(colsKey), 10);
+        this.state.gridColumns = !isNaN(savedCols) ? savedCols : this._getDefaultColumnsForMode(effectiveMode);
     }
 
     _loadPersistedSortMode() {
@@ -1962,7 +2618,17 @@ class LibraryPage extends Page {
         if (savedFilters) {
             try {
                 // Parse the JSON string back into a filters object
-                this.state.filters = JSON.parse(savedFilters);
+                const parsed = JSON.parse(savedFilters);
+
+                // Sanitize any stale GUID-based genre strings stored from previous test sessions
+                if (parsed.Genres) {
+                    const firstGenre = parsed.Genres.split(/[,|]/)[0]?.trim();
+                    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(firstGenre)) {
+                        delete parsed.Genres;
+                    }
+                }
+
+                this.state.filters = parsed;
                 log.info(
                     `[Filters] Rehydrated persisted filters for library ${this.state.libraryId}:`,
                     this.state.filters
@@ -2073,7 +2739,19 @@ class LibraryPage extends Page {
         // Define tabs based on collection type
         let tabs = [];
 
-        if (collectionType === 'tvshows') {
+        if (this.state.isGameLibrary || collectionType === 'games') {
+            tabs = [
+                { id: 'Items', label: 'Games' },
+                { id: 'Suggestions', label: 'Suggestions' },
+                { id: 'Genres', label: 'Genres' }
+            ];
+        } else if (collectionType === 'books') {
+            tabs = [
+                { id: 'Items', label: 'Books' },
+                { id: 'Suggestions', label: 'Suggestions' },
+                { id: 'Genres', label: 'Genres' }
+            ];
+        } else if (collectionType === 'tvshows') {
             tabs = [
                 { id: 'Items', label: 'TypeOptionPluralSeries' },
                 { id: 'Suggestions', label: 'Suggestions' },
@@ -2100,7 +2778,7 @@ class LibraryPage extends Page {
                 { id: 'Songs', label: 'Songs' },
                 { id: 'MusicGenres', label: 'Genres' }
             ];
-        } else if (collectionType === 'homevideos') {
+        } else if (collectionType === 'homevideos' || collectionType === 'photos') {
             tabs = [
                 { id: 'Folders', label: 'Folders' },
                 { id: 'Photos', label: 'Photos' },
@@ -2157,9 +2835,27 @@ class LibraryPage extends Page {
         // Always show Alpha Picker as requested
         const showPicker = true;
         const container = this.$('#alpha-picker-container');
+        const isRightPos = layoutManager.getAlphaPickerPosition() === 'right';
 
         if (container) {
             container.style.visibility = 'visible';
+
+            // Docking hierarchy management:
+            // When right-docked, reparent container directly to this.el (.library-page)
+            // outside .library-scroll-container (.page-content). This completely detaches
+            // it from the scroll container and any contain/transform stacking contexts,
+            // locking the vertical rail fixed to the screen while the library scrolls underneath.
+            // When top-positioned, return it to .library-header so it flows in normal document order.
+            if (isRightPos) {
+                if (this.el && container.parentElement !== this.el) {
+                    this.el.appendChild(container);
+                }
+            } else {
+                const header = this.$('#library-header');
+                if (header && container.parentElement !== header) {
+                    header.appendChild(container);
+                }
+            }
         }
 
         if (!showPicker) return;
@@ -2167,7 +2863,15 @@ class LibraryPage extends Page {
         const picker = this.$('#alpha-picker');
         if (!picker) return;
 
-        const activeChar = this.state.nameStartsWith;
+        /* -----------------------------------------------------------------
+         * Active Alphabet Highlight:
+         * Uses scrollAlphaChar in unlimited scroll mode, or nameStartsWith in
+         * standard filtering mode, providing immediate visual feedback.
+         * ----------------------------------------------------------------- */
+        const isScrollModeActive = this.state.isInfinite && storage.getItem('pref:alphaPickerScrollMode') !== 'false';
+        const activeChar = isScrollModeActive
+            ? this.state.scrollAlphaChar || this.state.nameStartsWith
+            : this.state.nameStartsWith;
 
         picker.innerHTML = this.state.alphaPickerChars
             .map((char) => {
@@ -2180,13 +2884,28 @@ class LibraryPage extends Page {
             })
             .join('');
 
-        focusManager.register('alpha-picker', this.$('#alpha-picker'), {
-            orientation: 'horizontal',
-            leaveUp: 'library-controls',
-            leaveDown: 'library-grid',
-            leaveLeft: 'sidebar',
-            enterTo: 'active-element' // Focus the selected char
-        });
+        // Configure focus registration depending on user-configured position
+        if (isRightPos) {
+            // Vertical orientation on the right edge: Up/Down traverses letters, Left jumps back to grid
+            focusManager.register('alpha-picker', this.$('#alpha-picker'), {
+                orientation: 'vertical',
+                leaveUp: 'library-controls',
+                leaveDown: null,
+                leaveLeft: 'library-grid',
+                leaveRight: null,
+                enterTo: 'active-element'
+            });
+        } else {
+            // Traditional horizontal orientation in the header: Left/Right traverses letters, Down jumps to grid
+            focusManager.register('alpha-picker', this.$('#alpha-picker'), {
+                orientation: 'horizontal',
+                leaveUp: 'library-controls',
+                leaveDown: 'library-grid',
+                leaveLeft: 'sidebar',
+                leaveRight: null,
+                enterTo: 'active-element' // Focus the selected char
+            });
+        }
     }
 
     async _enrichCollectionItems(items, collectionType) {
@@ -2252,38 +2971,33 @@ class LibraryPage extends Page {
         const pagination = this.$('#library-pagination');
         if (pagination) pagination.style.display = ''; // Restore pagination
 
-        // Use landscape cards via CSS class if needed (e.g. for Episodes, Upcoming, Networks, Music Videos, or Home Videos)
-        // These viewTypes/collections always force landscape regardless of user view mode preference.
+        // Use landscape cards via CSS class if needed (e.g. for Episodes, Upcoming, Networks, Music Videos, Home Videos, Photos)
+        // These viewTypes/collections default to landscape (thumb) mode when no preference is saved.
         const isLandscape =
             this.state.viewType === 'Episodes' ||
             this.state.viewType === 'Upcoming' ||
             this.state.viewType === 'Networks' ||
             this.state.libraryInfo?.CollectionType === 'musicvideos' ||
-            this.state.libraryInfo?.CollectionType === 'homevideos';
+            this.state.libraryInfo?.CollectionType === 'homevideos' ||
+            this.state.libraryInfo?.CollectionType === 'photos' ||
+            (this.params.includeItemTypes && this.params.includeItemTypes.includes('Episode'));
 
-        // --------------------------------------------------------------------
-        // Apply the view mode CSS modifier class to the grid container.
-        // Special viewTypes (Episodes, Networks) are always landscape and ignore
-        // the user's viewMode preference. For everything else we apply the mode.
-        //
-        // IMPORTANT: only apply classes for the 5 known picker modes. 'poster'
-        // uses the base style (no extra class). Any unexpected value is silently
-        // treated as 'poster' to avoid broken layouts from stale storage data.
-        // --------------------------------------------------------------------
+        /*
+         * --------------------------------------------------------------------
+         * Apply View Mode CSS Modifier Class to Grid Container
+         * --------------------------------------------------------------------
+         * Cleanly toggle modifier classes matching the selected view mode.
+         * 'poster' uses base styles (no class). 'small-poster', 'thumb',
+         * 'banner', and 'list' each apply their specific CSS layout rule.
+         * --------------------------------------------------------------------
+         */
         const viewModeClasses = ['view-small-poster', 'view-thumb', 'view-banner', 'view-list'];
         viewModeClasses.forEach((cls) => grid.classList.remove(cls));
         grid.classList.remove('landscape');
 
-        if (isLandscape) {
-            // Force landscape display for tab types that mandate it
-            grid.classList.add('view-thumb');
-        } else {
-            // The 4 non-default modes each get a CSS class; 'poster' uses base styles
-            const nonDefaultModes = ['small-poster', 'thumb', 'banner', 'list'];
-            if (nonDefaultModes.includes(this.state.viewMode)) {
-                grid.classList.add(`view-${this.state.viewMode}`);
-            }
-            // Any unknown mode (e.g. stale 'square' from old storage) falls through to poster
+        const nonDefaultModes = ['small-poster', 'thumb', 'banner', 'list'];
+        if (nonDefaultModes.includes(this.state.viewMode)) {
+            grid.classList.add(`view-${this.state.viewMode}`);
         }
 
         /*
@@ -2298,11 +3012,18 @@ class LibraryPage extends Page {
         let cardWidth = null;
         if (this.state.gridMode === 'dynamic' && this.state.viewMode !== 'list') {
             grid.classList.add('mode-dynamic');
-            grid.style.setProperty('--grid-columns', this.state.gridColumns);
+
+            // Effective columns must reflect forced-landscape tabs (e.g. Episodes = 4 cols, not poster's 7).
+            // Single source of truth: _resolveDynamicGridColumns (also used by
+            // the chunk sizer and the Android portrait rotation handler).
+            const effectiveMode = isLandscape ? 'thumb' : this.state.viewMode;
+            const effectiveColumns = this._resolveDynamicGridColumns(effectiveMode);
+
+            grid.style.setProperty('--grid-columns', effectiveColumns);
 
             // Compute card width minus margins to feed ImageService parameters
             const containerWidth = grid.clientWidth || 1720;
-            const columns = this.state.gridColumns || 5;
+            const columns = effectiveColumns || 7;
             const margin = 20; // Must align with --grid-card-margin in library.css
             cardWidth = Math.round((containerWidth - (columns - 1) * margin) / columns);
         } else {
@@ -2352,19 +3073,22 @@ class LibraryPage extends Page {
             }
 
             if (shouldShowControls) {
-                // Register Empty State Button for focus
+                // Register Empty State Button for focus with position awareness
+                const isRightPosEmpty = layoutManager.getAlphaPickerPosition() === 'right';
                 focusManager.register('empty-state-btn', this.$('#empty-state'), {
-                    leaveUp: 'alpha-picker', // Default to alpha picker
+                    leaveUp: isRightPosEmpty ? 'library-controls' : 'alpha-picker',
                     leaveLeft: 'sidebar',
+                    leaveRight: isRightPosEmpty && shouldShowControls ? 'alpha-picker' : null,
                     selector: '#btn-reset-filters'
                 });
 
-                // Link Alpha Picker/Controls DOWN to Empty State Button
+                // Link Alpha Picker/Controls to Empty State Button
                 const alphaConfig = focusManager.getSectionConfig('alpha-picker');
                 if (alphaConfig) {
                     focusManager.register('alpha-picker', this.$('#alpha-picker'), {
                         ...alphaConfig,
-                        leaveDown: 'empty-state-btn'
+                        leaveDown: isRightPosEmpty ? null : 'empty-state-btn',
+                        leaveLeft: isRightPosEmpty ? 'empty-state-btn' : 'sidebar'
                     });
                 }
 
@@ -2431,8 +3155,10 @@ class LibraryPage extends Page {
         this.$('#empty-state').classList.add('hidden');
 
         // Update Count
-        const start = this.state.startIndex + 1;
-        const end = Math.min(this.state.startIndex + this.state.limit, this.state.totalRecordCount);
+        const start = this.state.isInfinite ? 1 : this.state.startIndex + 1;
+        const end = this.state.isInfinite
+            ? this.state.items.length
+            : Math.min(this.state.startIndex + this.state.limit, this.state.totalRecordCount);
         this.$('#count-indicator').textContent = i18n.t('ListPaging', [start, end, this.state.totalRecordCount]);
 
         // Resolve card type based on the active view mode and library/tab context.
@@ -2454,8 +3180,13 @@ class LibraryPage extends Page {
         //
         // Chunk sizing: (columns × 5 rows) gives ~2 visible screens worth of content.
         // ====================================================================
-        const columns =
-            this.state.gridColumns || this._getDefaultColumnsForMode(isLandscape ? 'thumb' : this.state.viewMode);
+        const effectiveMode = isLandscape ? 'thumb' : this.state.viewMode;
+        let columns = this._resolveDynamicGridColumns(effectiveMode);
+
+        // In List view, there is strictly 1 card per row regardless of gridColumns settings
+        if (this.state.viewMode === 'list') {
+            columns = 1;
+        }
 
         // Store rendering context + column count on state so _appendGridChunk
         // and _prependGridChunk can access them without re-deriving
@@ -2470,6 +3201,7 @@ class LibraryPage extends Page {
         // Reset the sliding window — a fresh _renderGrid always starts from zero
         this.state.gridWindowStart = 0;
         this.state.gridWindowEnd = 0;
+        this.state._hasMoreInfinite = true;
         this.state.gridCardRowHeight = null; // Force re-measure on next append
 
         // Reset direction cursors so stale positions from a previous page render
@@ -2480,6 +3212,9 @@ class LibraryPage extends Page {
         // Clear the grid and inject the spacer that maintains scroll position
         // when top rows are evicted from the DOM. Height starts at 0px.
         grid.innerHTML = '<div id="grid-top-spacer" style="height:0;width:100%;flex:0 0 100%"></div>';
+
+        // Provide bottom scroll clearance in unlimited mode so any row (even the last row) can reach top
+        grid.style.paddingBottom = this.state.isInfinite ? 'calc(100vh - 250px)' : '';
 
         // Render the first chunk immediately — this is what the user sees on load
         this._appendGridChunk(grid, items, columns);
@@ -2508,29 +3243,51 @@ class LibraryPage extends Page {
         const isAlphaVisible =
             isMovieMain || isTVMain || isMusicMain || isEpisodes || isCollections || isFolderMain || this._isSubView();
 
-        // Update Alpha Picker navigation to point to grid
+        // Update Alpha Picker navigation to point to grid based on current orientation
+        const isRightPosNav = layoutManager.getAlphaPickerPosition() === 'right';
         if (isAlphaVisible) {
-            focusManager.register('alpha-picker', this.$('#alpha-picker'), {
-                orientation: 'horizontal',
-                leaveUp: 'library-controls',
-                leaveDown: 'library-grid',
-                leaveLeft: 'sidebar',
-                enterTo: 'active-element'
-            });
+            if (isRightPosNav) {
+                focusManager.register('alpha-picker', this.$('#alpha-picker'), {
+                    orientation: 'vertical',
+                    leaveUp: 'library-controls',
+                    leaveDown: null,
+                    leaveLeft: 'library-grid',
+                    leaveRight: null,
+                    enterTo: 'active-element'
+                });
+            } else {
+                focusManager.register('alpha-picker', this.$('#alpha-picker'), {
+                    orientation: 'horizontal',
+                    leaveUp: 'library-controls',
+                    leaveDown: 'library-grid',
+                    leaveLeft: 'sidebar',
+                    leaveRight: null,
+                    enterTo: 'active-element'
+                });
+            }
         }
 
         // Re-register focus for grid items
-        const currentColumns =
-            this.state.gridMode === 'dynamic' && this.state.viewMode !== 'list'
-                ? this.state.gridColumns
-                : this._getDefaultColumnsForMode(isLandscape ? 'thumb' : this.state.viewMode);
+        const currentColumns = this.state.viewMode === 'list' ? 1 : columns;
+
+        // When alpha selector is on the right, pressing UP goes straight to controls
+        let gridLeaveUp = 'library-controls';
+        if (!isRightPosNav && isAlphaVisible) {
+            gridLeaveUp = 'alpha-picker';
+        }
 
         focusManager.register('library-grid', grid, {
             orientation: 'grid',
             columns: currentColumns,
-            leaveUp: isAlphaVisible ? 'alpha-picker' : 'library-controls',
-            leaveDown: 'library-pagination',
+            leaveUp: gridLeaveUp,
+            leaveDown:
+                this.state.isInfinite && this.state.items.length < this.state.totalRecordCount
+                    ? null
+                    : this.state.isInfinite
+                      ? null
+                      : 'library-pagination',
             leaveLeft: 'sidebar',
+            leaveRight: isRightPosNav && isAlphaVisible ? 'alpha-picker' : null,
             selector: '.media-card',
             scrollOffsetTop: 100,
 
@@ -2550,30 +3307,71 @@ class LibraryPage extends Page {
             // in the DOM. The result: no accidental focus jumps to tabs/controls
             // while holding UP through a windowed grid.
             // =================================================================
+            // =================================================================
+            // VIRTUAL GRID EDGE GUARDS (Up & Down)
+            // =================================================================
+            // When the user navigates across window boundaries, FocusManager
+            // may not find the adjacent card because it was either evicted
+            // or hasn't yet been appended to the DOM.
+            //
+            // We intercept the directional move here BEFORE FocusManager queries
+            // focusables:
+            //   - For UP moves on the first row: prepend evicted rows.
+            //   - For DOWN moves on the last row: append the next chunk.
+            //
+            // Prepending/appending invalidates the FocusManager cache synchronously.
+            // Returning false lets FocusManager proceed with its move, re-querying
+            // the fresh DOM and landing on the new card naturally without sticking
+            // or jumping out of section.
+            // =================================================================
             onMove: (direction, focusedElement) => {
-                if (direction !== 'up') return false;
-                if (this.state.gridWindowStart <= 0) return false;
                 if (!focusedElement) return false;
 
-                // Are we on the FIRST rendered row?
-                const allCards = grid.querySelectorAll('.media-card');
-                let domIndex = -1;
-                for (let i = 0; i < allCards.length; i++) {
-                    if (allCards[i] === focusedElement) {
-                        domIndex = i;
-                        break;
+                // Guard for UP navigation on the first rendered row
+                if (direction === 'up') {
+                    if (this.state.gridWindowStart <= 0) return false;
+
+                    const allCards = grid.querySelectorAll('.media-card');
+                    let domIndex = -1;
+                    for (let i = 0; i < allCards.length; i++) {
+                        if (allCards[i] === focusedElement) {
+                            domIndex = i;
+                            break;
+                        }
                     }
+                    // domIndex < currentColumns means the card is in the first row
+                    if (domIndex < 0 || domIndex >= currentColumns) return false;
+
+                    this._prependGridChunk(grid, this.state.items, currentColumns);
+                    return false;
                 }
-                // domIndex < currentColumns means the card is in the first row
-                if (domIndex < 0 || domIndex >= currentColumns) return false;
 
-                // Prepend the evicted rows synchronously. _hookGridCards inside
-                // _prependGridChunk calls focusManager.invalidateCache() so
-                // FocusManager will re-query after we return false.
-                this._prependGridChunk(grid, this.state.items, currentColumns);
+                // Guard for DOWN navigation on the last rendered row
+                if (direction === 'down') {
+                    const allCards = grid.querySelectorAll('.media-card');
+                    let domIndex = -1;
+                    for (let i = 0; i < allCards.length; i++) {
+                        if (allCards[i] === focusedElement) {
+                            domIndex = i;
+                            break;
+                        }
+                    }
+                    // If focus is on the last rendered row, append next chunk or trigger infinite batch
+                    if (domIndex >= 0 && domIndex + currentColumns >= allCards.length) {
+                        if (this.state.gridWindowEnd < this.state.items.length) {
+                            this._appendGridChunk(grid, this.state.items, currentColumns);
+                        } else if (this.state.isInfinite) {
+                            const hasMore =
+                                this.state._hasMoreInfinite !== false &&
+                                (!this.state.totalRecordCount || this.state.items.length < this.state.totalRecordCount);
+                            if (hasMore) {
+                                this._loadNextInfiniteBatch();
+                            }
+                        }
+                    }
+                    return false;
+                }
 
-                // Return false — FocusManager proceeds with its UP move,
-                // re-queries the grid, and lands on the card above correctly.
                 return false;
             }
         });
@@ -2597,6 +3395,8 @@ class LibraryPage extends Page {
         this._gridEvalFrameId = null;
         this._gridFocusElement = null;
         this._gridScrollTop = null;
+        this._pendingFocusEval = false;
+        this._pendingScrollEval = false;
 
         if (this._onGridFocusChanged) {
             eventBus.off('focus:changed', this._onGridFocusChanged);
@@ -2604,22 +3404,52 @@ class LibraryPage extends Page {
         this._onGridFocusChanged = (element) => {
             if (!element || !grid.contains(element)) return;
             if (!element.classList.contains('media-card')) return;
+
+            // Direct D-pad focus takes precedence over manual scroll tracking
+            this._isManualScroll = false;
+            this._lastFocusTime = Date.now();
+
             this._gridFocusElement = element;
+            this._pendingFocusEval = true;
             this._scheduleGridEval();
         };
         eventBus.on('focus:changed', this._onGridFocusChanged);
 
         const scrollContainer = this.$('#library-scroll-container') || this.el.querySelector('.page-content');
         if (scrollContainer) {
+            // Clean up any previously attached scroll/wheel/touch handlers
             if (this._onGridScroll) {
                 scrollContainer.removeEventListener('scroll', this._onGridScroll);
+                window.removeEventListener('scroll', this._onGridScroll);
+                scrollContainer.removeEventListener('wheel', this._onGridWheel);
+                scrollContainer.removeEventListener('touchmove', this._onGridTouch);
             }
             this._lastGridScrollTop = 0;
             this._onGridScroll = () => {
-                this._gridScrollTop = scrollContainer.scrollTop;
+                // Determine current scroll position from container or window (for TV webOS pointer/wheel scrolling)
+                this._gridScrollTop =
+                    scrollContainer.scrollTop || window.pageYOffset || document.documentElement.scrollTop || 0;
+                this._pendingScrollEval = true;
                 this._scheduleGridEval();
             };
+            this._onGridWheel = () => {
+                // Mark manual scroll active when user spins wheel or magic remote
+                this._isManualScroll = true;
+                this._lastManualScrollTime = Date.now();
+                this._gridScrollTop =
+                    scrollContainer.scrollTop || window.pageYOffset || document.documentElement.scrollTop || 0;
+                this._pendingScrollEval = true;
+                this._scheduleGridEval();
+            };
+            this._onGridTouch = () => {
+                // Mark manual scroll active when user touch-flings or drags
+                this._isManualScroll = true;
+                this._lastManualScrollTime = Date.now();
+            };
             scrollContainer.addEventListener('scroll', this._onGridScroll, { passive: true });
+            window.addEventListener('scroll', this._onGridScroll, { passive: true });
+            scrollContainer.addEventListener('wheel', this._onGridWheel, { passive: true });
+            scrollContainer.addEventListener('touchmove', this._onGridTouch, { passive: true });
         }
 
         // Register pagination footer — the grid's leaveDown points here.
@@ -2634,19 +3464,30 @@ class LibraryPage extends Page {
         });
 
         const hasTabs = this.$('#library-tabs')?.style.display !== 'none';
+        // When alpha selector is on the right, controls point DOWN to grid and RIGHT to alpha-picker
+        let controlsLeaveDownNav = 'library-grid';
+        if (!isRightPosNav && isAlphaVisible) {
+            controlsLeaveDownNav = 'alpha-picker';
+        }
+
         this.registerFocusSection('library-controls', this.$('#library-controls'), {
             orientation: 'horizontal',
             leaveUp: hasTabs ? 'library-tabs' : null,
-            leaveDown: isAlphaVisible ? 'alpha-picker' : 'library-grid',
+            leaveDown: controlsLeaveDownNav,
             leaveLeft: 'sidebar',
+            leaveRight: isRightPosNav && isAlphaVisible ? 'alpha-picker' : null,
             selector: 'button'
         });
 
-        // Ensure focus goes to first element in grid if subview
-        if (this._isSubView()) {
+        // Ensure focus goes to first element in grid if subview and NOT restoring focus and user hasn't moved
+        if (this._isSubView() && !this._pendingNavState && !state.has(this._getCacheKey())) {
             requestAnimationFrame(() => {
-                const currentFocus = document.activeElement;
-                if (!currentFocus || currentFocus === document.body) {
+                // If user already moved focus via D-pad while loading, do not override their cursor
+                if (this._initTimestamp && focusManager.getLastMoveTime() > this._initTimestamp) {
+                    return;
+                }
+                const currentFocus = focusManager.getFocused();
+                if (!currentFocus || !document.contains(currentFocus)) {
                     const firstItem = grid.querySelector('.media-card');
                     if (firstItem) {
                         focusManager.setActiveSection('library-grid', false);
@@ -2673,10 +3514,24 @@ class LibraryPage extends Page {
         const resolvedCardType = ctx.resolvedCardType || 'poster';
         const cardWidth = ctx.cardWidth || null;
 
+        /*
+         * ====================================================================
+         * Card Orientation & Metarow Configuration
+         * ====================================================================
+         * Card renders in landscape orientation when in thumb or banner mode,
+         * or when in a landscape collection unless in list or portrait mode.
+         * List mode cards display rich metadata on the right edge.
+         * ====================================================================
+         */
+        const isCardLandscape =
+            this.state.viewMode === 'thumb' ||
+            this.state.viewMode === 'banner' ||
+            (isLandscape && this.state.viewMode !== 'list' && this.state.viewMode !== 'poster' && this.state.viewMode !== 'small-poster');
+
         return items
             .map((item) =>
                 CardRenderer.createCardHtml(item, {
-                    isLandscape: isLandscape || this.state.viewMode === 'thumb' || this.state.viewMode === 'banner',
+                    isLandscape: isCardLandscape,
                     type: this.state.viewMode === 'banner' ? 'banner' : resolvedCardType,
                     contextType:
                         this.state.libraryId === 'seerr' || this.state.libraryInfo?.CollectionType === 'seerr'
@@ -2735,10 +3590,16 @@ class LibraryPage extends Page {
     _hookGridCards(newCards) {
         if (!newCards || !newCards.length) return;
 
-        newCards.forEach((card) => {
+        newCards.forEach((card, index) => {
             const img = card.querySelector('img[data-src]');
             if (img) {
-                lazyLoader.observeElement(img);
+                // Eagerly force-load the first 14 images of any newly appended chunk (2 full rows)
+                // so they appear immediately without waiting on IntersectionObserver
+                if (index < 14) {
+                    lazyLoader.forceLoad(img);
+                } else {
+                    lazyLoader.observeElement(img);
+                }
             }
             const shimmer = card.querySelector('.card-image.skeleton-shimmer');
             if (shimmer && lazyLoader._shimmerObserver) {
@@ -2748,14 +3609,6 @@ class LibraryPage extends Page {
 
         // Tell FocusManager about the new focusable nodes
         focusManager.invalidateCache('library-grid');
-
-        // Prewarm ScrollController offset cache in the next idle frame
-        requestAnimationFrame(() => {
-            const pageContent = document.querySelector('.page-content');
-            if (pageContent) {
-                scrollController.prewarmOffsetCache(newCards, pageContent);
-            }
-        });
     }
 
     /**
@@ -2786,14 +3639,23 @@ class LibraryPage extends Page {
         // -----------------------------------------------------------------------
         // CHUNK SIZE
         // -----------------------------------------------------------------------
-        // First render: 5 rows — fills ~1.5 TV screens immediately.
-        // Incremental: 3 rows — small enough not to spike layout, large enough
-        // that the user can scroll a full screen before triggering another append.
+        // In list view (single column, row height ~132px), cards are much taller
+        // and vertically compact in count. With columns === 1, a 5-row initial chunk
+        // is only 5 items (~660px, less than 1 1080p screen), and a 2-row buffer
+        // evicts items almost immediately on scroll.
+        // For list view:
+        //   - INITIAL_ROWS = 20 (~2.5 screens)
+        //   - INCREMENTAL_ROWS = 10 (~1.2 screens)
+        //   - MAX_WINDOW_ROWS = 35 (~4.5 screens)
+        // For standard multi-column grids:
+        //   - INITIAL_ROWS = 5 (columns * 5 = 25-35 items, ~1.5 - 2 screens)
+        //   - INCREMENTAL_ROWS = 3 (columns * 3 = 15-21 items)
+        //   - MAX_WINDOW_ROWS = 8
         // -----------------------------------------------------------------------
-        const INITIAL_ROWS = 5;
-        const INCREMENTAL_ROWS = 3;
-        // Maximum rows to keep in the DOM at once (8 rows = comfortable window)
-        const MAX_WINDOW_ROWS = 8;
+        const isListView = this.state.viewMode === 'list';
+        const INITIAL_ROWS = isListView ? 20 : 5;
+        const INCREMENTAL_ROWS = isListView ? 10 : 3;
+        const MAX_WINDOW_ROWS = isListView ? 35 : 8;
 
         const isFirstChunk = windowEnd === 0;
         const chunkSize = isFirstChunk ? columns * INITIAL_ROWS : columns * INCREMENTAL_ROWS;
@@ -2845,8 +3707,9 @@ class LibraryPage extends Page {
         // Nothing above the current window — already at the very top
         if (windowStart <= 0) return false;
 
-        const INCREMENTAL_ROWS = 3;
-        const MAX_WINDOW_ROWS = 8;
+        const isListView = this.state.viewMode === 'list';
+        const INCREMENTAL_ROWS = isListView ? 10 : 3;
+        const MAX_WINDOW_ROWS = isListView ? 35 : 8;
 
         const chunkSize = Math.min(columns * INCREMENTAL_ROWS, windowStart);
         const newStart = windowStart - chunkSize;
@@ -2912,6 +3775,89 @@ class LibraryPage extends Page {
 
     /**
      * =========================================================================
+     * GRID WINDOW EXPANSION FOR TARGET FOCUS ITEM
+     * =========================================================================
+     * Ensures that the target focus item AND a healthy forward buffer of rows
+     * ahead of it (below it in the viewport) are rendered in the DOM.
+     *
+     * Without appending forward buffer rows, focus lands on the very last card
+     * in the rendered window, leaving the rest of the screen below it completely
+     * blank and empty until the user scrolls or moves.
+     *
+     * @param {string|null} targetId - Item ID to locate
+     * @param {number} [targetIndex=-1] - Optional fallback index
+     * @returns {number} The resolved itemIndex, or -1 if not found
+     * =========================================================================
+     */
+    _ensureGridWindowEncompassesItem(targetId, targetIndex = -1) {
+        // Guard: Verify grid and item collection exist
+        const grid = this.$('#library-grid');
+        if (!grid || !this.state.items || !this.state.items.length) {
+            return -1;
+        }
+
+        const columns = this.state._gridColumns || 7;
+        let itemIndex = -1;
+
+        // Locate item index by unique ID
+        if (targetId) {
+            const targetStr = String(targetId);
+            itemIndex = this.state.items.findIndex(
+                (item) => String(item.Id) === targetStr || String(item.id) === targetStr
+            );
+        }
+
+        // Fallback to numeric index if ID match failed
+        if (itemIndex < 0 && targetIndex >= 0 && targetIndex < this.state.items.length) {
+            itemIndex = targetIndex;
+        }
+
+        // Item could not be located in current items array
+        if (itemIndex < 0) {
+            return -1;
+        }
+
+        // Determine forward buffer rows ahead of the target item
+        // List view has single column and needs more rows; multi-column needs 5 rows
+        const isListView = this.state.viewMode === 'list';
+        const ROWS_BELOW = isListView ? 15 : 5;
+        const currentRow = Math.floor(itemIndex / columns);
+
+        // Calculate target forward index encompassing the target item plus forward buffer
+        const forwardTargetIndex = Math.min(
+            this.state.items.length,
+            (currentRow + ROWS_BELOW + 1) * columns
+        );
+
+        // Append chunks until the target item AND the rows ahead of it are rendered
+        while (
+            forwardTargetIndex > this.state.gridWindowEnd &&
+            this.state.gridWindowEnd < this.state.items.length
+        ) {
+            this._appendGridChunk(grid, this.state.items, columns);
+        }
+
+        // Prepend chunks if the target item was evicted above the top boundary
+        while (itemIndex < this.state.gridWindowStart && this.state.gridWindowStart > 0) {
+            this._prependGridChunk(grid, this.state.items, columns);
+        }
+
+        // Pre-emptively record target item index so the focus direction evaluator starts from this card
+        this._lastFocusItemIndex = itemIndex;
+
+        // Proactively stream next batch if approaching end of loaded array in infinite mode
+        const prefetchThreshold = this.state.items.length - (columns * 4);
+        const hasMore = this.state._hasMoreInfinite !== false &&
+            (!this.state.totalRecordCount || this.state.items.length < this.state.totalRecordCount);
+        if (this.state.isInfinite && itemIndex >= prefetchThreshold && hasMore) {
+            this._loadNextInfiniteBatch();
+        }
+
+        return itemIndex;
+    }
+
+    /**
+     * =========================================================================
      * EVALUATE GRID BOUNDARIES (merged focus + scroll evaluation)
      * =========================================================================
      * Runs at most once per frame via _scheduleGridEval(). Evaluates grid
@@ -2938,36 +3884,150 @@ class LibraryPage extends Page {
         const scrollContainer = this.$('#library-scroll-container') || this.el?.querySelector('.page-content');
         const focusedElement = this._gridFocusElement;
 
+        // Guard against grid window eviction and recalculation while focus restoration is in progress
+        if (this._isRestoringFocus) {
+            return;
+        }
+
         // ------------------------------------------------------------------
-        // PRIORITY 1: Scroll-based evaluation (pending scroll event)
+        // PRIORITY 1: Focus-based evaluation (D-pad navigation)
         // ------------------------------------------------------------------
-        // Runs whenever a scroll event is pending, regardless of focus state.
-        // This is essential for mouse-wheel / magic-remote scrolling where
-        // focus does not move and focus:changed never fires.
+        // When navigation is driven by D-pad, the user's active focus element
+        // is the single source of truth for viewport positioning.
+        // Intermediate scroll events fired by smooth scrolling during D-pad
+        // moves represent mid-flight animations, NOT the user's intended position.
+        // Deriving grid boundaries from mid-flight scrollTop during smooth scroll
+        // would evict the very rows the user is scrolling towards!
+        // ------------------------------------------------------------------
+        if (this._pendingFocusEval && focusedElement && grid.contains(focusedElement)) {
+            this._pendingFocusEval = false;
+            this._gridScrollTop = null; // Consume scroll input so mid-flight animation doesn't desync window
+            this._pendingScrollEval = false;
+
+            const allCards = grid.querySelectorAll('.media-card');
+            let domIndex = -1;
+            for (let i = 0; i < allCards.length; i++) {
+                if (allCards[i] === focusedElement) {
+                    domIndex = i;
+                    break;
+                }
+            }
+            if (domIndex >= 0) {
+                const itemIndex = this.state.gridWindowStart + domIndex;
+
+                // Direction isolation: only append when moving down,
+                // only prepend when moving up (prevents oscillation)
+                const movingDown = itemIndex > (this._lastFocusItemIndex || 0);
+                this._lastFocusItemIndex = itemIndex;
+
+                if (movingDown) {
+                    // For list view (columns=1), look ahead 6 items instead of 2 items
+                    const lookAheadItems = currentColumns === 1 ? 6 : currentColumns * 2;
+                    const appendThreshold = this.state.gridWindowEnd - lookAheadItems;
+                    if (itemIndex >= appendThreshold && this.state.gridWindowEnd < this.state.items.length) {
+                        this._appendGridChunk(grid, this.state.items, currentColumns);
+                    }
+                } else {
+                    const lookBehindItems = currentColumns === 1 ? 6 : currentColumns * 2;
+                    const prependThreshold = this.state.gridWindowStart + lookBehindItems;
+                    if (itemIndex <= prependThreshold && this.state.gridWindowStart > 0) {
+                        this._prependGridChunk(grid, this.state.items, currentColumns);
+                    }
+                }
+
+                // Proactively stream next batch when approaching end of loaded array (works on both moves & letter jumps)
+                const prefetchThreshold = this.state.items.length - currentColumns * 4;
+                const hasMore =
+                    this.state._hasMoreInfinite !== false &&
+                    (!this.state.totalRecordCount || this.state.items.length < this.state.totalRecordCount);
+                if (this.state.isInfinite && itemIndex >= prefetchThreshold && hasMore) {
+                    this._loadNextInfiniteBatch();
+                }
+
+                const currentRow = Math.floor(itemIndex / currentColumns);
+                // Forward explicit itemIndex so alphabet rail matches focused card precisely
+                this._syncGridWindow(grid, this.state.items, currentColumns, currentRow, itemIndex);
+                return;
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // PRIORITY 2: Scroll-based evaluation (mouse wheel / magic remote / touch)
+        // ------------------------------------------------------------------
+        // Runs when scrolling without changing D-pad focus (webOS magic remote,
+        // mouse wheel, or touch fling). Focus:changed does not fire during wheel
+        // scrolling, so scroll position determines grid window bounds and chunk loading.
+        // ------------------------------------------------------------------
         if (scrollContainer && this._gridScrollTop !== null) {
+            // Guard: If programmatic vertical scroll animation is actively in flight,
+            // ignore intermediate scroll events so we do not evict cards based on transient coordinates.
+            if (scrollController.isVerticalAnimating && focusedElement && grid.contains(focusedElement)) {
+                this._gridScrollTop = null;
+                this._pendingScrollEval = false;
+                return;
+            }
+
             const scrollTop = this._gridScrollTop;
             this._gridScrollTop = null; // Consume the scroll input
+            this._pendingScrollEval = false;
 
             const containerHeight = scrollContainer.clientHeight;
             const scrollHeight = scrollContainer.scrollHeight;
-            const rowHeight = this.state.gridCardRowHeight;
+            const rowHeight = this.state.gridCardRowHeight || this._measureGridRowHeight(grid, currentColumns);
 
-            const scrollingDown = scrollTop > (this._lastGridScrollTop || 0);
+            // Direction tracking
+            const isScrollingDown = scrollTop > (this._lastGridScrollTop || 0);
+            const isScrollingUp = scrollTop < (this._lastGridScrollTop || 0);
             this._lastGridScrollTop = scrollTop;
 
-            if (scrollingDown) {
-                const distanceFromBottom = scrollHeight - (scrollTop + containerHeight);
-                if (distanceFromBottom <= containerHeight * 1.5) {
-                    if (this.state.gridWindowEnd < this.state.items.length) {
-                        this._appendGridChunk(grid, this.state.items, currentColumns);
-                    }
+            // Distance calculations
+            const distanceFromBottom = scrollHeight - (scrollTop + containerHeight);
+            const spacer = grid.querySelector('#grid-top-spacer');
+            const spacerHeight = spacer ? parseFloat(spacer.style.height || 0) : 0;
+            const distanceFromRenderedTop = scrollTop - spacerHeight;
+
+            // Check append: if user is scrolling down OR near the bottom boundary of rendered items
+            const hasMoreToFetch =
+                this.state._hasMoreInfinite !== false &&
+                (!this.state.totalRecordCount || this.state.items.length < this.state.totalRecordCount);
+
+            if (
+                (isScrollingDown || distanceFromBottom <= containerHeight) &&
+                distanceFromBottom <= containerHeight * 1.5
+            ) {
+                if (this.state.gridWindowEnd < this.state.items.length) {
+                    this._appendGridChunk(grid, this.state.items, currentColumns);
                 }
-            } else {
-                const spacer = grid.querySelector('#grid-top-spacer');
-                const spacerHeight = spacer ? parseFloat(spacer.style.height || 0) : 0;
-                const distanceFromRenderedTop = scrollTop - spacerHeight;
-                if (this.state.gridWindowStart > 0 && distanceFromRenderedTop <= containerHeight * 1.5) {
-                    this._prependGridChunk(grid, this.state.items, currentColumns);
+                // Proactively stream next batch when within 4 rows of loaded array boundary during scroll
+                if (
+                    this.state.isInfinite &&
+                    this.state.items.length - this.state.gridWindowEnd < currentColumns * 4 &&
+                    hasMoreToFetch
+                ) {
+                    this._loadNextInfiniteBatch();
+                }
+            }
+
+            // Check prepend: if user is scrolling up OR near the top boundary of rendered items
+            if (
+                (isScrollingUp || distanceFromRenderedTop <= containerHeight) &&
+                this.state.gridWindowStart > 0 &&
+                distanceFromRenderedTop <= containerHeight * 1.5
+            ) {
+                this._prependGridChunk(grid, this.state.items, currentColumns);
+            }
+
+            // Keep the focus-based direction cursor in sync so subsequent D-pad moves
+            // compare against the actual position after wheel scrolling
+            let focusedIndex = null;
+            if (focusedElement && grid.contains(focusedElement)) {
+                const allCards = grid.querySelectorAll('.media-card');
+                for (let i = 0; i < allCards.length; i++) {
+                    if (allCards[i] === focusedElement) {
+                        focusedIndex = this.state.gridWindowStart + i;
+                        this._lastFocusItemIndex = focusedIndex;
+                        break;
+                    }
                 }
             }
 
@@ -2999,59 +4059,11 @@ class LibraryPage extends Page {
 
                 // Only sync window if the derived row is within actual content bounds
                 if (derivedRow <= maxRow) {
-                    this._syncGridWindow(grid, this.state.items, currentColumns, derivedRow);
+                    // Forward focused card index if navigating via D-pad so alphabet rail
+                    // maintains lock on focused card rather than reverting to the top row
+                    const targetIndexForSync = !this._isManualScroll && focusedIndex !== null ? focusedIndex : null;
+                    this._syncGridWindow(grid, this.state.items, currentColumns, derivedRow, targetIndexForSync);
                 }
-            }
-
-            // Keep the focus-based direction cursor in sync so the next
-            // D-pad move compares against the current position rather than
-            // a stale value from before the scroll.
-            if (focusedElement && grid.contains(focusedElement)) {
-                const allCards = grid.querySelectorAll('.media-card');
-                for (let i = 0; i < allCards.length; i++) {
-                    if (allCards[i] === focusedElement) {
-                        this._lastFocusItemIndex = this.state.gridWindowStart + i;
-                        break;
-                    }
-                }
-            }
-            return;
-        }
-
-        // ------------------------------------------------------------------
-        // PRIORITY 2: Focus-based evaluation (D-pad navigation)
-        // ------------------------------------------------------------------
-        if (focusedElement && grid.contains(focusedElement)) {
-            const allCards = grid.querySelectorAll('.media-card');
-            let domIndex = -1;
-            for (let i = 0; i < allCards.length; i++) {
-                if (allCards[i] === focusedElement) {
-                    domIndex = i;
-                    break;
-                }
-            }
-            if (domIndex >= 0) {
-                const itemIndex = this.state.gridWindowStart + domIndex;
-
-                // Direction isolation: only append when moving down,
-                // only prepend when moving up (prevents oscillation)
-                const movingDown = itemIndex > (this._lastFocusItemIndex || 0);
-                this._lastFocusItemIndex = itemIndex;
-
-                if (movingDown) {
-                    const appendThreshold = this.state.gridWindowEnd - currentColumns * 2;
-                    if (itemIndex >= appendThreshold && this.state.gridWindowEnd < this.state.items.length) {
-                        this._appendGridChunk(grid, this.state.items, currentColumns);
-                    }
-                } else {
-                    const prependThreshold = this.state.gridWindowStart + currentColumns * 2;
-                    if (itemIndex <= prependThreshold && this.state.gridWindowStart > 0) {
-                        this._prependGridChunk(grid, this.state.items, currentColumns);
-                    }
-                }
-
-                const currentRow = Math.floor(itemIndex / currentColumns);
-                this._syncGridWindow(grid, this.state.items, currentColumns, currentRow);
             }
         }
     }
@@ -3081,22 +4093,33 @@ class LibraryPage extends Page {
      * @param {number}      currentRow   - Current row index (0-based) in items[]
      * =========================================================================
      */
-    _syncGridWindow(grid, items, columns, currentRow) {
+    _syncGridWindow(grid, items, columns, currentRow, targetItemIndex = null) {
         if (!grid || !items || !columns) return;
+
+        /* -----------------------------------------------------------------
+         * Real-time Alphabet Rail Synchronization:
+         * Dynamically activates the corresponding letter button as the user
+         * navigates items or scrolls through rows in unlimited library mode.
+         * Passes explicit targetItemIndex when triggered by focused D-pad item.
+         * ----------------------------------------------------------------- */
+        this._updateAlphaPickerActiveLetter(currentRow, items, columns, targetItemIndex);
 
         // -----------------------------------------------------------------------
         // WINDOW CONSTANTS
         // -----------------------------------------------------------------------
-        // ROWS_ABOVE: rows to keep rendered above the current row.
-        //   2 rows = ~2 screen-heights of backward buffer. When the user is on
-        //   row N, rows 0..(N-3) are off-screen and safe to evict.
-        //
-        // ROWS_BELOW: rows to keep rendered below the current row.
-        //   5 rows = ~1.5 screen-heights of forward buffer before the next
-        //   _appendGridChunk fires.
+        // In list view (single column), each row is only ~132px high.
+        // A ROWS_ABOVE of 2 is only ~264px (less than 1/4th of a 1080p screen!),
+        // which causes top items to be aggressively evicted while still near or on-screen.
+        // For list view:
+        //   ROWS_ABOVE: 12 rows (~1.5 screens above)
+        //   ROWS_BELOW: 15 rows (~1.8 screens below)
+        // For multi-column grids (each card ~300-400px high):
+        //   ROWS_ABOVE: 2 rows (~2 screen-heights of backward buffer)
+        //   ROWS_BELOW: 5 rows (~1.5 screen-heights of forward buffer)
         // -----------------------------------------------------------------------
-        const ROWS_ABOVE = 2;
-        const ROWS_BELOW = 5;
+        const isListView = this.state.viewMode === 'list';
+        const ROWS_ABOVE = isListView ? 12 : 2;
+        const ROWS_BELOW = isListView ? 15 : 5;
 
         // Ideal first/last item index in the window
         const idealStart = Math.max(0, (currentRow - ROWS_ABOVE) * columns);
@@ -3127,6 +4150,7 @@ class LibraryPage extends Page {
                 if (spacer) {
                     spacer.style.height = `${Math.floor(this.state.gridWindowStart / columns) * rowHeight}px`;
                 }
+                focusManager.invalidateCache('library-grid');
             }
         }
 
@@ -3146,6 +4170,7 @@ class LibraryPage extends Page {
                 allCards[i].remove();
             }
             this.state.gridWindowEnd -= count;
+            focusManager.invalidateCache('library-grid');
         }
     }
 
@@ -3421,15 +4446,28 @@ class LibraryPage extends Page {
             });
         });
 
-        // Update Alpha Picker
+        // Update Alpha Picker for rows layout
         if (rows.length > 0) {
-            this.registerFocusSection('alpha-picker', this.$('#alpha-picker'), {
-                orientation: 'horizontal',
-                leaveUp: this._isSubView() ? null : 'library-controls',
-                leaveDown: 'row-0',
-                leaveLeft: 'sidebar',
-                enterTo: 'active-element'
-            });
+            const isRightPosRows = layoutManager.getAlphaPickerPosition() === 'right';
+            if (isRightPosRows) {
+                this.registerFocusSection('alpha-picker', this.$('#alpha-picker'), {
+                    orientation: 'vertical',
+                    leaveUp: this._isSubView() ? null : 'library-controls',
+                    leaveDown: null,
+                    leaveLeft: 'row-0',
+                    leaveRight: null,
+                    enterTo: 'active-element'
+                });
+            } else {
+                this.registerFocusSection('alpha-picker', this.$('#alpha-picker'), {
+                    orientation: 'horizontal',
+                    leaveUp: this._isSubView() ? null : 'library-controls',
+                    leaveDown: 'row-0',
+                    leaveLeft: 'sidebar',
+                    leaveRight: null,
+                    enterTo: 'active-element'
+                });
+            }
 
             // Update library-controls to point to first row
             this.registerFocusSection('library-controls', this.$('#library-controls'), {
@@ -3437,6 +4475,7 @@ class LibraryPage extends Page {
                 leaveUp: this._isSubView() ? null : 'library-tabs',
                 leaveDown: 'row-0', // Direct to first row for Genres view
                 leaveLeft: 'sidebar',
+                leaveRight: isRightPosRows ? 'alpha-picker' : null,
                 selector: 'button'
             });
 
@@ -3569,6 +4608,9 @@ class LibraryPage extends Page {
         this.state.startIndex = 0; // Reset pagination
         this.state.nameStartsWith = null; // Reset Alpha Picker
 
+        // Rehydrate view mode and grid column preferences for the selected tab
+        this._loadPersistedViewMode();
+
         // CRITICAL: Clear sub-view parameters when switching top-level tabs
         // This prevents _isSubView() from erroneously hiding tabs or filtering results
         const subViewParams = ['genreId', 'studioId', 'personId', 'tagName', 'year'];
@@ -3606,8 +4648,20 @@ class LibraryPage extends Page {
 
         const char = btn.dataset.char;
 
+        /* -----------------------------------------------------------------
+         * UNLIMITED SCROLL MODE QUICK-JUMP
+         * In unlimited mode, instead of wiping out the library to request only
+         * items starting with the selected letter, we scroll smoothly to that
+         * letter's section in the full library.
+         * ----------------------------------------------------------------- */
+        const isScrollMode = this.state.isInfinite && storage.getItem('pref:alphaPickerScrollMode') !== 'false';
+        if (isScrollMode) {
+            await this._scrollToLetter(char);
+            return;
+        }
+
         if (this.state.nameStartsWith === char) {
-            // Toggle off? Maybe not standard behavior, but useful
+            // Toggle off
             this.state.nameStartsWith = null;
         } else {
             this.state.nameStartsWith = char; // Store literal char ('#', 'A', etc.)
@@ -3615,22 +4669,616 @@ class LibraryPage extends Page {
 
         this.state.startIndex = 0;
 
+        // Keep URL parameters in sync so pagination and state preserve the selected letter
+        if (this.params.page) {
+            delete this.params.page;
+        }
+        if (this.state.nameStartsWith) {
+            this.params.char = this.state.nameStartsWith;
+        } else {
+            delete this.params.char;
+        }
+
         // Update UI
         this._renderAlphaPicker();
 
         // Restore focus to the selected char
-        // We need to wait for render, then find the button for 'char'
         const newBtn = this.$(`.alpha-btn[data-char="${char}"]`);
         if (newBtn) {
-            // Use FocusManager to properly set active element
             focusManager.focusElement(newBtn);
         }
 
         await this._loadItems();
 
-        // Scroll to top of content (important when changing filters)
+        // Scroll to top of content
         const scrollContainer = this.$('#library-scroll-container');
         if (scrollContainer) scrollContainer.scrollTop = 0;
+
+        // Automatically transfer focus to the first card matching this letter
+        const firstCard = this.$('#library-grid .media-card');
+        if (firstCard) {
+            focusManager.focusElement(firstCard);
+        }
+    }
+
+    /**
+     * =========================================================================
+     * SCROLL TO LETTER (Alphabet Quick-Jump in Unlimited Scroll Mode)
+     * =========================================================================
+     * In unlimited mode, smoothly glides the viewport directly to the exact
+     * letter section using mathematically precise server offsets and real DOM
+     * geometry. Retargets seamlessly if the user rapidly scrubs across letters,
+     *
+     * Eliminates "letter above" issues by aligning to the exact DOM card rect
+     * and guarantees no dropped clicks via sequence tokens.
+     *
+     * @param {string} char - Target character ('#' or 'A'-'Z')
+     * =========================================================================
+     */
+    async _scrollToLetter(char) {
+        if (!char || this._isDestroyed) return;
+
+        // Sequence token to handle rapid user clicks without dropping or racing
+        const currentSeq = ++this._scrollLetterSeq;
+
+        // Visual feedback on the alphabet picker buttons immediately
+        this.state.scrollAlphaChar = char;
+        const allBtns = this.$('#alpha-picker')?.querySelectorAll('.alpha-btn');
+        allBtns?.forEach((b) => b.classList.toggle('active', b.dataset.char === char));
+
+        // Set target scroll letter lock so intermediate scroll events don't flicker the highlight
+        this._targetScrollLetter = char;
+
+        const grid = this.$('#library-grid');
+        const scrollContainer = this.$('#library-scroll-container') || this.el?.querySelector('.page-content');
+        if (!grid || !scrollContainer) return;
+
+        const columns = this.state._gridColumns || 7;
+        const isListView = this.state.viewMode === 'list';
+        const ROWS_ABOVE = isListView ? 12 : 3;
+        const ROWS_BELOW = isListView ? 15 : 6;
+
+        // ---------------------------------------------------------------------
+        // STEP 1: Determine exact 0-based target index in the full library
+        // ---------------------------------------------------------------------
+        let targetIndex = -1;
+
+        if (char === '#') {
+            targetIndex = 0;
+        } else if (this._letterOffsetCache && this._letterOffsetCache.has(char)) {
+            targetIndex = this._letterOffsetCache.get(char);
+        } else if (this._lastFetchContext?.params) {
+            try {
+                this._showInfiniteLoading(true);
+
+                const countParams = {
+                    ...this._lastFetchContext.params,
+                    SortBy: 'SortName',
+                    SortOrder: 'Ascending',
+                    NameLessThan: char,
+                    Limit: 0,
+                    EnableTotalRecordCount: true
+                };
+                delete countParams.StartIndex;
+                delete countParams.NameStartsWith;
+
+                let countRes = null;
+                if (this._lastFetchContext.viewType === 'AlbumArtists') {
+                    countRes = await api.getAlbumArtists(countParams);
+                } else if (this._lastFetchContext.viewType === 'Artists') {
+                    countRes = await api.getMusicArtists(countParams);
+                } else {
+                    countRes = await api.getItems(countParams);
+                }
+
+                if (countRes && typeof countRes.TotalRecordCount === 'number') {
+                    targetIndex = countRes.TotalRecordCount;
+                    if (!this._letterOffsetCache) this._letterOffsetCache = new Map();
+                    this._letterOffsetCache.set(char, targetIndex);
+                }
+            } catch (err) {
+                log.warn('Failed to query letter offset from server:', err);
+            } finally {
+                this._showInfiniteLoading(false);
+            }
+        }
+
+        // Check if a newer letter click arrived while we were querying the server
+        if (currentSeq !== this._scrollLetterSeq || this._isDestroyed) return;
+
+        // Fallback: If server offset query failed, scan currently loaded items using normalized characters
+        if (targetIndex < 0) {
+            targetIndex = this._findTargetCharIndex(this.state.items, char);
+        }
+
+        // ---------------------------------------------------------------------
+        // STEP 2: Fetch missing items up to targetIndex + healthy forward buffer
+        // ---------------------------------------------------------------------
+        // When jumping to a letter, ensure we have at least 6-8 full rows loaded
+        // AFTER the target card so the viewport below it is fully populated with media.
+        const forwardBuffer = (ROWS_BELOW + 4) * columns;
+        const minItemsNeeded = targetIndex + forwardBuffer;
+
+        if (
+            targetIndex >= 0 &&
+            this.state.items.length < minItemsNeeded &&
+            this.state.items.length < (this.state.totalRecordCount || 0)
+        ) {
+            this._showInfiniteLoading(true);
+            try {
+                const batchSize = this.state.limit || 100;
+                const needed = Math.max(batchSize, minItemsNeeded - this.state.items.length + batchSize);
+                const fetchedItems = await this._fetchItemsBatch(this.state.items.length, needed);
+
+                // Check again for newer letter request before modifying state
+                if (currentSeq !== this._scrollLetterSeq || this._isDestroyed) return;
+
+                if (fetchedItems && fetchedItems.length > 0) {
+                    this.state.items = this.state.items.concat(fetchedItems);
+                    const collectionType = this.state.libraryInfo?.CollectionType;
+                    if ((collectionType === 'playlists' || collectionType === 'boxsets') && fetchedItems.length > 0) {
+                        await this._enrichCollectionItems(fetchedItems, collectionType);
+                    }
+                }
+
+                const countIndicator = this.$('#count-indicator');
+                if (countIndicator) {
+                    const total = this.state.totalRecordCount || this.state.items.length;
+                    countIndicator.textContent = i18n.t('ListPaging', [1, this.state.items.length, total]);
+                }
+            } catch (err) {
+                log.warn('Error fetching items for letter jump:', err);
+            } finally {
+                this._showInfiniteLoading(false);
+            }
+        }
+
+        // Final cancellation check before DOM reconstruction
+        if (currentSeq !== this._scrollLetterSeq || this._isDestroyed) return;
+
+        // Clamp targetIndex within loaded bounds
+        if (targetIndex < 0 || targetIndex >= this.state.items.length) {
+            targetIndex = Math.max(0, Math.min(targetIndex, this.state.items.length - 1));
+        }
+
+        // ---------------------------------------------------------------------
+        // STEP 3: Reconstruct virtual DOM window around target row
+        // ---------------------------------------------------------------------
+        const targetRow = Math.floor(targetIndex / columns);
+        const idealStart = Math.max(0, (targetRow - ROWS_ABOVE) * columns);
+        const idealEnd = Math.min(this.state.items.length, (targetRow + ROWS_BELOW + 1) * columns);
+        const rowHeight = this.state.gridCardRowHeight || this._measureGridRowHeight(grid, columns) || 350;
+
+        if (this.state.gridWindowStart !== idealStart || this.state.gridWindowEnd < idealEnd) {
+            const chunkItems = this.state.items.slice(idealStart, idealEnd);
+            const spacerHeight = Math.floor(idealStart / columns) * rowHeight;
+
+            grid.innerHTML = `<div id="grid-top-spacer" style="height:${spacerHeight}px;width:100%;flex:0 0 100%"></div>${this._buildGridChunkHtml(chunkItems)}`;
+
+            this.state.gridWindowStart = idealStart;
+            this.state.gridWindowEnd = idealEnd;
+            this._hookGridCards(grid.querySelectorAll('.media-card'));
+            focusManager.invalidateCache('library-grid');
+        }
+
+        // ---------------------------------------------------------------------
+        // STEP 4: Smoothly glide viewport to target position using exact DOM coordinates
+        // ---------------------------------------------------------------------
+        let targetScrollTop = 0;
+
+        // Ensure bottom scroll clearance is active so any row can scroll fully to the top
+        if (this.state.isInfinite && grid.style.paddingBottom !== 'calc(100vh - 250px)') {
+            grid.style.paddingBottom = 'calc(100vh - 250px)';
+        }
+
+        // Query active cards rendered in the virtualized grid viewport
+        const allCards = grid.querySelectorAll('.media-card');
+        const cardDomIndex = targetIndex - this.state.gridWindowStart;
+
+        // Eagerly force-load posters for visible and upcoming cards (target row + forward buffer)
+        // so media appears instantly without waiting on IntersectionObserver
+        const visibleEnd = Math.min(allCards.length, Math.max(0, cardDomIndex) + columns * 4);
+        for (let i = Math.max(0, cardDomIndex); i < visibleEnd; i++) {
+            const img = allCards[i].querySelector('img[data-src]');
+            if (img) lazyLoader.forceLoad(img);
+        }
+        lazyLoader.observe(grid);
+
+        // Resolve target card either by computed index offset or unique item identifier
+        let targetCard =
+            cardDomIndex >= 0 && cardDomIndex < allCards.length
+                ? allCards[cardDomIndex]
+                : grid.querySelector(`.media-card[data-item-id="${this.state.items[targetIndex]?.Id}"]`);
+
+        // Millimeter-precise alignment: anchor the target card's row firmly at the top of the viewport
+        if (targetCard) {
+            const cardRect = targetCard.getBoundingClientRect();
+            const containerRect = scrollContainer.getBoundingClientRect();
+            // Position card top 20px below container top (clean margin for poster glow/shadow)
+            targetScrollTop = Math.max(
+                0,
+                Math.round(scrollContainer.scrollTop + (cardRect.top - containerRect.top) - 20)
+            );
+        } else {
+            // Robust fallback: traverse parent hierarchy to calculate exact grid top relative to scrollContainer
+            let gridTop = 0;
+            let el = grid;
+            while (el && el !== scrollContainer) {
+                gridTop += el.offsetTop || 0;
+                el = el.offsetParent;
+            }
+            targetScrollTop = Math.max(0, Math.round(gridTop + targetRow * rowHeight - 20));
+            if (allCards.length > 0) {
+                targetCard = allCards[0];
+            }
+        }
+
+        // Cache last known positions for spatial focus tracking
+        this._lastGridScrollTop = targetScrollTop;
+        this._lastFocusItemIndex = targetIndex;
+
+        // Execute smooth fluid scroll animation to target offset
+        scrollController.smoothScrollTo(scrollContainer, targetScrollTop, 250, 'vertical');
+
+        /* -----------------------------------------------------------------
+         * Direct Focus Hand-off:
+         * Immediately focuses the target card with skipScroll: true so the
+         * fluid scroll animation glides seamlessly while giving the
+         * user immediate D-pad and action control over the item.
+         * ----------------------------------------------------------------- */
+        if (targetCard) {
+            focusManager.focusElement(targetCard, { skipScroll: true });
+        }
+    }
+
+    /**
+     * =========================================================================
+     * UPDATE ALPHA PICKER ACTIVE LETTER ON SCROLL
+     * =========================================================================
+     * Dynamically synchronizes the active highlighted letter button on the
+     * alphabet selector rail as the user scrolls through the full library in
+     * unlimited mode for real-time positional scrubbing.
+     *
+     * @param {number} currentRow - 0-based row index currently at viewport top
+     * @param {Array} items - Full items array
+     * @param {number} columns - Grid column count
+     * =========================================================================
+     */
+    _updateAlphaPickerActiveLetter(currentRow, items, columns, targetItemIndex = null) {
+        // Only active in unlimited mode with alpha scroll mode enabled
+        const isScrollMode = this.state.isInfinite && storage.getItem('pref:alphaPickerScrollMode') !== 'false';
+        if (!isScrollMode || !items || !items.length) return;
+
+        // If a programmatic smooth scroll jump is currently in flight, keep the targeted letter locked
+        if (scrollController.isVerticalAnimating && this._targetScrollLetter) {
+            return;
+        }
+        this._targetScrollLetter = null;
+
+        // Resolve item: prefer explicit item index if provided (e.g. active D-pad focus cursor)
+        let item = null;
+        if (targetItemIndex !== null && targetItemIndex >= 0 && targetItemIndex < items.length) {
+            item = items[targetItemIndex];
+        } else {
+            // Check if user is navigating with D-pad and currently has a card focused
+            const focused = focusManager.getFocused() || this._gridFocusElement;
+            const grid = this.$('#library-grid');
+            if (
+                !this._isManualScroll &&
+                focused &&
+                grid &&
+                grid.contains(focused) &&
+                focused.classList.contains('media-card')
+            ) {
+                // Determine item from focused card
+                if (
+                    this._lastFocusItemIndex !== null &&
+                    this._lastFocusItemIndex >= 0 &&
+                    this._lastFocusItemIndex < items.length
+                ) {
+                    item = items[this._lastFocusItemIndex];
+                } else {
+                    const itemId = focused.dataset?.itemId;
+                    if (itemId) {
+                        item = items.find((it) => it.Id === itemId);
+                    }
+                }
+            }
+
+            // Fallback for manual scrolling (mouse wheel, magic remote, touch fling, or focus outside grid):
+            // resolve first item on or near current visible row
+            if (!item) {
+                const itemIndex = Math.min(items.length - 1, Math.max(0, currentRow * columns));
+                item = items[itemIndex];
+            }
+        }
+        if (!item) return;
+
+        // Extract normalized letter
+        let char = this._getItemSortChar(item);
+        if (!char || char < 'A' || char > 'Z') {
+            char = '#';
+        }
+
+        // Only update DOM when the active letter actually changes
+        if (this.state.scrollAlphaChar !== char) {
+            this.state.scrollAlphaChar = char;
+            const picker = this.$('#alpha-picker');
+            if (picker) {
+                const allBtns = picker.querySelectorAll('.alpha-btn');
+                allBtns.forEach((b) => b.classList.toggle('active', b.dataset.char === char));
+            }
+        }
+    }
+
+    /**
+     * =========================================================================
+     * GET ITEM SORT CHAR
+     * =========================================================================
+     * Extracts the normalized first comparison character from an item for alphabet
+     * rail indexing and quick-jump positioning.
+     *
+     * Jellyfin Server Collation Rules:
+     * - Uses server-calculated SortName first (which preserves special characters
+     *   such as brackets, parentheses, and punctuation at the start of titles).
+     * - If SortName was not returned, strips common leading articles ("The ", "A ", "An ")
+     *   from Name as a client-side fallback.
+     * - Leading non-alphabetic characters (e.g. parentheses "(T)Raumschiff", brackets
+     *   "[REC]", punctuation, numbers) are NOT stripped: in Jellyfin's ascending collation
+     *   they sort before 'A' and belong to the '#' bucket.
+     *
+     * @param {Object} item - Media item object
+     * @returns {string} Normalized uppercase character ('A'-'Z' or '#')
+     * =========================================================================
+     */
+    _getItemSortChar(item) {
+        if (!item) return '';
+
+        // Prioritize server-calculated SortName, falling back to Name
+        let name = (item.SortName || item.Name || '').trim();
+
+        // If SortName was not provided by the API, strip common English leading articles
+        if (!item.SortName && name) {
+            const match = name.match(/^(the|a|an)\s+/i);
+            if (match) {
+                name = name.slice(match[0].length).trim();
+            }
+        }
+
+        if (!name) return '#';
+
+        // Extract first character and strip combining diacritics/accents (e.g., 'É' -> 'E')
+        const firstChar = name
+            .charAt(0)
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toUpperCase();
+
+        // Any non-alphabetic character (numbers, brackets, punctuation, symbols) belongs to '#'
+        if (firstChar < 'A' || firstChar > 'Z') {
+            return '#';
+        }
+
+        return firstChar;
+    }
+
+    /**
+     * =========================================================================
+     * FIND TARGET CHAR INDEX
+     * =========================================================================
+     * Fallback scanner that locates the first item matching or following the
+     * target letter in the currently loaded items array.
+     *
+     * @param {Array} items - Array of loaded library items
+     * @param {string} char - Target character ('#' or 'A'-'Z')
+     * @returns {number} 0-based index in items, or -1 if not found
+     * =========================================================================
+     */
+    _findTargetCharIndex(items, char) {
+        if (!items || !items.length) return -1;
+
+        if (char === '#') {
+            // Locate the first item categorized under '#' (numbers, symbols, brackets)
+            const idx = items.findIndex((item) => {
+                const firstChar = this._getItemSortChar(item);
+                return firstChar === '#' || (firstChar && (firstChar < 'A' || firstChar > 'Z'));
+            });
+            return idx !== -1 ? idx : 0;
+        }
+
+        const targetChar = char.toUpperCase();
+
+        // 1. Direct match: first item starting with this letter
+        const exactIdx = items.findIndex((item) => {
+            return this._getItemSortChar(item) === targetChar;
+        });
+        if (exactIdx !== -1) return exactIdx;
+
+        // 2. Nearest successor match: first item starting with a letter greater than target
+        const nextIdx = items.findIndex((item) => {
+            const firstChar = this._getItemSortChar(item);
+            return firstChar >= 'A' && firstChar <= 'Z' && firstChar > targetChar;
+        });
+
+        return nextIdx;
+    }
+
+    /**
+     * =========================================================================
+     * INFINITE SCROLL BATCH FETCHER
+     * =========================================================================
+     * Requests the subsequent slice of items from the server using the identical
+     * active query parameters (filters, sorting, parent collection) as the initial load.
+     * @param {number} startIndex - Starting offset
+     * @param {number} limit - Number of items to fetch
+     * @returns {Promise<Array>} Array of item objects
+     * =========================================================================
+     */
+    async _fetchItemsBatch(startIndex, limit) {
+        if (!this._lastFetchContext) return [];
+        const ctx = this._lastFetchContext;
+
+        if (ctx.isSeerr) {
+            const seerrPage = Math.floor(startIndex / 100) + 1;
+            let items = [];
+            try {
+                if (ctx.seerrType === 'keyword' || ctx.seerrType === 'tag' || ctx.keywordId) {
+                    items =
+                        ctx.mediaType === 'tv'
+                            ? await seerr.discoverTv(seerrPage, {
+                                  keywords: ctx.keywordId,
+                                  genre: ctx.genreId,
+                                  language: ctx.language,
+                                  certification: ctx.certification,
+                                  sortBy: ctx.seerrSortBy
+                              })
+                            : await seerr.discoverMovies(seerrPage, {
+                                  keywords: ctx.keywordId,
+                                  genre: ctx.genreId,
+                                  language: ctx.language,
+                                  certification: ctx.certification,
+                                  sortBy: ctx.seerrSortBy
+                              });
+                } else if (ctx.genreId || ctx.language || ctx.certification || ctx.seerrType === 'genre') {
+                    items =
+                        ctx.mediaType === 'tv'
+                            ? await seerr.discoverTv(seerrPage, {
+                                  genre: ctx.genreId,
+                                  language: ctx.language,
+                                  certification: ctx.certification,
+                                  sortBy: ctx.seerrSortBy
+                              })
+                            : await seerr.discoverMovies(seerrPage, {
+                                  genre: ctx.genreId,
+                                  language: ctx.language,
+                                  certification: ctx.certification,
+                                  sortBy: ctx.seerrSortBy
+                              });
+                } else if (ctx.seerrType === 'studio' || ctx.studioId) {
+                    items = await seerr.moviesByStudio(ctx.studioId, seerrPage);
+                } else if (ctx.seerrType === 'network' || ctx.networkId) {
+                    items = await seerr.tvByNetwork(ctx.networkId, seerrPage);
+                } else {
+                    items =
+                        ctx.mediaType === 'tv'
+                            ? await seerr.discoverTv(seerrPage, {
+                                  language: ctx.language,
+                                  certification: ctx.certification,
+                                  sortBy: ctx.seerrSortBy
+                              })
+                            : await seerr.discoverMovies(seerrPage, {
+                                  language: ctx.language,
+                                  certification: ctx.certification,
+                                  sortBy: ctx.seerrSortBy
+                              });
+                }
+            } catch (err) {
+                log.warn('Failed to load Seerr batch', err);
+                items = [];
+            }
+            return items || [];
+        }
+
+        const batchParams = {
+            ...ctx.params,
+            StartIndex: startIndex,
+            Limit: limit,
+            EnableTotalRecordCount: true
+        };
+
+        let result = null;
+        try {
+            if (ctx.viewType === 'AlbumArtists') {
+                result = await api.getAlbumArtists(batchParams);
+            } else if (ctx.viewType === 'Artists') {
+                result = await api.getMusicArtists(batchParams);
+            } else {
+                result = await api.getItems(batchParams);
+            }
+
+            if (result && typeof result.TotalRecordCount === 'number' && result.TotalRecordCount > 0) {
+                this.state.totalRecordCount = result.TotalRecordCount;
+            }
+        } catch (err) {
+            log.warn('Failed to load next items batch', err);
+            return [];
+        }
+
+        return result?.Items || [];
+    }
+
+    /**
+     * =========================================================================
+     * LOAD NEXT INFINITE SCROLL BATCH
+     * =========================================================================
+     * Triggered proactively when the user scrolls near the end of the currently
+     * loaded media items. Streams the next chunk, enriches metadata if needed,
+     * appends the new DOM cards, and invalidates focus cache for seamless traversal.
+     * =========================================================================
+     */
+    async _loadNextInfiniteBatch() {
+        if (this._isLoadingMore || this._isDestroyed) return;
+        if (!this.state.isInfinite) return;
+        if (this.state._hasMoreInfinite === false) return;
+        if (this.state.totalRecordCount > 0 && this.state.items.length >= this.state.totalRecordCount) return;
+
+        this._isLoadingMore = true;
+        this._showInfiniteLoading(true);
+
+        try {
+            const startIndex = this.state.items.length;
+            const batchSize = this.state.limit || 100;
+            const nextItems = await this._fetchItemsBatch(startIndex, batchSize);
+
+            if (!this._isDestroyed) {
+                // If fewer items than batchSize returned, we have reached the end of the collection
+                if (!nextItems || nextItems.length < batchSize) {
+                    this.state._hasMoreInfinite = false;
+                }
+
+                if (nextItems && nextItems.length > 0) {
+                    this.state.items = this.state.items.concat(nextItems);
+
+                    const collectionType = this.state.libraryInfo?.CollectionType;
+                    if ((collectionType === 'playlists' || collectionType === 'boxsets') && nextItems.length > 0) {
+                        await this._enrichCollectionItems(nextItems, collectionType);
+                    }
+
+                    const grid = this.$('#library-grid');
+                    if (grid) {
+                        const columns = this.state._gridColumns || 7;
+                        this._appendGridChunk(grid, this.state.items, columns);
+                        focusManager.invalidateCache('library-grid');
+                    }
+
+                    const countIndicator = this.$('#count-indicator');
+                    if (countIndicator) {
+                        const total = this.state.totalRecordCount || this.state.items.length;
+                        countIndicator.textContent = i18n.t('ListPaging', [1, this.state.items.length, total]);
+                    }
+                }
+            }
+        } catch (err) {
+            log.warn('Error loading next infinite batch', err);
+        } finally {
+            this._isLoadingMore = false;
+            this._showInfiniteLoading(false);
+        }
+    }
+
+    /**
+     * Toggles visibility of the subtle activity indicator at the bottom of the grid.
+     * @param {boolean} show
+     */
+    _showInfiniteLoading(show) {
+        const loader = this.$('#infinite-scroll-loader');
+        if (loader) {
+            if (show) {
+                loader.classList.remove('hidden');
+            } else {
+                loader.classList.add('hidden');
+            }
+        }
     }
 
     _handleGridClick(e, cardElement) {
@@ -3668,14 +5316,20 @@ class LibraryPage extends Page {
         // Special handling for PhotoAlbums: navigate to standard LibraryPage
         if (card.dataset.type === 'PhotoAlbum') {
             log.info('Navigating into PhotoAlbum:', itemId);
-            router.navigate(`/library/${itemId}`);
+            router.navigate(`/library/${itemId}?collectionType=photos`);
             return;
         }
 
         // Special handling for Folders: navigate to sub-library
         if (card.dataset.type === 'Folder' || card.dataset.type === 'CollectionFolder') {
             log.info('Navigating into folder:', itemId);
-            router.navigate(`/library/${itemId}`);
+            const parentColType = this.state.libraryInfo?.CollectionType || this.params.collectionType || '';
+            const isGame = this.state.isGameLibrary;
+            const q = new URLSearchParams();
+            if (parentColType) q.set('collectionType', parentColType);
+            if (isGame) q.set('isGame', 'true');
+            const qStr = q.toString();
+            router.navigate(`/library/${itemId}${qStr ? `?${qStr}` : ''}`);
             return;
         }
 
@@ -3697,20 +5351,35 @@ class LibraryPage extends Page {
     }
 
     async _handlePageChange(direction) {
-        const newIndex = this.state.startIndex + direction * this.state.limit;
+        if (this.state.isInfinite) return;
+        // ====================================================================
+        // RELIABLE PAGE-BASED PAGINATION
+        // ====================================================================
+        // Derive targetPage directly from the current page number rather than
+        // raw byte/item offsets, which eliminates rounding mismatches caused by
+        // dynamic column limit alignment (e.g., 100 aligned to 105).
+        // ====================================================================
+        const isSeerr = this.state.libraryId === 'seerr';
+        const pageLimit = isSeerr ? 100 : this.state.limit || 100;
+        const currentPage = Math.floor(this.state.startIndex / pageLimit) + 1;
+        const totalPages = Math.ceil(this.state.totalRecordCount / pageLimit) || 1;
+        const targetPage = currentPage + direction;
 
-        // Bounds check
-        if (newIndex < 0 || newIndex >= this.state.totalRecordCount) return;
+        // Bounds check: ensure target page stays within valid [1, totalPages] range
+        if (targetPage < 1 || targetPage > totalPages) return;
 
-        if (this.state.libraryId === 'seerr') {
-            const targetPage = Math.floor(newIndex / 100) + 1;
+        if (isSeerr) {
             const currentParams = new URLSearchParams();
             if (this.params.seerrType) currentParams.set('seerrType', this.params.seerrType);
             if (this.params.mediaType) currentParams.set('mediaType', this.params.mediaType);
-            if (this.params.genreId || this.params.genre) currentParams.set('genreId', this.params.genreId || this.params.genre);
-            if (this.params.studioId || this.params.studio) currentParams.set('studioId', this.params.studioId || this.params.studio);
-            if (this.params.networkId || this.params.network) currentParams.set('networkId', this.params.networkId || this.params.network);
-            if (this.params.keywordId || this.params.keywords || this.params.keyword) currentParams.set('keywordId', this.params.keywordId || this.params.keywords || this.params.keyword);
+            if (this.params.genreId || this.params.genre)
+                currentParams.set('genreId', this.params.genreId || this.params.genre);
+            if (this.params.studioId || this.params.studio)
+                currentParams.set('studioId', this.params.studioId || this.params.studio);
+            if (this.params.networkId || this.params.network)
+                currentParams.set('networkId', this.params.networkId || this.params.network);
+            if (this.params.keywordId || this.params.keywords || this.params.keyword)
+                currentParams.set('keywordId', this.params.keywordId || this.params.keywords || this.params.keyword);
             if (this.params.name) currentParams.set('name', this.params.name);
             currentParams.set('page', targetPage);
 
@@ -3718,15 +5387,33 @@ class LibraryPage extends Page {
             return;
         }
 
-        const targetPage = Math.floor(newIndex / this.state.limit) + 1;
+        // ====================================================================
+        // PRESERVE ROUTE QUERY PARAMETERS ACROSS PAGE CHANGES
+        // ====================================================================
+        // Start from existing route parameters so deep links (e.g. season details
+        // "See More" with parentId, includeItemTypes, viewModeIndex), custom search,
+        // or favorite subsets don't lose their context when the user navigates pages.
+        // ====================================================================
         const currentParams = new URLSearchParams();
-        if (this.params.genreId) currentParams.set('genreId', this.params.genreId);
-        if (this.params.studioId) currentParams.set('studioId', this.params.studioId);
-        if (this.params.networkId) currentParams.set('networkId', this.params.networkId);
-        if (this.params.year) currentParams.set('year', this.params.year);
-        if (this.params.personId) currentParams.set('personId', this.params.personId);
-        if (this.params.tagName) currentParams.set('tagName', this.params.tagName);
-        if (this.params.name) currentParams.set('name', this.params.name);
+
+        // Copy over all existing parameters from this.params except route path 'id' and 'page'
+        if (this.params && typeof this.params === 'object') {
+            for (const [key, value] of Object.entries(this.params)) {
+                if (key !== 'id' && key !== 'page' && value !== undefined && value !== null && value !== '') {
+                    currentParams.set(key, value);
+                }
+            }
+        }
+
+        // Active alphabet picker / character filter override
+        const selectedChar = this.state.nameStartsWith || this.params.char;
+        if (selectedChar) {
+            currentParams.set('char', selectedChar);
+        } else {
+            currentParams.delete('char');
+        }
+
+        // Apply updated target page
         currentParams.set('page', targetPage);
 
         router.navigate(`/library/${this.state.libraryId}?${currentParams.toString()}`);
@@ -3837,7 +5524,7 @@ class LibraryPage extends Page {
 
         if (isSeerr) {
             const rawMediaType = this.params.mediaType || (this.params.seerrType === 'network' ? 'tv' : 'movie');
-            const isTv = (rawMediaType === 'tv' || rawMediaType === 'series' || rawMediaType === 'tvshows');
+            const isTv = rawMediaType === 'tv' || rawMediaType === 'series' || rawMediaType === 'tvshows';
 
             const sortOptions = isTv
                 ? [
@@ -3944,17 +5631,54 @@ class LibraryPage extends Page {
         this._prevFocus = focusManager.getFocused();
         this._prevSection = focusManager.getActiveSection();
 
-        const current = this.state.viewMode;
+        // Check if current tab defaults to landscape layout (Episodes, Home Videos, Photos, etc.)
+        const isLandscape =
+            this.state.viewType === 'Episodes' ||
+            this.state.viewType === 'Upcoming' ||
+            this.state.viewType === 'Networks' ||
+            this.state.libraryInfo?.CollectionType === 'musicvideos' ||
+            this.state.libraryInfo?.CollectionType === 'homevideos' ||
+            this.state.libraryInfo?.CollectionType === 'photos';
+
+        const isSeerr = this.state.libraryId === 'seerr' || this.state.libraryInfo?.CollectionType === 'seerr';
+
+        // Pre-select the currently active view mode
+        const current = this.state.viewMode || (isLandscape ? 'thumb' : 'poster');
         let tempMode = current;
         let tempGridMode = this.state.gridMode;
-        let tempColumns = this.state.gridColumns;
 
+        // Grid column options available for each view mode layout
         const colOptionsMap = {
             poster: [4, 5, 6, 7],
-            'small-poster': [6, 8, 10, 12],
+            // Small poster density: 8, 9 (default), 10, or 12 cards per row
+            'small-poster': [8, 9, 10, 12],
             thumb: [3, 4, 5, 6],
             banner: [2, 3, 4, 5]
         };
+
+        // Determine initial column count: check saved preference for this specific mode first,
+        // otherwise default to standard column count for this mode.
+        const defaultInitialCols = this._getDefaultColumnsForMode(tempMode);
+        const isTabSpecific = Boolean(this.state.viewType && this.state.viewType !== 'Items');
+        const initialTabColsKey = isTabSpecific ? `pref:library:gridColumns:${this.state.libraryId}:${this.state.viewType}:${tempMode}` : null;
+        const initialColsKey = isSeerr
+            ? `pref:seerr:gridColumns:${tempMode}`
+            : `pref:library:gridColumns:${this.state.libraryId}:${tempMode}`;
+        const initialSavedCols = parseInt((initialTabColsKey && storage.getItem(initialTabColsKey)) || storage.getItem(initialColsKey), 10);
+        const validInitialOpts = colOptionsMap[tempMode] || [];
+
+        let tempColumns;
+        if (validInitialOpts.includes(initialSavedCols)) {
+            tempColumns = initialSavedCols;
+        } else if (
+            validInitialOpts.includes(this.state.gridColumns) &&
+            this.state.viewMode === tempMode &&
+            !isLandscape
+        ) {
+            tempColumns = this.state.gridColumns;
+        } else {
+            tempColumns = defaultInitialCols;
+        }
 
         const getColumnsHtml = (mode, currentVal) => {
             const opts = colOptionsMap[mode] || [];
@@ -3968,8 +5692,6 @@ class LibraryPage extends Page {
                 )
                 .join('');
         };
-
-        const isSeerr = this.state.libraryId === 'seerr' || this.state.libraryInfo?.CollectionType === 'seerr';
 
         const allModes = [
             {
@@ -4031,9 +5753,7 @@ class LibraryPage extends Page {
         ];
 
         // For Seerr discovery, limit view mode options to Poster and Small Poster
-        const modes = isSeerr
-            ? allModes.filter((m) => m.value === 'poster' || m.value === 'small-poster')
-            : allModes;
+        const modes = isSeerr ? allModes.filter((m) => m.value === 'poster' || m.value === 'small-poster') : allModes;
 
         const updateModalUI = () => {
             const hasGridOptions = tempMode !== 'list';
@@ -4168,13 +5888,20 @@ class LibraryPage extends Page {
                     b.classList.toggle('selected', b.dataset.mode === tempMode);
                 });
 
-                // When switching modes, check if we need to load columns default value
+                // When switching layout styles, load this mode's saved column preference
+                // if valid, or fall back to the exact default column count for this mode.
                 const defaultCols = this._getDefaultColumnsForMode(tempMode);
                 const colsKey = isSeerr
                     ? `pref:seerr:gridColumns:${tempMode}`
                     : `pref:library:gridColumns:${this.state.libraryId}:${tempMode}`;
                 const savedCols = parseInt(storage.getItem(colsKey), 10);
-                tempColumns = !isNaN(savedCols) ? savedCols : defaultCols;
+                const validOpts = colOptionsMap[tempMode] || [];
+
+                if (validOpts.includes(savedCols)) {
+                    tempColumns = savedCols;
+                } else {
+                    tempColumns = defaultCols;
+                }
 
                 updateModalUI();
             });
@@ -4208,9 +5935,28 @@ class LibraryPage extends Page {
                 storage.setItem('pref:seerr:gridMode', tempGridMode);
                 storage.setItem(`pref:seerr:gridColumns:${tempMode}`, tempColumns);
             } else {
-                storage.setItem(`pref:library:viewMode:${this.state.libraryId}`, tempMode);
-                storage.setItem(`pref:library:gridMode:${this.state.libraryId}`, tempGridMode);
-                storage.setItem(`pref:library:gridColumns:${this.state.libraryId}:${tempMode}`, tempColumns);
+                /*
+                 * ============================================================
+                 * Scoped Preference Persistence
+                 * ============================================================
+                 * Store tab-specific layout preferences when on dedicated sub-tabs
+                 * (e.g. Episodes, Photos, Videos) so top-level tabs retain their mode.
+                 * ============================================================
+                 */
+                const isTabSpecific = Boolean(this.state.viewType && this.state.viewType !== 'Items');
+                const viewModeKey = isTabSpecific
+                    ? `pref:library:viewMode:${this.state.libraryId}:${this.state.viewType}`
+                    : `pref:library:viewMode:${this.state.libraryId}`;
+                const gridModeKey = isTabSpecific
+                    ? `pref:library:gridMode:${this.state.libraryId}:${this.state.viewType}`
+                    : `pref:library:gridMode:${this.state.libraryId}`;
+                const colsKey = isTabSpecific
+                    ? `pref:library:gridColumns:${this.state.libraryId}:${this.state.viewType}:${tempMode}`
+                    : `pref:library:gridColumns:${this.state.libraryId}:${tempMode}`;
+
+                storage.setItem(viewModeKey, tempMode);
+                storage.setItem(gridModeKey, tempGridMode);
+                storage.setItem(colsKey, tempColumns);
             }
 
             // Re-fetch items with the aligned limit for the new column count,
@@ -4401,7 +6147,8 @@ class LibraryPage extends Page {
 
         if (isSeerr) {
             const rawMediaType = this.params.mediaType || (this.params.seerrType === 'network' ? 'tv' : 'movie');
-            const mediaType = (rawMediaType === 'tv' || rawMediaType === 'series' || rawMediaType === 'tvshows') ? 'tv' : 'movie';
+            const mediaType =
+                rawMediaType === 'tv' || rawMediaType === 'series' || rawMediaType === 'tvshows' ? 'tv' : 'movie';
             const isTv = mediaType === 'tv';
             // Strictly show movie genres for movies, and TV genres for series
             const genreList = isTv ? TV_GENRES_FALLBACK : MOVIE_GENRES_FALLBACK;
@@ -4418,9 +6165,7 @@ class LibraryPage extends Page {
             }
 
             const currentLanguage =
-                this.state.filters.language !== undefined
-                    ? this.state.filters.language
-                    : this.params.language;
+                this.state.filters.language !== undefined ? this.state.filters.language : this.params.language;
 
             if (this.state.filters.language === undefined && currentLanguage) {
                 this.state.filters.language = currentLanguage.toString();
@@ -4483,7 +6228,14 @@ class LibraryPage extends Page {
         } catch (e) {
             log.error('Failed to fetch filters', e);
             // We can still show static filters
-            filtersData = { Genres: [], OfficialRatings: [], Tags: [], Years: [] };
+            filtersData = {
+                Genres: [],
+                OfficialRatings: [],
+                Tags: [],
+                Years: [],
+                AudioLanguages: [],
+                SubtitleLanguages: []
+            };
         }
 
         this._renderFilterModal(filtersData);
@@ -4500,8 +6252,42 @@ class LibraryPage extends Page {
         const isSeerr = this.state.libraryId === 'seerr' || this.state.libraryInfo?.CollectionType === 'seerr';
         const isMusic = this.state.libraryInfo?.CollectionType === 'music';
 
+        // ------------------------------------------------------------------
+        // Parse Genres: Supports both plain string arrays and modern Name/Id objects
+        // In all cases, map value to the Genre Name string for library queries
+        // ------------------------------------------------------------------
         const genreItems = Array.isArray(data?.Genres)
-            ? data.Genres.map((g) => (typeof g === 'object' ? g : { label: g, value: g, type: 'multi' }))
+            ? data.Genres.map((g) => {
+                  if (typeof g === 'object' && g !== null) {
+                      // Extract name string, accommodating both PascalCase and camelCase keys
+                      const name = g.Name || g.name || g.label || g.value || '';
+                      return {
+                          label: name,
+                          value: name,
+                          type: g.type || 'multi'
+                      };
+                  }
+                  return { label: g, value: g, type: 'multi' };
+              }).filter((item) => Boolean(item.label && item.value))
+            : [];
+
+        // ------------------------------------------------------------------
+        // Parse Jellyfin 12+ Audio & Subtitle Languages
+        // ------------------------------------------------------------------
+        const audioLanguageItems = Array.isArray(data?.AudioLanguages)
+            ? data.AudioLanguages.map((l) => ({
+                  label: l.Name || l.label || l.Value || l,
+                  value: l.Value || l.value || l,
+                  type: 'multi'
+              }))
+            : [];
+
+        const subtitleLanguageItems = Array.isArray(data?.SubtitleLanguages)
+            ? data.SubtitleLanguages.map((l) => ({
+                  label: l.Name || l.label || l.Value || l,
+                  value: l.Value || l.value || l,
+                  type: 'multi'
+              }))
             : [];
 
         const languageItems = Array.isArray(data?.Languages)
@@ -4564,18 +6350,21 @@ class LibraryPage extends Page {
                       title: 'Genres',
                       id: 'sec-genres',
                       itemKey: 'Genres', // Key in state
+                      separator: '|', // Pipe-delimited collection required by Jellyfin backend
                       items: genreItems
                   },
                   {
                       title: 'HeaderParentalRatings',
                       id: 'sec-ratings',
                       itemKey: 'OfficialRatings',
+                      separator: '|', // Pipe-delimited collection required by Jellyfin backend
                       items: (data?.OfficialRatings || []).map((r) => ({ label: r, value: r, type: 'multi' }))
                   },
                   {
                       title: 'Tags',
                       id: 'sec-tags',
                       itemKey: 'Tags',
+                      separator: '|', // Pipe-delimited collection required by Jellyfin backend
                       items: (data?.Tags || []).map((t) => ({ label: t, value: t, type: 'multi' }))
                   },
                   {
@@ -4593,10 +6382,28 @@ class LibraryPage extends Page {
                       ]
                   },
                   {
+                      title: 'AudioTracks',
+                      id: 'sec-audio-languages',
+                      hidden: isMusic, // Hide audio track filter for music
+                      itemKey: 'AudioLanguages',
+                      items: audioLanguageItems
+                  },
+                  {
+                      title: 'SubtitleTracks',
+                      id: 'sec-subtitle-languages',
+                      hidden: isMusic, // Hide subtitle track filter for music
+                      itemKey: 'SubtitleLanguages',
+                      items: subtitleLanguageItems
+                  },
+                  {
                       title: 'HeaderYears',
                       id: 'sec-years',
                       itemKey: 'Years',
-                      items: (data?.Years || []).map((y) => ({ label: y.toString(), value: y.toString(), type: 'multi' }))
+                      items: (data?.Years || []).map((y) => ({
+                          label: y.toString(),
+                          value: y.toString(),
+                          type: 'multi'
+                      }))
                   }
               ];
 
@@ -4708,8 +6515,8 @@ class LibraryPage extends Page {
                         } else {
                             const stored = this.state.filters[section.itemKey];
                             if (stored) {
-                                const sep = section.separator || (section.itemKey === 'language' || section.itemKey === 'certification' ? '|' : ',');
-                                const arr = stored.split(sep);
+                                // Match against both pipe and legacy comma delimiters for backwards compatibility
+                                const arr = stored.split(/[|,]/).map((s) => s.trim());
                                 checked = arr.includes(item.value);
                             }
                         }
@@ -4831,7 +6638,13 @@ class LibraryPage extends Page {
             } else {
                 const section = validSections.find((s) => s.itemKey === key || s.id === this.state.activeFilterSection);
                 const sep = section?.separator || (key === 'language' || key === 'certification' ? '|' : ',');
-                let current = this.state.filters[key] ? this.state.filters[key].split(sep).filter(Boolean) : [];
+                // Split existing stored selections handling either pipe or comma delimiters
+                let current = this.state.filters[key]
+                    ? this.state.filters[key]
+                          .split(/[|,]/)
+                          .map((s) => s.trim())
+                          .filter(Boolean)
+                    : [];
                 if (!isSelected) current.push(val);
                 else current = current.filter((v) => v !== val);
 
@@ -5110,7 +6923,14 @@ class LibraryPage extends Page {
             (viewType === 'Items' || viewType === 'Folders');
 
         const shouldShow =
-            isSeerr || isMovieMain || isTVMain || isEpisodes || isMusicMain || isCollections || isFolderMain || isFolderLikeMain;
+            isSeerr ||
+            isMovieMain ||
+            isTVMain ||
+            isEpisodes ||
+            isMusicMain ||
+            isCollections ||
+            isFolderMain ||
+            isFolderLikeMain;
 
         const isSubView = this._isSubView();
         const isSubFolder = this.state.isSubFolder;
@@ -5165,13 +6985,16 @@ class LibraryPage extends Page {
             }
         }
 
+        // Check active alphabet selector layout placement
+        const isRightPosHeader = layoutManager.getAlphaPickerPosition() === 'right';
+
         // 2. Configure Controls (if visible)
         if (controls && isControlsVisible) {
             const controlsConfig = focusManager.getSectionConfig('library-controls');
             if (controlsConfig) {
-                // Determine what's below controls... if alpha isn't there, are we on a horizontal row page or a grid page?
+                // When alpha is on the right, controls jump directly DOWN to grid/rows
                 let controlsLeaveDown = 'library-grid';
-                if (isAlphaVisible) {
+                if (!isRightPosHeader && isAlphaVisible) {
                     controlsLeaveDown = 'alpha-picker';
                 } else if (
                     viewType === 'Genres' ||
@@ -5185,7 +7008,8 @@ class LibraryPage extends Page {
                 this.registerFocusSection('library-controls', controls, {
                     ...controlsConfig,
                     leaveUp: isTabsVisible ? 'library-tabs' : 'sidebar', // sidebar if top
-                    leaveDown: controlsLeaveDown
+                    leaveDown: controlsLeaveDown,
+                    leaveRight: isRightPosHeader && isAlphaVisible ? 'alpha-picker' : null
                 });
             }
         }
@@ -5204,11 +7028,27 @@ class LibraryPage extends Page {
                     alphaLeaveDown = 'row-0';
                 }
 
-                this.registerFocusSection('alpha-picker', alphaPicker, {
-                    ...alphaConfig,
-                    leaveUp: isControlsVisible ? 'library-controls' : isTabsVisible ? 'library-tabs' : 'sidebar',
-                    leaveDown: alphaLeaveDown
-                });
+                if (isRightPosHeader) {
+                    // Vertical right side configuration: Left jumps to grid, Up jumps to controls
+                    this.registerFocusSection('alpha-picker', alphaPicker, {
+                        ...alphaConfig,
+                        orientation: 'vertical',
+                        leaveUp: isControlsVisible ? 'library-controls' : isTabsVisible ? 'library-tabs' : 'sidebar',
+                        leaveDown: null,
+                        leaveLeft: alphaLeaveDown,
+                        leaveRight: null
+                    });
+                } else {
+                    // Standard horizontal header configuration
+                    this.registerFocusSection('alpha-picker', alphaPicker, {
+                        ...alphaConfig,
+                        orientation: 'horizontal',
+                        leaveUp: isControlsVisible ? 'library-controls' : isTabsVisible ? 'library-tabs' : 'sidebar',
+                        leaveDown: alphaLeaveDown,
+                        leaveLeft: 'sidebar',
+                        leaveRight: null
+                    });
+                }
             }
         }
 
@@ -5216,14 +7056,20 @@ class LibraryPage extends Page {
         const gridConfig = focusManager.getSectionConfig('library-grid');
         if (gridConfig) {
             let gridLeaveUp = 'sidebar'; // Fallback to sidebar if isolated
-            if (isAlphaVisible) gridLeaveUp = 'alpha-picker';
+            if (!isRightPosHeader && isAlphaVisible) gridLeaveUp = 'alpha-picker';
             else if (isControlsVisible) gridLeaveUp = 'library-controls';
             else if (isTabsVisible) gridLeaveUp = 'library-tabs';
 
             this.registerFocusSection('library-grid', this.$('#library-grid'), {
                 ...gridConfig,
                 leaveUp: gridLeaveUp,
-                leaveDown: gridConfig.leaveDown || 'library-pagination'
+                leaveDown:
+                    this.state.isInfinite && this.state.items.length < this.state.totalRecordCount
+                        ? null
+                        : this.state.isInfinite
+                          ? null
+                          : gridConfig.leaveDown || 'library-pagination',
+                leaveRight: isRightPosHeader && isAlphaVisible ? 'alpha-picker' : null
             });
 
             // Re-register pagination here too — ensures it's always wired

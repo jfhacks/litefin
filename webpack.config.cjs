@@ -68,14 +68,16 @@ function getPlugins(tier, options = {}) {
          * The file is a no-op on non-WebOS platforms so safe to include in all builds.
          */
         { from: 'node_modules/webostvjs/webOSTV.js', to: 'js/webOSTV.js' },
-        // Copy early boot diagnostic backup logger for all builds
-        { from: 'src/backup-logger.js', to: 'js/backup-logger.js' }
+        // Copy early boot diagnostic console logger for all builds
+        { from: 'src/logger.js', to: 'js/logger.js' },
+        // Copy early DOM and ES2015 polyfills script for all builds
+        { from: 'src/early-polyfills.js', to: 'js/early-polyfills.js' }
     ];
 
-    // Include libass-wasm worker assets for both modern and legacy build tiers.
+    // Include libass-wasm worker assets for modern, legacy, desktop, and web build tiers.
     // Legacy tier includes the WASM workers for newer devices running legacy builds,
     // with runtime WebAssembly feature gating falling back to libjass on unsupported hardware.
-    if (buildTier === 'modern' || buildTier === 'legacy') {
+    if (buildTier === 'modern' || buildTier === 'legacy' || buildTier === 'desktop' || buildTier === 'web') {
         patterns.push(
             {
                 from: 'node_modules/@jellyfin/libass-wasm/dist/js/subtitles-octopus-worker.js',
@@ -93,7 +95,17 @@ function getPlugins(tier, options = {}) {
         );
     }
 
-    return [
+    // Copy movi-player WASM binary for desktop and web build tiers.
+    // Strictly excluded from TV builds to prevent ballooning package size.
+    if (buildTier === 'desktop' || buildTier === 'web') {
+        patterns.push({
+            from: 'node_modules/movi-player/dist/movi.wasm',
+            to: 'wasm/movi.wasm',
+            noErrorOnMissing: true
+        });
+    }
+
+    const pluginList = [
         new MiniCssExtractPlugin({
             filename: 'css/[name].css'
         }),
@@ -108,7 +120,33 @@ function getPlugins(tier, options = {}) {
             __APP_VERSION__: JSON.stringify(require('./package.json').version)
         })
     ];
+
+    // For TV build tiers (non-desktop and non-web), replace MoviVideoPlayer with a lightweight stub
+    // to guarantee movi-player and its WebAssembly/demuxing code are excluded from TV bundles.
+    if (buildTier !== 'desktop' && buildTier !== 'web') {
+        pluginList.push(
+            new webpack.NormalModuleReplacementPlugin(
+                /src[\\/]player[\\/]core[\\/]MoviVideoPlayer\.js$/,
+                path.resolve(__dirname, 'src/player/core/MoviVideoPlayer.stub.js')
+            )
+        );
+    }
+
+    return pluginList;
 }
+
+// ============================================================================
+// TV Resolve Aliases
+// ============================================================================
+// Base resolve aliases for television build targets (Samsung Tizen / LG webOS).
+// Substitutes MoviVideoPlayer with a lightweight stub and aliases movi-player packages to false,
+// ensuring television packages remain lean and free of unnecessary WebAssembly / demuxing assets.
+const tvResolveAliases = {
+    [path.resolve(__dirname, 'src/player/core/MoviVideoPlayer.js')]: path.resolve(__dirname, 'src/player/core/MoviVideoPlayer.stub.js'),
+    'movi-player': false,
+    'movi-player/element': false,
+    'movi-player/element/slim': false
+};
 
 // ============================================================================
 // Modern build - Tizen 6.5+ / WebOS 6.0+ (No transpilation, pure ES6+, no source maps)
@@ -139,6 +177,12 @@ const modernConfig = {
     optimization: {
         splitChunks: { chunks: 'all', maxSize: 100000 },
         minimizer: ['...', new CssMinimizerPlugin()]
+    },
+
+    resolve: {
+        alias: {
+            ...tvResolveAliases
+        }
     },
 
     module: {
@@ -188,6 +232,12 @@ const debugConfig = {
         minimizer: ['...', new CssMinimizerPlugin()]
     },
 
+    resolve: {
+        alias: {
+            ...tvResolveAliases
+        }
+    },
+
     module: {
         rules: [
             { test: /\.css$/, use: [MiniCssExtractPlugin.loader, 'css-loader'] },
@@ -235,6 +285,12 @@ const normalConfig = {
     optimization: {
         splitChunks: { chunks: 'all', maxSize: 100000 },
         minimizer: ['...', new CssMinimizerPlugin()]
+    },
+
+    resolve: {
+        alias: {
+            ...tvResolveAliases
+        }
     },
 
     module: {
@@ -313,6 +369,7 @@ const legacyConfig = {
 
     resolve: {
         alias: {
+            ...tvResolveAliases,
             // Use the pre-transpiled ES5 build to avoid Babel OOM during legacy transpilation
             'hls.js': 'hls.js/dist/hls.min.js'
         }
@@ -410,6 +467,7 @@ const ultraLegacyConfig = {
 
     resolve: {
         alias: {
+            ...tvResolveAliases,
             // Use the pre-transpiled ES5 build to avoid Babel OOM during legacy transpilation
             'hls.js': 'hls.js/dist/hls.min.js'
         }
@@ -428,7 +486,15 @@ const ultraLegacyConfig = {
                             [
                                 '@babel/preset-env',
                                 {
-                                    targets: { chrome: '32' },
+                                    /*
+                                     * =======================================================================
+                                     * Target Environment Configuration
+                                     * =======================================================================
+                                     * Downgraded target to Chrome 26 to support ancient webOS 1.0 and 2.0
+                                     * platforms which run older Chromium runtimes. This forces Babel to
+                                     * transpile down further and include matching polyfills.
+                                     */
+                                    targets: { chrome: '26' },
                                     useBuiltIns: 'usage',
                                     corejs: 3
                                 }
@@ -468,12 +534,12 @@ const ultraLegacyConfig = {
         /*
          * Ultra-legacy gets its own extended plugin list:
          *   1. A separate HTML template (index.ultra-legacy.html) that includes the
-         *      backup-logger <script> tag before any other scripts.
-         *   2. An extra CopyWebpackPlugin entry to ship backup-logger.js to dist.
+         *      logger.js <script> tag before any other scripts.
+         *   2. An extra CopyWebpackPlugin entry to ship logger.js to dist.
          *   3. NormalModuleReplacementPlugin to swap LibassWasmRenderer with a stub
          *      so the WASM dependencies are kept out of the bundle.
          *
-         * The backup logger patches console.* BEFORE the webpack bundle executes,
+         * The logger patches console.* BEFORE the webpack bundle executes,
          * which is the only effective way to intercept the boot crash on Chrome 32/38
          * (Tizen 2.x / WebOS 3.x). All other build tiers do not need or include it.
          */
@@ -493,12 +559,12 @@ const ultraLegacyConfig = {
         });
 
         /*
-         * Push backup-logger.js into the CopyPlugin pattern list.
+         * Push logger.js into the CopyPlugin pattern list.
          * CopyPlugin exposes its patterns array directly.
          */
         base.forEach(function (p) {
             if (p.patterns) {
-                p.patterns.push({ from: 'src/backup-logger.js', to: 'js/backup-logger.js' });
+                p.patterns.push({ from: 'src/logger.js', to: 'js/logger.js' });
             }
         });
 
@@ -506,6 +572,10 @@ const ultraLegacyConfig = {
             new webpack.NormalModuleReplacementPlugin(
                 /src[\/\\]player[\/\\]core[\/\\]LibassWasmRenderer\.js$/,
                 path.resolve(__dirname, 'src/player/core/LibassWasmRenderer.legacy.js')
+            ),
+            new webpack.NormalModuleReplacementPlugin(
+                /src[\/\\]player[\/\\]core[\/\\]ASSJSRenderer\.js$/,
+                path.resolve(__dirname, 'src/player/core/ASSJSRenderer.legacy.js')
             )
         );
 
@@ -546,6 +616,12 @@ const normalOblongConfig = {
         // Shared optimization settings
         splitChunks: { chunks: 'all', maxSize: 100000 },
         minimizer: ['...', new CssMinimizerPlugin()]
+    },
+
+    resolve: {
+        alias: {
+            ...tvResolveAliases
+        }
     },
 
     module: {
@@ -596,6 +672,160 @@ const normalOblongConfig = {
     plugins: getPlugins('modern', { iconSrc: 'assets/icon_oblong.png' })
 };
 
+// ============================================================================
+// Desktop build - Pake / Native Desktop Wrapper (Windows, macOS, Linux)
+// ============================================================================
+// Pure ES6+ environment with modern Chromium/WebKit webview engine.
+// Bundles the full MoviVideoPlayer backend and movi.wasm WebAssembly binary
+// for hardware-accelerated playback and native MKV/WebCodecs demuxing.
+// ============================================================================
+const desktopConfig = {
+    // Unique identifier for this configuration
+    name: 'desktop',
+    // Output production bundle optimization
+    mode: 'production',
+    performance: {
+        maxAssetSize: 15000000,
+        maxEntrypointSize: 15000000,
+        hints: false
+    },
+    // No source maps — keeps the bundle lean for desktop releases
+    entry: './src/index.js',
+
+    output: {
+        // Output directly into the dedicated desktop directory within dist
+        path: path.resolve(__dirname, 'dist/desktop'),
+        filename: 'js/[name].js',
+        clean: true
+    },
+
+    // Development server configuration for testing the desktop tier in browsers
+    devServer: {
+        static: {
+            directory: path.resolve(__dirname, 'dist/desktop')
+        },
+        compress: true,
+        port: 8080,
+        hot: true
+    },
+
+    optimization: {
+        splitChunks: { chunks: 'all', maxSize: 250000 },
+        minimizer: ['...', new CssMinimizerPlugin()]
+    },
+
+    module: {
+        rules: [
+            { test: /\.css$/, use: [MiniCssExtractPlugin.loader, 'css-loader'] },
+            {
+                test: /\.(woff|woff2|eot|ttf|otf)$/i,
+                type: 'asset/resource',
+                generator: {
+                    filename: 'assets/fonts/[name][ext]'
+                }
+            },
+            {
+                test: /\.wasm$/,
+                type: 'asset/resource',
+                generator: {
+                    emit: false
+                }
+            }
+        ]
+    },
+
+    // Desktop tier: Includes libass-wasm and movi.wasm, without stubbing MoviVideoPlayer
+    plugins: getPlugins('desktop')
+};
+
+// ============================================================================
+// Web build - Standalone Jellyfin Server Plugin Web Client
+// ============================================================================
+// Modern ES2020+ bundle served directly by the Litefin Jellyfin plugin.
+// Includes the full MoviVideoPlayer engine and movi.wasm for local demuxing,
+// hardware decoding, and MKV playback in modern web browsers.
+// Assets are built with relative publicPath so they resolve seamlessly under
+// subpaths like /litefin/ or reverse-proxied /jellyfin/litefin/.
+// ============================================================================
+const webConfig = {
+    // Unique identifier for web configuration target
+    name: 'web',
+    // Output production bundle optimization
+    mode: 'production',
+    performance: {
+        maxAssetSize: 15000000,
+        maxEntrypointSize: 15000000,
+        hints: false
+    },
+    // Application entrypoint
+    entry: './src/index.js',
+
+    output: {
+        // Output into dedicated dist/web folder consumed by plugin packaging
+        path: path.resolve(__dirname, 'dist/web'),
+        // Output JavaScript bundles into the js/ subfolder
+        filename: 'js/[name].js',
+        // Omitting an explicit publicPath allows Webpack 5's automatic ('auto') relative public path
+        // mechanism to calculate correct relative traversal paths (e.g. '../assets/fonts/...')
+        // for assets declared in CSS stylesheets extracted to the css/ directory.
+        // Specifying a literal './' here incorrectly forces CSS asset URLs to './assets/fonts/...',
+        // causing browsers loading /litefin/css/main.css to 404 on /litefin/css/assets/fonts/....
+        clean: true
+    },
+
+    // Development server configuration for browser testing
+    devServer: {
+        static: {
+            directory: path.resolve(__dirname, 'dist/web')
+        },
+        compress: true,
+        port: 8081,
+        hot: true
+    },
+
+    optimization: {
+        // Chunk splitting for efficient browser caching
+        splitChunks: { chunks: 'all', maxSize: 250000 },
+        minimizer: ['...', new CssMinimizerPlugin()]
+    },
+
+    module: {
+        rules: [
+            // Standard stylesheet processing
+            { test: /\.css$/, use: [MiniCssExtractPlugin.loader, 'css-loader'] },
+            // Font asset packaging
+            {
+                test: /\.(woff|woff2|eot|ttf|otf)$/i,
+                type: 'asset/resource',
+                generator: {
+                    filename: 'assets/fonts/[name][ext]'
+                }
+            },
+            // WebAssembly asset handling
+            {
+                test: /\.wasm$/,
+                type: 'asset/resource',
+                generator: {
+                    emit: false
+                }
+            }
+        ]
+    },
+
+    // Web tier: Bundles libass-wasm and movi.wasm without stubbing MoviVideoPlayer
+    plugins: getPlugins('web')
+};
+
 // Export all configs. Run a specific one with --config-name <name>.
-// e.g. npx webpack --config webpack.config.cjs --config-name debug
-module.exports = [modernConfig, debugConfig, normalConfig, legacyConfig, ultraLegacyConfig, normalOblongConfig];
+// e.g. npx webpack --config webpack.config.cjs --config-name web
+module.exports = [
+    modernConfig,
+    debugConfig,
+    normalConfig,
+    legacyConfig,
+    ultraLegacyConfig,
+    normalOblongConfig,
+    desktopConfig,
+    webConfig
+];
+

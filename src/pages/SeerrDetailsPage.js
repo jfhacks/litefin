@@ -13,6 +13,7 @@ import SeerrRequestModal from '../components/SeerrRequestModal.js';
 import { RichMetadataTable } from '../components/RichMetadataTable.js';
 import { api } from '../api/ApiClient.js';
 import { seerr } from '../api/seerrClient.js';
+import { renderWatchProviders, watchProviderRegion } from '../utils/WatchProviders.js';
 import { SEERR_STATUS, seerrStatusKey } from '../api/seerrNormalize.js';
 import BackdropManager from '../utils/BackdropManager.js';
 import { focusManager } from '../ui/FocusManager.js';
@@ -28,6 +29,8 @@ import CardRenderer from '../utils/CardRenderer.js';
 import { lazyLoader } from '../utils/LazyLoader.js';
 import { router } from '../core/Router.js';
 import { state } from '../core/StateManager.js';
+import { eventBus } from '../core/EventBus.js';
+import { getOverviewClampClass, shouldAlwaysShowOverviewButton, getOverviewButtonText } from '../utils/Utils.js';
 import { logger } from '../utils/Logger.js';
 
 const log = logger.create('SeerrDetailsPage');
@@ -57,8 +60,11 @@ class SeerrDetailsPage extends Page {
             backdropLeft: 'layout-backdrop-left'
         };
 
+        const showTooltips = storage.getItem('pref:showActionTooltips') !== 'false';
+        const tooltipsClass = showTooltips ? '' : 'tooltips-disabled';
+
         return `
-            <div class="page details-page seerr-details-page ${layoutClasses[detailsLayout] || 'layout-poster-left'}">
+            <div class="page details-page seerr-details-page ${layoutClasses[detailsLayout] || 'layout-poster-left'} ${tooltipsClass}">
                 <div class="details-backdrop" id="backdrop">
                     <div class="backdrop-gradient"></div>
                 </div>
@@ -68,34 +74,43 @@ class SeerrDetailsPage extends Page {
                         <div class="details-info-col" id="details-info-col">
                             <div class="hero-info" id="hero-info"></div>
                             <section class="details-actions" id="actions">
-                                <button class="btn btn-action btn-primary seerr-play-btn hidden" tabindex="0">
+                                <button class="btn btn-action btn-primary seerr-play-btn hidden" tabindex="0" data-tooltip="${i18n.t('Play')}">
                                     ${detailsIcons.play}
                                     <span>${i18n.t('Play')}</span>
                                 </button>
-                                <button class="btn btn-action seerr-request-btn" tabindex="0">
+                                <button class="btn btn-action seerr-jellyfin-btn hidden" tabindex="0" data-tooltip="${i18n.t('SeerrViewInJellyfin') || 'View in Jellyfin'}">
+                                    ${detailsIcons.jellyfinDetails}
+                                    <span>${i18n.t('SeerrViewInJellyfin')}</span>
+                                </button>
+                                <button class="btn btn-action seerr-request-btn" tabindex="0" data-tooltip="${i18n.t('SeerrRequest') || 'Request'}">
                                     ${detailsIcons.add}
                                     <span>${i18n.t('SeerrRequest')}</span>
                                 </button>
-                                <button class="btn btn-action seerr-cancel-request-btn hidden" tabindex="0">
+                                <button class="btn btn-action seerr-cancel-request-btn hidden" tabindex="0" data-tooltip="${i18n.t('SeerrCancelRequest') || 'Cancel Request'}">
                                     ${detailsIcons.cancel}
                                     <span>${i18n.t('SeerrCancelRequest')}</span>
                                 </button>
-                                <button class="btn btn-action seerr-trailer-btn hidden" tabindex="0">
+                                <button class="btn btn-action seerr-trailer-btn hidden" tabindex="0" data-tooltip="${i18n.t('WatchTrailer') || 'Watch Trailer'}">
                                     ${detailsIcons.trailer}
                                     <span>${i18n.t('WatchTrailer')}</span>
                                 </button>
-                                <button class="btn btn-action seerr-watchlist-btn" tabindex="0">
+                                <button class="btn btn-action seerr-watchlist-btn" tabindex="0" data-tooltip="${i18n.t('SeerrAddToWatchlist') || 'Add to Watchlist'}">
                                     ${detailsIcons.watchlist}
                                     <span>${i18n.t('SeerrAddToWatchlist')}</span>
                                 </button>
+                                <div class="action-btn-tooltip-bar" id="action-tooltip-bar">
+                                    <span class="action-btn-tooltip-text" id="action-tooltip-text"></span>
+                                </div>
                             </section>
+                            <div id="watch-providers-container" class="hidden"></div>
                             <div class="details-overview">
-                                <div class="overview-text line-clamp-6" id="overview-text" tabindex="-1"></div>
-                                <button class="see-more-btn" tabindex="0">${i18n.t('ShowMore')}</button>
+                                <div class="overview-text ${getOverviewClampClass()}" id="overview-text" tabindex="-1"></div>
+                                <button class="see-more-btn" tabindex="0" data-i18n="${shouldAlwaysShowOverviewButton() ? 'DetailedView' : 'ShowMore'}">${getOverviewButtonText()}</button>
                             </div>
                         </div>
                     </div>
-                    <div id="rich-meta-container" class="media-row hidden">
+                    <!-- Note: NOT marked as media-row to prevent aggressive top-snapping on focus -->
+                    <div id="rich-meta-container" class="hidden">
                         <div class="details-rich-meta" id="rich-meta"></div>
                     </div>
 
@@ -139,6 +154,32 @@ class SeerrDetailsPage extends Page {
             return;
         }
 
+        // --------------------------------------------------------------------
+        // Resolve Seerr admin status up-front so _updateRequestButton can
+        // correctly gate the cancel button based on request status.
+        //
+        // Seerr rules:
+        //   - PENDING  → any user can cancel (queued, not yet approved)
+        //   - PROCESSING / beyond → only Seerr admins can cancel (approved)
+        //
+        // We match the current Jellyfin user ID against the Seerr users list
+        // and check their permissions bitmask: ADMIN=2, MANAGE_REQUESTS=8192.
+        // Defaults to false so non-admins are safe if the fetch fails.
+        // --------------------------------------------------------------------
+        this._isSeerrAdmin = false;
+        seerr.getUsers().then((users) => {
+            if (!Array.isArray(users)) return;
+            const currentJfId = (api.userId || '').replace(/-/g, '').toLowerCase();
+            const me = users.find((u) => {
+                const uJfId = (u.jellyfinUserId || '').replace(/-/g, '').toLowerCase();
+                return currentJfId && uJfId && uJfId === currentJfId;
+            });
+            // Bits: 2 = ADMIN, 8192 = MANAGE_REQUESTS
+            this._isSeerrAdmin = !!((me?.permissions || 0) & (2 | 8192));
+            // Re-evaluate cancel button visibility now that admin status is known
+            this._updateRequestButton();
+        }).catch(() => { /* silently default to non-admin */ });
+
         this.setLoading(true);
         try {
             this._item = await seerr.details(mediaType, tmdbId);
@@ -147,11 +188,19 @@ class SeerrDetailsPage extends Page {
             }
             if (mediaType === 'tv') {
                 try {
+                    // Query season-level statuses for this series
                     const seasons = await seerr.tvSeasons(tmdbId);
+
+                    // A season is requestable if it is NOT already available, pending, or processing.
+                    // This allows partially available, unknown, or unrequested seasons to be requested.
                     this._hasUnrequestedSeasons = seasons.some(
-                        (s) => s.status === SEERR_STATUS.NOT_REQUESTED || s.status === SEERR_STATUS.DELETED
+                        (s) =>
+                            s.status !== SEERR_STATUS.AVAILABLE &&
+                            s.status !== SEERR_STATUS.PENDING &&
+                            s.status !== SEERR_STATUS.PROCESSING
                     );
                 } catch (e) {
+                    // Fallback to allowing request if season check fails
                     this._hasUnrequestedSeasons = true;
                 }
             }
@@ -162,6 +211,7 @@ class SeerrDetailsPage extends Page {
             }
             this._renderDetails();
             this._bindActions();
+            this._setupTooltipListener();
             this._registerFocus();
             if (this._item._seerrStatus === SEERR_STATUS.AVAILABLE || this._item._seerrStatus === SEERR_STATUS.PARTIALLY_AVAILABLE) {
                 void this._checkJellyfinMediaAvailability(mediaType, tmdbId);
@@ -198,6 +248,20 @@ class SeerrDetailsPage extends Page {
     }
 
     _renderDetails() {
+        const providersContainer = this.$('#watch-providers-container');
+        if (providersContainer) {
+            const showProviders = storage.getItem('pref:showWatchProviders') === 'true';
+            providersContainer.classList.toggle('hidden', !showProviders);
+            providersContainer.innerHTML = showProviders
+                ? renderWatchProviders(
+                      this._item.WatchProviders,
+                      watchProviderRegion(storage.getItem('pref:watchProviderRegion')),
+                      (key) => i18n.t(key),
+                      i18n.currentLang
+                  )
+                : '';
+        }
+
         const item = this._item;
         const runtimeMinutes = item.RunTimeTicks ? Math.round(item.RunTimeTicks / 600000000) : 0;
         const runtime = runtimeMinutes
@@ -270,6 +334,8 @@ class SeerrDetailsPage extends Page {
         }
 
         overviewEl.textContent = item.Overview || '';
+        const clampClass = getOverviewClampClass();
+        overviewEl.className = `overview-text ${clampClass}`;
 
         if (item._detailImageUrl) {
             const poster = document.createElement('img');
@@ -281,9 +347,10 @@ class SeerrDetailsPage extends Page {
 
         if (item._backdropUrl) BackdropManager.applyBackdrop(this.$('#backdrop'), item._backdropUrl);
 
+        // Defaults to 'genres-studios-writers' to avoid hundreds of tag chips on low-end TV chips
         const richMetadataStyle =
             storage.getItem('pref:richMetadataStyle') ||
-            (storage.getItem('pref:hideRichMetadata') === 'true' ? 'none' : 'all');
+            (storage.getItem('pref:hideRichMetadata') === 'true' ? 'none' : 'genres-studios-writers');
         const isHidden = richMetadataStyle === 'none';
 
         this._richMetaTable = new RichMetadataTable({
@@ -316,6 +383,41 @@ class SeerrDetailsPage extends Page {
                 } else if (type === 'networks' || type === 'network') {
                     if (id) {
                         router.navigate(`/library/seerr?seerrType=network&networkId=${id}&name=${encodeURIComponent(name)}`);
+                    }
+                } else if (
+                    type === 'productionteam' ||
+                    type === 'production_team' ||
+                    type === 'directors' ||
+                    type === 'director' ||
+                    type === 'writers' ||
+                    type === 'writer' ||
+                    type === 'crew' ||
+                    type === 'person'
+                ) {
+                    // Navigate directly to the Seerr person details page for the selected crew/team member
+                    let personId = id;
+
+                    // Fallback: If person ID was missing on the chip element, look it up in normalized crew data
+                    if (!personId && this._item) {
+                        const rawCrew =
+                            this._item.ProductionTeam ||
+                            (this._item.credits && this._item.credits.crew) ||
+                            this._item.crew ||
+                            [];
+
+                        const found = rawCrew.find((m) => {
+                            const memberName = typeof m === 'string' ? m : (m && (m.Name || m.name));
+                            return memberName && memberName.trim().toLowerCase() === (name || '').trim().toLowerCase();
+                        });
+
+                        if (found && (found.Id || found.id)) {
+                            personId = found.Id || found.id;
+                        }
+                    }
+
+                    if (personId) {
+                        log.info(`Navigating to Seerr person details page for crew member: personId=${personId}, name=${name}`);
+                        router.navigate(`/seerr/person/${personId}`);
                     }
                 }
             }
@@ -412,10 +514,21 @@ class SeerrDetailsPage extends Page {
 
     _updatePlayButton() {
         const playBtn = this.$('.seerr-play-btn');
+        const jellyfinBtn = this.$('.seerr-jellyfin-btn');
         if (!playBtn) return;
+
         const isAvailable = !!this._jellyfinMediaId;
+
+        // Play button — shown whenever the Jellyfin media ID is resolved
         playBtn.classList.toggle('hidden', !isAvailable);
         playBtn.tabIndex = isAvailable ? 0 : -1;
+
+        const showJellyfinBtn = isAvailable;
+        if (jellyfinBtn) {
+            jellyfinBtn.classList.toggle('hidden', !showJellyfinBtn);
+            jellyfinBtn.tabIndex = showJellyfinBtn ? 0 : -1;
+        }
+
         focusManager.invalidateCache('seerr-details-actions');
     }
 
@@ -429,7 +542,7 @@ class SeerrDetailsPage extends Page {
 
     _showRemoteTrailerPlayer() {
         themeSongPlayer.stopInstant();
-        const mode = PlayerSettings.get('trailerPlaybackMode') || 'internal_proxy';
+        const mode = PlayerSettings.get('trailerPlaybackMode');
         const trailers = (this._item && this._item.RemoteTrailers) || [];
         if (!trailers.length) return;
 
@@ -447,20 +560,33 @@ class SeerrDetailsPage extends Page {
         const seeMoreBtn = this.$('.see-more-btn');
         if (!overviewEl || !seeMoreBtn) return;
 
+        const alwaysShow = shouldAlwaysShowOverviewButton();
+        const hasText = Boolean(overviewEl.textContent && overviewEl.textContent.trim().length > 0);
         const isTruncated = overviewEl.scrollHeight > overviewEl.clientHeight + 2;
-        seeMoreBtn.classList.toggle('hidden', !isTruncated);
-        seeMoreBtn.tabIndex = isTruncated ? 0 : -1;
+        const shouldShow = (alwaysShow && hasText) || isTruncated;
+
+        seeMoreBtn.textContent = getOverviewButtonText();
+        seeMoreBtn.setAttribute('data-i18n', alwaysShow ? 'DetailedView' : 'ShowMore');
+        seeMoreBtn.classList.toggle('hidden', !shouldShow);
+        seeMoreBtn.tabIndex = shouldShow ? 0 : -1;
         this._registerFocus();
     }
 
     async _refreshTvSeasonState() {
         if (this._item._mediaType === 'tv') {
             try {
+                // Refresh season statuses from Seerr
                 const seasons = await seerr.tvSeasons(this._item._tmdbId);
+
+                // Check if any season is not already available or requested
                 this._hasUnrequestedSeasons = seasons.some(
-                    (s) => s.status === SEERR_STATUS.NOT_REQUESTED || s.status === SEERR_STATUS.DELETED
+                    (s) =>
+                        s.status !== SEERR_STATUS.AVAILABLE &&
+                        s.status !== SEERR_STATUS.PENDING &&
+                        s.status !== SEERR_STATUS.PROCESSING
                 );
             } catch (e) {
+                // Log warning if refresh fails
                 log.warn('Failed to refresh TV seasons status', e);
             }
         }
@@ -518,11 +644,20 @@ class SeerrDetailsPage extends Page {
             const button = this.$('.seerr-watchlist-btn');
             button.disabled = true;
             try {
-                if (this._isWatchlisted) await seerr.removeFromWatchlist(this._item);
-                else await seerr.addToWatchlist(this._item);
+                // 1. Send update to Seerr API
+                if (this._isWatchlisted) {
+                    await seerr.removeFromWatchlist(this._item);
+                } else {
+                    await seerr.addToWatchlist(this._item);
+                }
+
+                // 2. Toggle local button state and notify user
                 this._isWatchlisted = !this._isWatchlisted;
                 this._updateWatchlistButton();
                 toast.show(i18n.t(this._isWatchlisted ? 'SeerrAddedToWatchlist' : 'SeerrRemovedFromWatchlist'));
+
+                // 3. Clear cache and invalidate Discover page so returning to it reflects watchlist updates
+                seerr.clearCache();
             } catch (err) {
                 log.warn('Unable to update Seerr watchlist', err);
                 toast.show(i18n.t('SeerrWatchlistFailed'));
@@ -539,6 +674,14 @@ class SeerrDetailsPage extends Page {
             } else {
                 router.navigate(`/player/${this._jellyfinMediaId}/false`);
             }
+        });
+
+        // Navigate to the Jellyfin details page — for TV shows this lets the
+        // user browse seasons and episodes directly within Jellyfin rather than
+        // going straight to the player.
+        this.$('.seerr-jellyfin-btn')?.addEventListener('click', () => {
+            if (!this._jellyfinMediaId) return;
+            router.navigate(`/details/${this._jellyfinMediaId}`);
         });
 
         this.$('.seerr-trailer-btn')?.addEventListener('click', () => {
@@ -567,6 +710,7 @@ class SeerrDetailsPage extends Page {
             listId,
             items,
             isLandscape = false,
+            cardType,
             renderCard,
             focusSectionName,
             onClick
@@ -586,6 +730,7 @@ class SeerrDetailsPage extends Page {
             visibleCount: 10,
             initialWindow: Math.min(20, items.length),
             focusSectionId: focusSectionName,
+            cardType: cardType,
             renderCard: renderCard
         });
 
@@ -660,6 +805,7 @@ class SeerrDetailsPage extends Page {
                 listId: 'seerr-people-row',
                 items: this._item.Cast,
                 isLandscape: false,
+                cardType: 'person',
                 renderCard: (person) => CardRenderer.createCardHtml(person, { type: 'person' }),
                 focusSectionName: 'seerr-details-people',
                 onClick: (card, person) => {
@@ -899,8 +1045,10 @@ class SeerrDetailsPage extends Page {
         }
 
         if (hasRichMeta) {
+            // Target the table element directly to avoid querying or filtering inactive chips on D-pad moves
             updateSection('details-rich-meta', this.$('#rich-meta-container'), {
                 orientation: 'vertical',
+                selector: '#rich-meta',
                 leaveUp: hasOverviewAction ? 'seerr-details-overview' : (hasAction ? 'seerr-details-actions' : null),
                 leaveDown: getDownFromRichMeta(),
                 leaveLeft: 'sidebar',
@@ -952,41 +1100,156 @@ class SeerrDetailsPage extends Page {
         const button = this.$('.seerr-request-btn');
         const cancelBtn = this.$('.seerr-cancel-request-btn');
         if (!button) return;
+
         const isTv = this._item._mediaType === 'tv';
         let requestable;
+
         if (isTv) {
+            // For TV shows, allow requesting missing seasons as long as the series is not
+            // completely available, and there are seasons that haven't been requested or are partial.
             requestable = this._item._seerrStatus !== SEERR_STATUS.AVAILABLE && this._hasUnrequestedSeasons !== false;
         } else {
+            // For movies, only unrequested, unknown, or deleted items can be requested
             requestable =
                 this._item._seerrStatus === SEERR_STATUS.NOT_REQUESTED ||
                 this._item._seerrStatus === SEERR_STATUS.UNKNOWN ||
                 this._item._seerrStatus === SEERR_STATUS.DELETED;
         }
+
+        // Toggle request button visibility and focus accessibility
         button.classList.toggle('hidden', !requestable);
         button.tabIndex = requestable ? 0 : -1;
 
-        const canCancel = !!(this._item._requestId && this._item._seerrStatus !== SEERR_STATUS.AVAILABLE);
+        // ----------------------------------------------------------------
+        // Cancel button visibility:
+        //   PENDING  → any user can cancel (just a queue entry, no admin
+        //              approval involved yet — Seerr allows this for all)
+        //   Anything past PENDING (PROCESSING, PARTIALLY_AVAILABLE, etc.) →
+        //              admin-approved work has started; only Seerr admins
+        //              can retract it at this point.
+        // ----------------------------------------------------------------
+        const hasRequest = !!(this._item._requestId && this._item._seerrStatus !== SEERR_STATUS.AVAILABLE);
+        const isPending = this._item._seerrStatus === SEERR_STATUS.PENDING;
+        const canCancel = hasRequest && (isPending || this._isSeerrAdmin);
         if (cancelBtn) {
             cancelBtn.classList.toggle('hidden', !canCancel);
             cancelBtn.tabIndex = canCancel ? 0 : -1;
         }
 
-        const isPartialOrPending =
-            isTv &&
-            (this._item._seerrStatus === SEERR_STATUS.PENDING ||
-                this._item._seerrStatus === SEERR_STATUS.PROCESSING ||
-                this._item._seerrStatus === SEERR_STATUS.PARTIALLY_AVAILABLE);
+        // Button label reflects the state of the series:
+        //   PARTIALLY_AVAILABLE → "Request More" (some content is available, more can be added)
+        //   PENDING / PROCESSING → "View Request" (content is queued/downloading, nothing available yet;
+        //                          the modal still lets the user add more seasons if needed)
+        //   Default             → "Request"
         const span = button.querySelector('span');
-        if (span) {
-            span.textContent = i18n.t(isPartialOrPending ? 'SeerrRequestMore' : 'SeerrRequest');
+        let labelKey = 'SeerrRequest';
+        if (isTv) {
+            if (this._item._seerrStatus === SEERR_STATUS.PARTIALLY_AVAILABLE) {
+                labelKey = 'SeerrRequestMore';
+            } else if (
+                this._item._seerrStatus === SEERR_STATUS.PENDING ||
+                this._item._seerrStatus === SEERR_STATUS.PROCESSING
+            ) {
+                labelKey = 'SeerrViewRequest';
+            }
         }
+        const labelText = i18n.t(labelKey);
+        if (span) {
+            span.textContent = labelText;
+        }
+        button.setAttribute('data-tooltip', labelText);
+
+        // Re-evaluate focus layout for action buttons
         focusManager.invalidateCache('seerr-details-actions');
     }
 
     _updateWatchlistButton() {
+        const btn = this.$('.seerr-watchlist-btn');
         const label = this.$('.seerr-watchlist-btn span');
-        if (label) label.textContent = i18n.t(this._isWatchlisted ? 'SeerrRemoveFromWatchlist' : 'SeerrAddToWatchlist');
+        const text = i18n.t(this._isWatchlisted ? 'SeerrRemoveFromWatchlist' : 'SeerrAddToWatchlist');
+        if (label) label.textContent = text;
+        if (btn) btn.setAttribute('data-tooltip', text);
         focusManager.invalidateCache('seerr-details-actions');
+    }
+
+    _setupTooltipListener() {
+        const tooltipBar = this.$('#action-tooltip-bar');
+        const tooltipText = this.$('#action-tooltip-text');
+        if (!tooltipBar || !tooltipText) return;
+
+        this._onFocusChangedForTooltip = (focusedEl) => {
+            const isEnabled = storage.getItem('pref:showActionTooltips') !== 'false';
+            const targetEl = focusedEl || document.activeElement;
+            if (!isEnabled || !targetEl) {
+                tooltipBar.classList.remove('visible');
+                return;
+            }
+
+            const actionsContainer = this.$('#actions');
+            if (actionsContainer && actionsContainer.contains(targetEl)) {
+                let text = targetEl.getAttribute('data-tooltip') || targetEl.getAttribute('aria-label');
+                if (!text) {
+                    const span = targetEl.querySelector('span[data-i18n], span');
+                    if (span) text = span.textContent?.trim();
+                }
+
+                if (text) {
+                    const btnCenterX = targetEl.offsetLeft + (targetEl.offsetWidth / 2);
+                    const btnBottomY = targetEl.offsetTop + targetEl.offsetHeight;
+
+                    tooltipBar.style.left = `${btnCenterX}px`;
+                    tooltipBar.style.top = `${btnBottomY}px`;
+                    tooltipText.textContent = text;
+                    tooltipBar.classList.add('visible');
+                    return;
+                }
+            }
+
+            tooltipBar.classList.remove('visible');
+        };
+
+        eventBus.on('focus:changed', this._onFocusChangedForTooltip);
+
+        const actionsContainer = this.$('#actions');
+        if (actionsContainer) {
+            actionsContainer.addEventListener('mouseover', (e) => {
+                const btn = e.target.closest('.btn, button');
+                if (btn) this._onFocusChangedForTooltip?.(btn);
+            });
+
+            actionsContainer.addEventListener('mouseout', (e) => {
+                const related = e.relatedTarget;
+                if (!related || !actionsContainer.contains(related)) {
+                    const activeInActions = document.activeElement && actionsContainer.contains(document.activeElement);
+                    if (activeInActions) {
+                        this._onFocusChangedForTooltip?.(document.activeElement);
+                    } else {
+                        tooltipBar.classList.remove('visible');
+                    }
+                } else {
+                    const newBtn = related.closest('.btn, button');
+                    if (newBtn) {
+                        this._onFocusChangedForTooltip?.(newBtn);
+                    }
+                }
+            });
+        }
+
+        this._tooltipTimers = [];
+        const updateInitial = () => {
+            if (typeof this._onFocusChangedForTooltip !== 'function') return;
+            const actionsContainer = this.$('#actions');
+            const targetEl = (document.activeElement && actionsContainer && actionsContainer.contains(document.activeElement))
+                ? document.activeElement
+                : this.$('#actions .btn-action:not(.hidden)');
+            if (targetEl) {
+                this._onFocusChangedForTooltip?.(targetEl);
+            }
+        };
+        updateInitial();
+        requestAnimationFrame(updateInitial);
+        this._tooltipTimers.push(setTimeout(updateInitial, 150));
+        this._tooltipTimers.push(setTimeout(updateInitial, 400));
     }
 
     _renderStatus() {
@@ -1062,6 +1325,16 @@ class SeerrDetailsPage extends Page {
     }
 
     destroy() {
+
+        if (this._tooltipTimers) {
+            this._tooltipTimers.forEach((t) => clearTimeout(t));
+            this._tooltipTimers = null;
+        }
+
+        if (this._onFocusChangedForTooltip) {
+            eventBus.off('focus:changed', this._onFocusChangedForTooltip);
+            this._onFocusChangedForTooltip = null;
+        }
         BackdropManager.clearBackdrop(this.$('#backdrop'));
         super.destroy();
     }
