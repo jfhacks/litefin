@@ -348,7 +348,19 @@
     flex: 0 0 268px;
 }
 
-.image-card:focus-within,
+/*
+ * Image card focus state styling.
+ * Separated into distinct rules to prevent older Chromium engines (<63)
+ * from rejecting the .focused rule due to the unsupported :focus-within pseudo-class.
+ */
+.image-card:focus-within {
+    border: 2px solid var(--jf-btn-primary-focus-border, #ffffff);
+    background: rgba(255, 255, 255, 0.08);
+    transform: scale(1.02);
+    outline: none;
+    z-index: 5;
+}
+
 .image-card.focused {
     border: 2px solid var(--jf-btn-primary-focus-border, #ffffff);
     background: rgba(255, 255, 255, 0.08);

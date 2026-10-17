@@ -9,6 +9,12 @@
 
 [data-theme-mode="tinted"],
 [data-theme-mode="tinted-light"] {
+    /* 
+     * Sidebar and Settings split-view navigation background alias.
+     * Inherits the dynamic tinted secondary surface shade calculated in LayoutManager.
+     */
+    --sidebar-bg: var(--jf-background-alt);
+
     --jf-overlay-bg: rgba(0, 0, 0, 0.8);
 
     --jf-text-primary: #ffffff;

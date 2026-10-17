@@ -167,6 +167,8 @@ class ImageService {
                 'hero-banner': 554,
                 'hero-semi-immersive': 607,
                 'hero-immersive': 607,
+                /* Compact right-aligned artwork target width for low profile */
+                'hero-immersive-performance': 450,
                 avatar: 140,
                 logo: 280,
                 episode: 315, // 420 * 0.75
@@ -206,6 +208,8 @@ class ImageService {
                 'hero-banner': 1100,
                 'hero-semi-immersive': 1200,
                 'hero-immersive': 1200,
+                /* Scaled resolution for medium-low performance profile */
+                'hero-immersive-performance': 800,
                 avatar: 180,
                 logo: 360,
                 episode: 378, // 420 * 0.9
@@ -245,6 +249,8 @@ class ImageService {
                 'hero-banner': 1662,
                 'hero-semi-immersive': 1820,
                 'hero-immersive': 1820,
+                /* 1:1 pixel fidelity for right-side 60% viewport column on 1080p */
+                'hero-immersive-performance': 1150,
                 avatar: 200,
                 logo: 400,
                 episode: 420,
@@ -284,6 +290,8 @@ class ImageService {
                 'hero-banner': 1790,
                 'hero-semi-immersive': 1870,
                 'hero-immersive': 1870,
+                /* Enhanced texture resolution for medium-high display profiles */
+                'hero-immersive-performance': 1200,
                 avatar: 220,
                 logo: 440,
                 episode: 462, // 420 * 1.1
@@ -323,6 +331,8 @@ class ImageService {
                 'hero-banner': 1920,
                 'hero-semi-immersive': 1920,
                 'hero-immersive': 1920,
+                /* High-fidelity 1280px asset delivery for premium 1080p panels */
+                'hero-immersive-performance': 1280,
                 avatar: 240,
                 logo: 480,
                 episode: 504, // 420 * 1.2
@@ -362,6 +372,8 @@ class ImageService {
                 'hero-banner': 2560,
                 'hero-semi-immersive': 2560,
                 'hero-immersive': 2560,
+                /* Crisp QHD asset allocation for very-high profile */
+                'hero-immersive-performance': 1600,
                 avatar: 300,
                 logo: 600,
                 episode: 630, // 420 * 1.5
@@ -401,6 +413,8 @@ class ImageService {
                 'hero-banner': 3840,
                 'hero-semi-immersive': 3840,
                 'hero-immersive': 3840,
+                /* 4K ultra high-density display canvas allocation */
+                'hero-immersive-performance': 2560,
                 avatar: 400,
                 logo: 800,
                 episode: 840, // 420 * 2.0
@@ -440,6 +454,8 @@ class ImageService {
                 'hero-banner': null,
                 'hero-semi-immersive': null,
                 'hero-immersive': null,
+                /* Uncapped native source asset resolution */
+                'hero-immersive-performance': null,
                 thumb: null,
                 square: null,
                 banner: null,

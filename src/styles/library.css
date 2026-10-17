@@ -523,6 +523,33 @@ html[data-layout-tier="ultra-legacy"] .alpha-btn::before {
     padding-bottom: 0;
     margin: 0 auto;
 }
+
+/*
+ * =============================================================================
+ * VIRTUAL GRID ROW POOL SYSTEM
+ * =============================================================================
+ * Activates fixed-pool row recycling. Replaces destructive DOM eviction and
+ * sliding spacers with an upfront container height and absolutely-positioned
+ * row tracks. DOM reordering of row elements operates with O(1) performance
+ * and zero layout shifts across sibling rows on low-power TV hardware.
+ * =============================================================================
+ */
+.library-grid.virtual-active {
+    position: relative !important;
+    display: block !important;
+    box-sizing: content-box !important;
+}
+
+.virtual-grid-row {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: flex-start;
+    box-sizing: border-box;
+}
 /* ── View mode: Poster (default) ─────────────────────────────────── */
 /* Standard 2:3 portrait card. Each card fixes at 320px — exactly 5 per 1080p row. 
    Calculated: 5 * 320px + 4 * 20px = 1680px block width. 
@@ -1601,6 +1628,8 @@ html[data-layout-tier="ultra-legacy"][data-alpha-picker-position="right"] .alpha
     display: flex;
     flex-direction: column;
     overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
     padding: 20px 0;
 }
 
@@ -1678,12 +1707,14 @@ html[data-layout-tier="ultra-legacy"][data-alpha-picker-position="right"] .alpha
 }
 
 /* Scrollbar styling for modal lists */
+.filter-sidebar::-webkit-scrollbar,
 .filter-main::-webkit-scrollbar,
 .sort-column .modal-options::-webkit-scrollbar {
     display: block;
     width: 6px;
 }
 
+.filter-sidebar::-webkit-scrollbar-thumb,
 .filter-main::-webkit-scrollbar-thumb,
 .sort-column .modal-options::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.2);

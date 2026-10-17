@@ -264,6 +264,12 @@ class FavoritesPage extends Page {
                     const targetId = lastFocusedObj.itemId;
                     const sectionId = lastFocusedObj.sectionId;
 
+                    // Ensure target item and forward buffer items ahead of it are rendered
+                    const virtualRow = this._virtualRows ? this._virtualRows[sectionId] : null;
+                    if (virtualRow) {
+                        virtualRow.ensureItemRendered(targetId);
+                    }
+
                     const savedCard = container.querySelector(
                         `#${sectionId}-items .media-card[data-item-id="${targetId}"]`
                     );

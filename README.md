@@ -76,7 +76,7 @@ Extend Litefin features by installing the **Litefin Plugin** on your [**Jellyfin
 - **Cross-Platform Build Pipeline & Packaging**:
     - **Smart TVs**: 4 optimized build tiers per platform (Modern, Normal, Legacy, Ultra-Legacy) supporting everything from modern 2024+ smart TVs all the way back to Tizen 2.3+ and webOS 1.0+ (Chromium 32+).
     - **Android TV & Fire TV**: Native APK packages powered by Tauri v2 and Media3 ExoPlayer.
-    - **Desktop**: Native cross-platform bundles for Windows (`.exe`, `.msi`), Linux (`.deb`, `.AppImage`), and macOS (`.dmg`) built with Tauri v2.
+    - **Desktop**: Native cross-platform bundles for Windows (`.exe`, `.msi`), Linux (`.deb`, `.AppImage`, `.rpm`), and macOS (`.dmg`) built with Tauri v2.
 
 ## Documentation
 
@@ -142,9 +142,23 @@ Litefin can be installed on LG TVs using the **Homebrew Channel**:
 
 1. Download the installer or package for your OS from the [Releases](https://github.com/MoazSalem/litefin/releases) page:
     - **Windows**: `.msi` or `.exe` installer.
-    - **Linux**: `.deb` package or standalone `.AppImage`.
+    - **Linux**: `.deb`, `.rpm` package, or standalone `.AppImage`.
     - **macOS**: `.dmg` disk image.
 2. Install and launch Litefin on your machine.
+
+#### Keyboard Controls (Desktop & Web)
+
+| Key / Shortcut | Action |
+| :------------- | :----- |
+| **`Space`** / **`K`** | Play / Pause toggle |
+| **`J`** / **`L`** | Seek backward / forward 10 seconds |
+| **`←`** / **`→`** | Navigate UI items or seek timeline during playback |
+| **`↑`** / **`↓`** | Navigate UI items, menus, and OSD controls |
+| **`Enter`** | Select / Activate focused item or reveal OSD |
+| **`Esc`** / **`Backspace`** | Go back / Close modal / Exit player |
+| **`F`** / **`F11`** | Toggle Fullscreen |
+| **`M`** | Mute / Unmute audio |
+| **Media Keys** | Hardware Play, Pause, Next, Previous, Stop |
 
 ## Support
 

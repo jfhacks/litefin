@@ -164,31 +164,41 @@
     position: absolute;
     top: 0;
     left: 0;
-    width: 100%;
+    /* 
+     * PERFORMANCE OPTIMIZATION (Geometry Bounding):
+     * Restrict width to 65% (where typography and logos live).
+     * Eliminates 35% of redundant transparent fragment shader overdraw
+     * across the right side of the screen over the backdrop image.
+     */
+    width: 65%;
     height: 100%;
-    /* Horizontal gradient fading to transparent - LTR fallback */
+    /* 
+     * PERFORMANCE OPTIMIZATION (Stop Simplification):
+     * Simplified 3-stop gradient reduces fragment shader ALU instructions.
+     */
     background: linear-gradient(
         to right,
         var(--hero-vignette-start) 0%,
-        var(--hero-vignette-start) 25%,
-        var(--hero-vignette-mid) 60%,
+        var(--hero-vignette-mid) 45%,
         var(--hero-vignette-end) 100%
     );
     z-index: 1;
-    /* Static pseudo-element — no will-change needed */
+    pointer-events: none;
+    transform: translateZ(0);
 }
 
 /*
  * RTL specific text shadow mirror rule.
- * Shifts the vignette center to 100% (right side) and flips gradient direction.
+ * Positions on the right side and flips gradient direction to left.
  */
 [dir="rtl"] .hero-item::before {
     --hero-gradient-x: 100%;
+    left: auto;
+    right: 0;
     background: linear-gradient(
         to left,
         var(--hero-vignette-start) 0%,
-        var(--hero-vignette-start) 25%,
-        var(--hero-vignette-mid) 60%,
+        var(--hero-vignette-mid) 45%,
         var(--hero-vignette-end) 100%
     );
 }
@@ -197,12 +207,25 @@
 .hero-item::after {
     content: '';
     position: absolute;
-    top: 0;
+    /* 
+     * PERFORMANCE OPTIMIZATION (Geometry Bounding):
+     * Instead of spanning 100% height with 60% transparent overdraw,
+     * physically bound the element to the bottom 42% where the fade actually lives.
+     * Instantly cuts GPU fragment shader fill-rate for this layer by ~58%!
+     */
+    bottom: 0;
     left: 0;
     width: 100%;
-    height: 100%;
-    background: linear-gradient(to top,var(--jf-background) 4%,rgba(0,0,0,.8) 30%,transparent 40%);
+    height: 42%;
+    /* Simplified 2-stop bottom gradient for smooth background blending into theme background */
+    background: linear-gradient(
+        to top,
+        var(--jf-background) 0%,
+        transparent 100%
+    );
     z-index: 2;
+    pointer-events: none;
+    transform: translateZ(0);
 }
 
 /* ============================================================================
@@ -830,7 +853,8 @@
 }
 
 /* Tall Canvas Height for Immersive mode */
-.hero-carousel-container.immersive .hero-carousel {
+.hero-carousel-container.immersive .hero-carousel,
+.hero-carousel-container.immersive-performance .hero-carousel {
     /* 
      * Calibrated canvas height for the immersive background artwork.
      * Retains full artwork presence without warping across window height changes.
@@ -840,7 +864,8 @@
 }
 
 /* Compact Immersive Canvas Height */
-.hero-carousel-container.immersive.compact .hero-carousel {
+.hero-carousel-container.immersive.compact .hero-carousel,
+.hero-carousel-container.immersive-performance.compact .hero-carousel {
     /* 
      * In compact mode, maintains deep-overlap immersive canvas proportions.
      * Preserves stable geometry across variable display scaling factors.
@@ -850,7 +875,8 @@
 }
 
 /* Upward Section Overlap to place home-rows over the lower section of immersive backdrop */
-#home-hero-placeholder.style-immersive + .home-rows {
+#home-hero-placeholder.style-immersive + .home-rows,
+#home-hero-placeholder.style-immersive-performance + .home-rows {
     /* 
      * Pull content rows higher up over the backdrop image in standard mode.
      * Shifted up to the -450px range for an incredibly sleek, high-end overlap.
@@ -863,7 +889,8 @@
 }
 
 /* Upward Section Overlap for compact mode */
-#home-hero-placeholder.style-immersive.style-compact + .home-rows {
+#home-hero-placeholder.style-immersive.style-compact + .home-rows,
+#home-hero-placeholder.style-immersive-performance.style-compact + .home-rows {
     /* 
      * Compact layout inherits the deeply immersive standard.
      * Pulls the home-rows high (-550px) over the background for dense card visibility.
@@ -874,7 +901,8 @@
 }
 
 /* Elevated Text Content padding to push meta/description above the home-rows overlap */
-.hero-carousel-container.immersive .hero-item {
+.hero-carousel-container.immersive .hero-item,
+.hero-carousel-container.immersive-performance .hero-item {
     /* 
      * Elevate text content by 470px to match the -450px sibling overlap.
      * Keeps titles, ratings, and descriptions perfectly aligned above the row.
@@ -883,7 +911,8 @@
 }
 
 /* Elevated Text Content padding for compact immersive mode */
-.hero-carousel-container.immersive.compact .hero-item {
+.hero-carousel-container.immersive.compact .hero-item,
+.hero-carousel-container.immersive-performance.compact .hero-item {
     /* 
      * Pushes text up by 570px in compact mode to avoid occlusion 
      * from the deep -550px overlap.
@@ -904,7 +933,8 @@
  */
 
 /* Standard Immersive Size Tuning */
-.hero-carousel-container.immersive .hero-logo-container {
+.hero-carousel-container.immersive .hero-logo-container,
+.hero-carousel-container.immersive-performance .hero-logo-container {
     /* 
      * Sleek logo dimensions scaled down to give 20px of extra vertical relief.
      * Preserves visual presence while avoiding crowding on 1080p screens.
@@ -913,7 +943,8 @@
     margin-bottom: 16px;
 }
 
-.hero-carousel-container.immersive .hero-item-title {
+.hero-carousel-container.immersive .hero-item-title,
+.hero-carousel-container.immersive-performance .hero-item-title {
     /* 
      * Text title typography fallback (when logo assets are missing).
      * Scaled down from 4rem to 3.2rem (approx 51px) to prevent vertical bloat.
@@ -922,22 +953,27 @@
     margin-bottom: 12px;
 }
 
-.hero-carousel-container.immersive .hero-meta-row {
+.hero-carousel-container.immersive .hero-meta-row,
+.hero-carousel-container.immersive-performance .hero-meta-row {
     /* Tighten spatial gap between metadata badges and description text */
     margin-bottom: 16px;
 }
 
-.hero-carousel-container.immersive .hero-description {
+.hero-carousel-container.immersive .hero-description,
+.hero-carousel-container.immersive-performance .hero-description {
     /* 
-     * Outfit/Inter high-legibility standard text size (20px).
-     * Keeps synopsis perfectly clear while conserving critical screen real estate.
+     * High-legibility standard text size (20px).
+     * Keeps synopsis clear while conserving screen real estate.
+     * Restrict horizontal width to left 50% to prevent collision with right artwork.
      */
     font-size: 1.25rem;
     margin-bottom: 20px;
+    max-width: 70%;
 }
 
 /* Compact Immersive Size Tuning */
-.hero-carousel-container.immersive.compact .hero-logo-container {
+.hero-carousel-container.immersive.compact .hero-logo-container,
+.hero-carousel-container.immersive-performance.compact .hero-logo-container {
     /* 
      * Ultra-compact 80px height designed for extreme information density.
      */
@@ -945,18 +981,21 @@
     margin-bottom: 12px;
 }
 
-.hero-carousel-container.immersive.compact .hero-item-title {
+.hero-carousel-container.immersive.compact .hero-item-title,
+.hero-carousel-container.immersive-performance.compact .hero-item-title {
     /* Elegant, slim text title for the compact immersive configuration */
     font-size: 2.4rem;
     margin-bottom: 10px;
 }
 
-.hero-carousel-container.immersive.compact .hero-meta-row {
+.hero-carousel-container.immersive.compact .hero-meta-row,
+.hero-carousel-container.immersive-performance.compact .hero-meta-row {
     /* Minimum possible spacing to keep items perfectly clustered */
     margin-bottom: 12px;
 }
 
-.hero-carousel-container.immersive.compact .hero-description {
+.hero-carousel-container.immersive.compact .hero-description,
+.hero-carousel-container.immersive-performance.compact .hero-description {
     /* 
      * Sleek 18px body copy typography.
      * Clamp to 2 lines instead of 3 to save massive vertical space.
@@ -966,6 +1005,208 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
     margin-bottom: 14px;
+    max-width: 70%;
+}
+
+/* 
+ * ============================================================================
+ * Immersive (Performance) Layout Overrides
+ * ============================================================================
+ * Provides high-speed TV scrolling by bounding the background texture canvas
+ * to the right side of the screen (~60% width), dramatically reducing
+ * GPU texture allocation and eliminating overdraw beneath the home row cards.
+ * Artwork is feathered with circular gradient masks for seamless visual flow.
+ * ============================================================================
+ */
+
+.hero-carousel-container.immersive-performance .hero-backdrop {
+    /* 
+     * Position artwork on the right quadrant, spanning 65% width and 100% height.
+     * Full height allows the bottom fade to extend across the entire 972px canvas,
+     * seamlessly dissolving behind the row cards into the section below without
+     * any premature horizontal shelf cutoff at 750px.
+     */
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: auto;
+    width: 65%;
+    height: 100%;
+    background-size: cover;
+    background-position: center 15%;
+    background-repeat: no-repeat;
+    transform: translateZ(0);
+
+    /*
+     * Horizontal Alpha Masking:
+     * Feathers the left edge of the backdrop image into the typography side.
+     * The vertical bottom fade is handled universally on the parent (.hero-item),
+     * avoiding multi-mask compositing bugs across different TV browser engines.
+     */
+    -webkit-mask-image: linear-gradient(
+        to right,
+        transparent 0%,
+        rgba(0, 0, 0, 0.02) 8%,
+        rgba(0, 0, 0, 0.10) 18%,
+        rgba(0, 0, 0, 0.26) 30%,
+        rgba(0, 0, 0, 0.48) 44%,
+        rgba(0, 0, 0, 0.70) 58%,
+        rgba(0, 0, 0, 0.86) 70%,
+        rgba(0, 0, 0, 0.96) 82%,
+        black 92%
+    );
+    mask-image: linear-gradient(
+        to right,
+        transparent 0%,
+        rgba(0, 0, 0, 0.02) 8%,
+        rgba(0, 0, 0, 0.10) 18%,
+        rgba(0, 0, 0, 0.26) 30%,
+        rgba(0, 0, 0, 0.48) 44%,
+        rgba(0, 0, 0, 0.70) 58%,
+        rgba(0, 0, 0, 0.86) 70%,
+        rgba(0, 0, 0, 0.96) 82%,
+        black 92%
+    );
+}
+
+[dir="rtl"] .hero-carousel-container.immersive-performance .hero-backdrop {
+    /* Mirrored horizontal alpha mask for RTL reading direction */
+    right: auto;
+    left: 0;
+    -webkit-mask-image: linear-gradient(
+        to left,
+        transparent 0%,
+        rgba(0, 0, 0, 0.02) 8%,
+        rgba(0, 0, 0, 0.10) 18%,
+        rgba(0, 0, 0, 0.26) 30%,
+        rgba(0, 0, 0, 0.48) 44%,
+        rgba(0, 0, 0, 0.70) 58%,
+        rgba(0, 0, 0, 0.86) 70%,
+        rgba(0, 0, 0, 0.96) 82%,
+        black 92%
+    );
+    mask-image: linear-gradient(
+        to left,
+        transparent 0%,
+        rgba(0, 0, 0, 0.02) 8%,
+        rgba(0, 0, 0, 0.10) 18%,
+        rgba(0, 0, 0, 0.26) 30%,
+        rgba(0, 0, 0, 0.48) 44%,
+        rgba(0, 0, 0, 0.70) 58%,
+        rgba(0, 0, 0, 0.86) 70%,
+        rgba(0, 0, 0, 0.96) 82%,
+        black 92%
+    );
+}
+
+/*
+ * Suppress full-screen linear gradient vignettes & solid color overlays:
+ * Because the hardware alpha mask handles the transparent falloff on the GPU,
+ * hardcoded black overlays on ::before and ::after are disabled to prevent
+ * stamping black paint over colorful themes (e.g. Purple Haze, Blue Radiance).
+ */
+.hero-carousel-container.immersive-performance .hero-item::before,
+.hero-carousel-container.immersive-performance .hero-item::after,
+.hero-carousel-container.immersive-performance .hero-backdrop::after {
+    display: none !important;
+}
+
+/* 
+ * ============================================================================
+ * BlurHash Ambient Color Fill
+ * ============================================================================
+ * Fills the remaining background area behind the hero artwork with low-frequency
+ * ambient colors decoded from the current item's BlurHash.
+ *
+ * Layers:
+ * - .hero-blurhash-fill-wrap: Container placed at z-index -2 (behind .hero-backdrop).
+ * - .hero-blurhash-fill-canvas: Stretched 32x18 low-resolution canvas magnified
+ *   using hardware-accelerated bilinear filtering and scale(1.06) to avoid edge bleed.
+ * - .hero-blurhash-fill-vignette: Horizontal contrast gradient on the text side
+ *   plus vertical bottom gradient transitioning smoothly into --jf-background.
+ * ============================================================================
+ */
+
+.hero-blurhash-fill-wrap {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: -2;
+    overflow: hidden;
+    pointer-events: none;
+    transform: translateZ(0);
+}
+
+.hero-blurhash-fill-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scale(1.06);
+    opacity: 0;
+    transition: opacity 600ms ease-out;
+    pointer-events: none;
+    image-rendering: auto;
+    /*
+     * Soft Bottom Feathering:
+     * Fades the low-frequency ambient canvas softly into the background body mesh
+     * without introducing any artificial black pigment or dark bands beneath rows.
+     */
+    -webkit-mask-image: linear-gradient(
+        to top,
+        transparent 0%,
+        rgba(0, 0, 0, 0.02) 6%,
+        rgba(0, 0, 0, 0.12) 16%,
+        rgba(0, 0, 0, 0.38) 28%,
+        rgba(0, 0, 0, 0.75) 42%,
+        black 58%
+    );
+    mask-image: linear-gradient(
+        to top,
+        transparent 0%,
+        rgba(0, 0, 0, 0.02) 6%,
+        rgba(0, 0, 0, 0.12) 16%,
+        rgba(0, 0, 0, 0.38) 28%,
+        rgba(0, 0, 0, 0.75) 42%,
+        black 58%
+    );
+}
+
+.hero-blurhash-fill-vignette {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 1;
+    /*
+     * Text-Side Contrast Protection Vignette:
+     * Provides solid contrast behind title typography and metadata on the left quadrant,
+     * while completely preserving clean bottom transparency for the active theme colors.
+     */
+    background: linear-gradient(
+        to right,
+        rgba(0, 0, 0, 0.92) 0%,
+        rgba(0, 0, 0, 0.80) 16%,
+        rgba(0, 0, 0, 0.56) 36%,
+        rgba(0, 0, 0, 0.28) 58%,
+        rgba(0, 0, 0, 0.08) 78%,
+        transparent 92%
+    );
+}
+
+[dir="rtl"] .hero-blurhash-fill-vignette {
+    background: linear-gradient(
+        to left,
+        rgba(0, 0, 0, 0.92) 0%,
+        rgba(0, 0, 0, 0.80) 16%,
+        rgba(0, 0, 0, 0.56) 36%,
+        rgba(0, 0, 0, 0.28) 58%,
+        rgba(0, 0, 0, 0.08) 78%,
+        transparent 92%
+    );
 }
 
 
@@ -1002,98 +1243,259 @@
 /*
  * Single-mask approach: apply mask-image to .hero-item (the parent), which clips
  * both the .hero-backdrop image AND the ::before vignette overlay in one operation.
- * No need for separate masks on each child.
+ * Universal across ALL themes (Ambient, Tinted, Classic Dark, Classic Light, etc.).
+ * Guarantees that no theme paints an artificial black gradient over the bottom row cards.
  */
 
-/* Standard widescreen - Ambient Glow theme only */
-[data-theme-mode="ambient"] .hero-carousel-container.immersive:not(.compact) .hero-item {
-    -webkit-mask-image: linear-gradient(to bottom, black 35%, transparent 85%);
-    mask-image: linear-gradient(to bottom, black 35%, transparent 85%);
-}
-[data-theme-mode="ambient"] .hero-carousel-container.semi-immersive:not(.compact) .hero-item {
-    -webkit-mask-image: linear-gradient(to bottom, black 40%, transparent 90%);
-    mask-image: linear-gradient(to bottom, black 40%, transparent 90%);
+/* Standard widescreen - Universal Across All Themes */
+.hero-carousel-container.immersive:not(.compact) .hero-item,
+.hero-carousel-container.immersive-performance:not(.compact) .hero-item {
+    -webkit-mask-image: linear-gradient(
+        to bottom,
+        black 35%,
+        rgba(0, 0, 0, 0.96) 48%,
+        rgba(0, 0, 0, 0.75) 62%,
+        rgba(0, 0, 0, 0.38) 76%,
+        rgba(0, 0, 0, 0.08) 88%,
+        transparent 96%
+    );
+    mask-image: linear-gradient(
+        to bottom,
+        black 35%,
+        rgba(0, 0, 0, 0.96) 48%,
+        rgba(0, 0, 0, 0.75) 62%,
+        rgba(0, 0, 0, 0.38) 76%,
+        rgba(0, 0, 0, 0.08) 88%,
+        transparent 96%
+    );
 }
 
-/* Compact widescreen - Ambient Glow theme only */
-[data-theme-mode="ambient"] .hero-carousel-container.immersive.compact .hero-item {
-    -webkit-mask-image: linear-gradient(to bottom, black 30%, transparent 80%);
-    mask-image: linear-gradient(to bottom, black 30%, transparent 80%);
+/* Compact widescreen - Universal Across All Themes */
+.hero-carousel-container.immersive.compact .hero-item,
+.hero-carousel-container.immersive-performance.compact .hero-item {
+    -webkit-mask-image: linear-gradient(
+        to bottom,
+        black 30%,
+        rgba(0, 0, 0, 0.95) 44%,
+        rgba(0, 0, 0, 0.70) 58%,
+        rgba(0, 0, 0, 0.32) 72%,
+        rgba(0, 0, 0, 0.06) 84%,
+        transparent 94%
+    );
+    mask-image: linear-gradient(
+        to bottom,
+        black 30%,
+        rgba(0, 0, 0, 0.95) 44%,
+        rgba(0, 0, 0, 0.70) 58%,
+        rgba(0, 0, 0, 0.32) 72%,
+        rgba(0, 0, 0, 0.06) 84%,
+        transparent 94%
+    );
 }
-[data-theme-mode="ambient"] .hero-carousel-container.semi-immersive.compact .hero-item {
-    -webkit-mask-image: linear-gradient(to bottom, black 35%, transparent 80%);
-    mask-image: linear-gradient(to bottom, black 35%, transparent 80%);
+
+/*
+ * ============================================================================
+ * Semi-Immersive Layout & Mask Architecture
+ * ============================================================================
+ * In semi-immersive mode, text content (.hero-content) is positioned directly
+ * near the bottom of the canvas (padding-bottom: 120px / 80px compact).
+ * If a vertical mask is applied to the parent .hero-item, the alpha gradient
+ * occludes the overview and meta typography, reducing opacity and readability.
+ *
+ * Architecture Resolution:
+ * 1. .hero-item is left completely unmasked so all text details remain 100% opaque.
+ * 2. .hero-backdrop receives its own bottom alpha mask to softly dissolve artwork
+ *    directly into the theme background without leaving a harsh horizontal shelf.
+ * 3. .hero-item::before receives a dedicated vertical mask that shields the text
+ *    with deep contrast while dissolving to 0% at the baseline edge.
+ * ============================================================================
+ */
+
+/* Keep typography parent container completely unmasked for maximum clarity */
+.hero-carousel-container.semi-immersive .hero-item {
+    -webkit-mask-image: none !important;
+    mask-image: none !important;
+}
+
+/*
+ * Standard Semi-Immersive Backdrop Fade:
+ * Smooth 7-stop polynomial ease curve dissolving artwork texture into --jf-background.
+ * Ensures the bottom boundary vanishes into the section background above media rows.
+ */
+.hero-carousel-container.semi-immersive:not(.compact) .hero-backdrop {
+    -webkit-mask-image: linear-gradient(
+        to bottom,
+        black 25%,
+        rgba(0, 0, 0, 0.96) 40%,
+        rgba(0, 0, 0, 0.82) 54%,
+        rgba(0, 0, 0, 0.58) 68%,
+        rgba(0, 0, 0, 0.30) 80%,
+        rgba(0, 0, 0, 0.08) 92%,
+        transparent 100%
+    );
+    mask-image: linear-gradient(
+        to bottom,
+        black 25%,
+        rgba(0, 0, 0, 0.96) 40%,
+        rgba(0, 0, 0, 0.82) 54%,
+        rgba(0, 0, 0, 0.58) 68%,
+        rgba(0, 0, 0, 0.30) 80%,
+        rgba(0, 0, 0, 0.08) 92%,
+        transparent 100%
+    );
+}
+
+/*
+ * Compact Semi-Immersive Backdrop Fade:
+ * Calibrated for lower canvas height (540px) to deliver an identical smooth gradient falloff.
+ */
+.hero-carousel-container.semi-immersive.compact .hero-backdrop {
+    -webkit-mask-image: linear-gradient(
+        to bottom,
+        black 20%,
+        rgba(0, 0, 0, 0.95) 35%,
+        rgba(0, 0, 0, 0.80) 50%,
+        rgba(0, 0, 0, 0.54) 65%,
+        rgba(0, 0, 0, 0.28) 78%,
+        rgba(0, 0, 0, 0.06) 90%,
+        transparent 100%
+    );
+    mask-image: linear-gradient(
+        to bottom,
+        black 20%,
+        rgba(0, 0, 0, 0.95) 35%,
+        rgba(0, 0, 0, 0.80) 50%,
+        rgba(0, 0, 0, 0.54) 65%,
+        rgba(0, 0, 0, 0.28) 78%,
+        rgba(0, 0, 0, 0.06) 90%,
+        transparent 100%
+    );
 }
 
 /* 
- * Eliminate redundant second gradient layer in Ambient Glow mode:
- * When alpha masking is already carving out the backdrop transparency,
- * this overlay gradient is pure overdraw overhead.
+ * Completely suppress redundant hardcoded black gradient overlay (::after) across ALL themes:
+ * Because hardware alpha masking seamlessly dissolves the backdrop into the theme's true
+ * background canvas, ::after's hardcoded black paint is eliminated on all modes
+ * (Ambient, Tinted, Classic Dark, Classic Light, OLED Black, etc.).
  */
-[data-theme-mode="ambient"] .hero-carousel-container.immersive .hero-item::after,
-[data-theme-mode="ambient"] .hero-carousel-container.semi-immersive .hero-item::after,
-[data-theme-mode="ambient"] .hero-carousel-container.immersive.compact .hero-item::after,
-[data-theme-mode="ambient"] .hero-carousel-container.semi-immersive.compact .hero-item::after {
+.hero-carousel-container.immersive .hero-item::after,
+.hero-carousel-container.immersive-performance .hero-item::after,
+.hero-carousel-container.semi-immersive .hero-item::after,
+.hero-carousel-container.compact .hero-item::after {
     display: none !important;
 }
-
-/* ::before inherits the fade from .hero-item's mask above — no separate mask needed */
-
 
 /* 
  * ============================================================================
  * Text Shadow Overlay (::before)
  * ============================================================================
- * We replace the old mask-image and background-size hacks with standard CSS
- * elliptical radial gradients. By using calc() for the vertical radius, we
- * fade the dark text vignette exactly above the row overlap boundaries.
- * This prevents sharp horizontal seam lines while keeping paint fully on-GPU.
+ * Standard horizontal contrast gradient covering typography on the left quadrant.
+ * Bounded to 65% width to reduce GPU overdraw across the right artwork region.
  * ============================================================================
  */
 
-/* 
- * Text Shadow Overlay (::before):
- * Uses dynamic linear-gradient overlays driven by CSS variables (--hero-vignette-start, etc.).
- * seamlessly into the backdrop artwork without sharp boundary artifacts.
- */
 .hero-carousel-container.immersive .hero-item::before,
 .hero-carousel-container.semi-immersive .hero-item::before,
 .hero-carousel-container.immersive.compact .hero-item::before,
 .hero-carousel-container.semi-immersive.compact .hero-item::before {
-    -webkit-mask-image: none !important;
-    mask-image: none !important;
+    width: 65%;
     background: linear-gradient(
         to right,
         var(--hero-vignette-start) 0%,
-        var(--hero-vignette-start) 25%,
-        var(--hero-vignette-mid) 60%,
+        var(--hero-vignette-mid) 45%,
         var(--hero-vignette-end) 100%
     );
 }
 
+/* RTL horizontal vignette mirror rule */
 [dir="rtl"] .hero-carousel-container.immersive .hero-item::before,
 [dir="rtl"] .hero-carousel-container.semi-immersive .hero-item::before,
 [dir="rtl"] .hero-carousel-container.immersive.compact .hero-item::before,
 [dir="rtl"] .hero-carousel-container.semi-immersive.compact .hero-item::before {
+    left: auto;
+    right: 0;
+    width: 65%;
     background: linear-gradient(
         to left,
         var(--hero-vignette-start) 0%,
-        var(--hero-vignette-start) 25%,
-        var(--hero-vignette-mid) 60%,
+        var(--hero-vignette-mid) 45%,
         var(--hero-vignette-end) 100%
+    );
+}
+
+/* 
+ * Immersive modes inherit the vertical bottom fade from .hero-item's mask,
+ * so ::before does not need its own vertical alpha mask in immersive mode.
+ */
+.hero-carousel-container.immersive .hero-item::before,
+.hero-carousel-container.immersive.compact .hero-item::before {
+    -webkit-mask-image: none !important;
+    mask-image: none !important;
+}
+
+/*
+ * Semi-Immersive Text Contrast Vignette Falloff:
+ * Dedicated vertical alpha ramp for the left vignette overlay.
+ * Delivers deep, uncompromised contrast behind titles and synopsis details,
+ * then softly fades to 0% below the text baseline so no dark rectangular box
+ * stamps over the active theme canvas.
+ */
+.hero-carousel-container.semi-immersive:not(.compact) .hero-item::before {
+    -webkit-mask-image: linear-gradient(
+        to bottom,
+        black 0%,
+        black 65%,
+        rgba(0, 0, 0, 0.92) 76%,
+        rgba(0, 0, 0, 0.45) 86%,
+        rgba(0, 0, 0, 0.08) 94%,
+        transparent 100%
+    );
+    mask-image: linear-gradient(
+        to bottom,
+        black 0%,
+        black 65%,
+        rgba(0, 0, 0, 0.92) 76%,
+        rgba(0, 0, 0, 0.45) 86%,
+        rgba(0, 0, 0, 0.08) 94%,
+        transparent 100%
+    );
+}
+
+/* Compact Semi-Immersive Text Contrast Vignette Falloff */
+.hero-carousel-container.semi-immersive.compact .hero-item::before {
+    -webkit-mask-image: linear-gradient(
+        to bottom,
+        black 0%,
+        black 62%,
+        rgba(0, 0, 0, 0.90) 74%,
+        rgba(0, 0, 0, 0.45) 86%,
+        rgba(0, 0, 0, 0.08) 94%,
+        transparent 100%
+    );
+    mask-image: linear-gradient(
+        to bottom,
+        black 0%,
+        black 62%,
+        rgba(0, 0, 0, 0.90) 74%,
+        rgba(0, 0, 0, 0.45) 86%,
+        rgba(0, 0, 0, 0.08) 94%,
+        transparent 100%
     );
 }
 
 /* Ensure the main container frames remain transparent */
 .hero-carousel-container.immersive,
+.hero-carousel-container.immersive-performance,
 .hero-carousel-container.semi-immersive,
 .hero-carousel-container.immersive .hero-carousel,
+.hero-carousel-container.immersive-performance .hero-carousel,
 .hero-carousel-container.semi-immersive .hero-carousel {
     background: transparent !important;
 }
 
 /* Elevate indicator dots to align perfectly with the elevated text */
-.hero-carousel-container.immersive .hero-indicators {
+.hero-carousel-container.immersive .hero-indicators,
+.hero-carousel-container.immersive-performance .hero-indicators {
     /* 
      * Align dot indicators with the baseline of the description paragraph for the -450px overlap.
      * Elevated to 430px to guarantee zero horizontal collision/overlapping with the side chevrons.
@@ -1102,7 +1504,8 @@
 }
 
 /* Elevate indicator dots for compact immersive mode */
-.hero-carousel-container.immersive.compact .hero-indicators {
+.hero-carousel-container.immersive.compact .hero-indicators,
+.hero-carousel-container.immersive-performance.compact .hero-indicators {
     /* 
      * Align dot indicators perfectly with the elevated text at the 570px boundary.
      * Elevated to 530px to clear navigation chevrons completely on lower viewport heights.
@@ -1120,7 +1523,8 @@
  */
 
 /* Elevate navigation arrows in standard immersive mode */
-.hero-carousel-container.immersive .hero-nav-arrows {
+.hero-carousel-container.immersive .hero-nav-arrows,
+.hero-carousel-container.immersive-performance .hero-nav-arrows {
     /* 
      * Shift standard mode arrows up to 30% viewport height.
      * Aligns perfectly with the visual center of the backdrop above the -450px row overlap.
@@ -1129,7 +1533,8 @@
 }
 
 /* Elevate navigation arrows for compact immersive mode */
-.hero-carousel-container.immersive.compact .hero-nav-arrows {
+.hero-carousel-container.immersive.compact .hero-nav-arrows,
+.hero-carousel-container.immersive-performance.compact .hero-nav-arrows {
     /* 
      * Shift compact mode arrows further up to 24% viewport height.
      * Centers arrows relative to the taller -550px bottom overlap.
@@ -1155,6 +1560,7 @@ body:not(.no-sidebar):not(.sidebar-mode-hidden) #home-content {
 
 /* 3. Expand the carousel container to the left edge of the screen */
 body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.immersive,
+body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.immersive-performance,
 body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.semi-immersive {
     margin-left: calc(-1 * var(--sidebar-width-collapsed, 100px)) !important;
     width: calc(100% + var(--sidebar-width-collapsed, 100px)) !important;
@@ -1162,12 +1568,14 @@ body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.semi-im
 
 /* 4. Position carousel content back to its original screen position */
 body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.immersive .hero-content,
+body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.immersive-performance .hero-content,
 body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.semi-immersive .hero-content {
     margin-left: var(--sidebar-width-collapsed, 100px) !important;
 }
 
 /* 5. Center navigation arrows relative to the visible screen width */
 body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.immersive .hero-nav-arrows,
+body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.immersive-performance .hero-nav-arrows,
 body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.semi-immersive .hero-nav-arrows {
     padding-left: calc(8px + var(--sidebar-width-collapsed, 100px)) !important;
 }
@@ -1189,6 +1597,7 @@ body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.semi-im
 }
 
 [dir="rtl"] body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.immersive,
+[dir="rtl"] body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.immersive-performance,
 [dir="rtl"] body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.semi-immersive {
     margin-right: calc(-1 * var(--sidebar-width-collapsed, 100px)) !important;
     margin-left: 0 !important;
@@ -1196,12 +1605,14 @@ body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.semi-im
 }
 
 [dir="rtl"] body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.immersive .hero-content,
+[dir="rtl"] body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.immersive-performance .hero-content,
 [dir="rtl"] body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.semi-immersive .hero-content {
     margin-right: var(--sidebar-width-collapsed, 100px) !important;
     margin-left: 0 !important;
 }
 
 [dir="rtl"] body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.immersive .hero-nav-arrows,
+[dir="rtl"] body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.immersive-performance .hero-nav-arrows,
 [dir="rtl"] body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.semi-immersive .hero-nav-arrows {
     padding-right: calc(8px + var(--sidebar-width-collapsed, 100px)) !important;
     padding-left: 8px !important;
@@ -1214,32 +1625,42 @@ body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.semi-im
 @media (max-height: 850px) {
     /* Immersive Mode (Native unscaled viewports only) */
     html:not([data-display-scale]) .hero-carousel-container.immersive .hero-carousel,
-    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-carousel {
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance .hero-carousel,
+    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-carousel,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance.compact .hero-carousel {
         min-height: 520px;
     }
-    html:not([data-display-scale]) #home-hero-placeholder.style-immersive + .home-rows {
+    html:not([data-display-scale]) #home-hero-placeholder.style-immersive + .home-rows,
+    html:not([data-display-scale]) #home-hero-placeholder.style-immersive-performance + .home-rows {
         margin-top: -340px;
     }
-    html:not([data-display-scale]) #home-hero-placeholder.style-immersive.style-compact + .home-rows {
+    html:not([data-display-scale]) #home-hero-placeholder.style-immersive.style-compact + .home-rows,
+    html:not([data-display-scale]) #home-hero-placeholder.style-immersive-performance.style-compact + .home-rows {
         margin-top: -420px;
     }
 
-    html:not([data-display-scale]) .hero-carousel-container.immersive .hero-item {
+    html:not([data-display-scale]) .hero-carousel-container.immersive .hero-item,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance .hero-item {
         padding-bottom: 360px;
     }
-    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-item {
+    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-item,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance.compact .hero-item {
         padding-bottom: 440px;
     }
-    html:not([data-display-scale]) .hero-carousel-container.immersive .hero-indicators {
+    html:not([data-display-scale]) .hero-carousel-container.immersive .hero-indicators,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance .hero-indicators {
         bottom: 330px;
     }
-    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-indicators {
+    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-indicators,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance.compact .hero-indicators {
         bottom: 410px;
     }
-    html:not([data-display-scale]) .hero-carousel-container.immersive .hero-nav-arrows {
+    html:not([data-display-scale]) .hero-carousel-container.immersive .hero-nav-arrows,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance .hero-nav-arrows {
         top: 35%;
     }
-    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-nav-arrows {
+    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-nav-arrows,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance.compact .hero-nav-arrows {
         top: 28%;
     }
 
@@ -1255,32 +1676,42 @@ body:not(.no-sidebar):not(.sidebar-mode-hidden) .hero-carousel-container.semi-im
 @media (max-height: 700px) {
     /* Immersive Mode (Native unscaled viewports only) */
     html:not([data-display-scale]) .hero-carousel-container.immersive .hero-carousel,
-    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-carousel {
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance .hero-carousel,
+    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-carousel,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance.compact .hero-carousel {
         min-height: 420px;
     }
-    html:not([data-display-scale]) #home-hero-placeholder.style-immersive + .home-rows {
+    html:not([data-display-scale]) #home-hero-placeholder.style-immersive + .home-rows,
+    html:not([data-display-scale]) #home-hero-placeholder.style-immersive-performance + .home-rows {
         margin-top: -240px;
     }
-    html:not([data-display-scale]) #home-hero-placeholder.style-immersive.style-compact + .home-rows {
+    html:not([data-display-scale]) #home-hero-placeholder.style-immersive.style-compact + .home-rows,
+    html:not([data-display-scale]) #home-hero-placeholder.style-immersive-performance.style-compact + .home-rows {
         margin-top: -300px;
     }
 
-    html:not([data-display-scale]) .hero-carousel-container.immersive .hero-item {
+    html:not([data-display-scale]) .hero-carousel-container.immersive .hero-item,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance .hero-item {
         padding-bottom: 260px;
     }
-    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-item {
+    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-item,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance.compact .hero-item {
         padding-bottom: 320px;
     }
-    html:not([data-display-scale]) .hero-carousel-container.immersive .hero-indicators {
+    html:not([data-display-scale]) .hero-carousel-container.immersive .hero-indicators,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance .hero-indicators {
         bottom: 230px;
     }
-    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-indicators {
+    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-indicators,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance.compact .hero-indicators {
         bottom: 290px;
     }
-    html:not([data-display-scale]) .hero-carousel-container.immersive .hero-nav-arrows {
+    html:not([data-display-scale]) .hero-carousel-container.immersive .hero-nav-arrows,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance .hero-nav-arrows {
         top: 40%;
     }
-    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-nav-arrows {
+    html:not([data-display-scale]) .hero-carousel-container.immersive.compact .hero-nav-arrows,
+    html:not([data-display-scale]) .hero-carousel-container.immersive-performance.compact .hero-nav-arrows {
         top: 32%;
     }
 

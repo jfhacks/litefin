@@ -346,7 +346,13 @@ class CardRenderer {
         // resolution, BlurHash lookup, quality badge iteration, and string
         // building. Cache key incorporates every option that changes output.
         // ------------------------------------------------------------------
-        const cacheKey = `${mediaLayout}|${isLandscape}|${type}|${contextType}|${isGrid}|${cardWidth}|${options.showMeta}|${item._dynamicThumbUrl || ''}|${libraryThumbMode}|${storage.getItem('pref:hideLibraryLabels')}|${storage.getItem('pref:cardLabelStyle')}|${preferBackdrops}`;
+        // Evaluate BlurHash disable flags for cache invalidation
+        // Ensures that whenever user flips global or library blurhash toggles, cached cards flush immediately
+        const isGlobalBlurHashDisabled = storage.getItem('litefin:disableBlurhash') === 'true';
+        const isLibraryBlurHashDisabledPref = storage.getItem('pref:disableLibraryBlurhash') !== 'false';
+
+        // Incorporate every layout, dimension, and performance preference into the cache key
+        const cacheKey = `${mediaLayout}|${isLandscape}|${type}|${contextType}|${isGrid}|${cardWidth}|${options.showMeta}|${item._dynamicThumbUrl || ''}|${libraryThumbMode}|${storage.getItem('pref:hideLibraryLabels')}|${storage.getItem('pref:cardLabelStyle')}|${preferBackdrops}|${isGlobalBlurHashDisabled}|${isLibraryBlurHashDisabledPref}`;
         if (CardRenderer._htmlCacheKey !== cacheKey) {
             CardRenderer._htmlCache.clear();
             CardRenderer._htmlCacheKey = cacheKey;
@@ -1289,9 +1295,19 @@ class CardRenderer {
         // and expanding-poster support. If no image is available, we construct
         // the premium gradient fallback.
         // ====================================================================
-        // Check if the user has disabled BlurHash placeholders in Display Settings
-        // Fall back to the default dark grey skeletons (no canvas injected) if disabled for raw performance.
-        const isBlurHashDisabled = storage.getItem('litefin:disableBlurhash') === 'true';
+        // ====================================================================
+        // Check if BlurHash placeholders are disabled globally or specifically in library grids
+        // --------------------------------------------------------------------
+        // Global setting ('litefin:disableBlurhash') stops blurhash across the entire app.
+        // Library setting ('pref:disableLibraryBlurhash') defaults to true (enabled toggle)
+        // to stop CPU-intensive DCT decoding on low-power TV chipsets when browsing library grids.
+        // When disabled, no <canvas> element is injected, leaving the standard CSS dark skeleton.
+        // ====================================================================
+        const isLibraryContext = contextType === 'library' || isGrid || type === 'library';
+        const isLibraryBlurHashDisabled = isLibraryContext && isLibraryBlurHashDisabledPref;
+        const isBlurHashDisabled = isGlobalBlurHashDisabled || isLibraryBlurHashDisabled;
+
+        // Only inject the canvas element if BlurHash is present and not suppressed
         const blurHashHtml =
             blurHash && !isBlurHashDisabled
                 ? `<canvas class="blurhash-canvas" data-blurhash="${blurHash}"></canvas>`

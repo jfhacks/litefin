@@ -6,6 +6,7 @@
 
 [data-theme-mode="black"] {
     --jf-background: #000000;
+    --jf-background-rgb: 0, 0, 0;
     --jf-background-alt: #080808;
     --jf-card-bg: #101010;
     --jf-card-bg-hover: #151515;

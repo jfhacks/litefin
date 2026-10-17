@@ -14,6 +14,7 @@ import { layoutManager } from '../ui/LayoutManager.js';
 import { scrollController } from '../ui/ScrollController.js';
 import CardRenderer from '../utils/CardRenderer.js';
 import { imageService } from '../utils/ImageService.js';
+import { imageCache } from '../utils/ImageCache.js';
 import { VirtualCardRow } from '../components/VirtualCardRow.js';
 import { lazyLoader } from '../utils/LazyLoader.js';
 import { logger } from '../utils/Logger.js';
@@ -59,7 +60,7 @@ class LibraryPage extends Page {
             limit:
                 storage.getItem('pref:libraryPageSize') === 'unlimited'
                     ? 100
-                    : parseInt(storage.getItem('pref:libraryPageSize') || 100, 10),
+                    : parseInt(storage.getItem('pref:libraryPageSize') || 50, 10),
             totalRecordCount: 0,
 
             // Data Cache
@@ -123,6 +124,20 @@ class LibraryPage extends Page {
         // Restoration guard flag: suppresses reactive grid eviction and scroll calculations
         // while the saved focus position and DOM window boundaries are settling
         this._isRestoringFocus = false;
+
+        // Lifecycle destruction tracking flag
+        this._isDestroyed = false;
+
+        // Progressive image chunk loading state for low-limit grids (< 60 items)
+        this._idleChunkId = null;
+        this._idleChunkType = null;
+
+        // Debounce timer and navigation timestamp for decoupled image pre-warming
+        this._preWarmTimer = null;
+        this._lastGridNavTime = 0;
+
+        // In-memory set of pre-warmed image URLs to prevent duplicate in-flight network requests
+        this._preWarmedUrls = new Set();
     }
 
     render() {
@@ -643,6 +658,12 @@ class LibraryPage extends Page {
                     // card is populated rather than blank.
                     const itemIndex = this._ensureGridWindowEncompassesItem(targetId);
 
+                    // For horizontal media rows (Suggestions / Upcoming), ensure target item and forward buffer are rendered
+                    const virtualTrack = sectionContainer ? sectionContainer.querySelector('.row-items-track') : null;
+                    if (virtualTrack && virtualTrack.__virtualRow) {
+                        virtualTrack.__virtualRow.ensureItemRendered(targetId);
+                    }
+
                     // =========================================================================
                     // TWO-PHASE LAYOUT FLUSH (TIZEN / WEBKIT DOM SETTLE)
                     // =========================================================================
@@ -843,6 +864,14 @@ class LibraryPage extends Page {
             }
             if (targetId && (pending.focusSectionName === 'library-grid' || !pending.focusSectionName)) {
                 this._ensureGridWindowEncompassesItem(targetId, pending.focusElementIndex);
+            } else if (targetId && pending.focusSectionName) {
+                // Check if target section is a horizontal virtual row
+                const sectionConfig = focusManager.getSectionConfig(pending.focusSectionName);
+                const sectionContainer = sectionConfig ? sectionConfig.container : this.el;
+                const virtualTrack = sectionContainer ? sectionContainer.querySelector('.row-items-track') : null;
+                if (virtualTrack && virtualTrack.__virtualRow) {
+                    virtualTrack.__virtualRow.ensureItemRendered(targetId);
+                }
             }
 
             this.restoreScrollFocusWhenReady();
@@ -956,7 +985,7 @@ class LibraryPage extends Page {
             this._onLibraryPageSizeChanged = (newSize) => {
                 const isInfinite = newSize === 'unlimited';
                 this.state.isInfinite = isInfinite;
-                this.state.limit = isInfinite ? 100 : parseInt(newSize, 10) || 100;
+                this.state.limit = isInfinite ? 100 : parseInt(newSize, 10) || 50;
                 this.state.startIndex = 0;
                 this._loadItems();
             };
@@ -1215,6 +1244,9 @@ class LibraryPage extends Page {
             this._focusRestoreSafetyTimeout = null;
         }
 
+        // Cancel any pending progressive image idle chunk queue
+        this._cancelIdleChunkQueue();
+
         // Clean up alphabet selector position listener
         if (this._onAlphaPickerPositionChanged) {
             eventBus.off('alphaPickerPosition:changed', this._onAlphaPickerPositionChanged);
@@ -1262,6 +1294,19 @@ class LibraryPage extends Page {
             cancelAnimationFrame(this._gridEvalFrameId);
             this._gridEvalFrameId = null;
         }
+
+        // Cancel background idle prefetch timer so pending fetches do not fire after page unmount
+        if (this._libraryIdlePrefetchTimer) {
+            clearTimeout(this._libraryIdlePrefetchTimer);
+            this._libraryIdlePrefetchTimer = null;
+        }
+
+        // Cancel scheduled progressive row hydration frame
+        if (this._progressiveHydrationFrameId) {
+            cancelAnimationFrame(this._progressiveHydrationFrameId);
+            this._progressiveHydrationFrameId = null;
+        }
+
         this._gridEvalPending = false;
         this._gridFocusElement = null;
         this._gridScrollTop = null;
@@ -1591,7 +1636,7 @@ class LibraryPage extends Page {
         if (isInfinite) {
             this.state.limit = 100;
         } else if (!this.state.limit || this.state.limit < 1) {
-            this.state.limit = parseInt(storage.getItem('pref:libraryPageSize') || 100, 10);
+            this.state.limit = parseInt(storage.getItem('pref:libraryPageSize') || 50, 10);
         }
 
         // Align limit to grid columns so the last rendered row is always full.
@@ -3198,36 +3243,190 @@ class LibraryPage extends Page {
         this.state._gridColumns = columns;
         grid.dataset.gridColumns = columns;
 
-        // Reset the sliding window — a fresh _renderGrid always starts from zero
-        this.state.gridWindowStart = 0;
-        this.state.gridWindowEnd = 0;
-        this.state._hasMoreInfinite = true;
-        this.state.gridCardRowHeight = null; // Force re-measure on next append
+        /*
+         * =====================================================================
+         * VIRTUAL ROW POOL INITIALIZATION
+         * =====================================================================
+         * Instead of relying on a destructive DOM sliding window that repeatedly
+         * tears down nodes and grows flex spacers, we initialize a fixed pool
+         * of absolutely-positioned row tracks (.virtual-grid-row).
+         *
+         * The container has its full pixel height defined upfront, completely
+         * eliminating spacer resizing and preventing synchronous flexbox layout
+         * reflows across the entire grid during navigation.
+         * =====================================================================
+         */
+        grid.classList.add('virtual-active');
+        grid.style.position = 'relative';
 
-        // Reset direction cursors so stale positions from a previous page render
-        // don't immediately fire spurious append/prepend on the fresh grid
+        // Determine total mathematical rows and capacity for the active layout
+        const totalRows = Math.ceil(items.length / columns);
+        const isListView = this.state.viewMode === 'list';
+        /*
+         * DIRECT RENDERING & SKIP LAZY LOADING MODE
+         * If the page limit is below 60 items (accommodating last-row alignment for 50 items),
+         * we bypass standard IntersectionObserver lazy loading and sliding row recycling.
+         * All rows are placed into the DOM upfront, allowing instant D-pad navigation
+         * and native GPU scrolling without continuous main-thread layout thrashing.
+         */
+        const isSkipLazy = !this.state.isInfinite && this.state.limit < 60;
+        const POOL_ROWS = isSkipLazy ? totalRows : (isListView ? 22 : 10);
+        const poolRows = Math.min(totalRows, POOL_ROWS);
+
+        // Reset virtual window and row tracking cursors
+        this._currentStartRow = 0;
+        this._currentEndRow = Math.max(0, poolRows - 1);
+        this.state.gridWindowStart = 0;
+        this.state.gridWindowEnd = Math.min(items.length, poolRows * columns);
+        this.state._hasMoreInfinite = true;
+        this.state.gridCardRowHeight = null; // Invalidate cached row height for fresh layout
+
+        // Reset direction cursors so previous scroll state does not misfire
         this._lastFocusItemIndex = 0;
         this._lastGridScrollTop = 0;
 
-        // Clear the grid and inject the spacer that maintains scroll position
-        // when top rows are evicted from the DOM. Height starts at 0px.
-        grid.innerHTML = '<div id="grid-top-spacer" style="height:0;width:100%;flex:0 0 100%"></div>';
-
-        // Provide bottom scroll clearance in unlimited mode so any row (even the last row) can reach top
+        // Reserve viewport clearance at bottom in unlimited mode so last row can center
         grid.style.paddingBottom = this.state.isInfinite ? 'calc(100vh - 250px)' : '';
 
-        // Render the first chunk immediately — this is what the user sees on load
-        this._appendGridChunk(grid, items, columns);
+        /*
+         * =====================================================================
+         * EAGER VIEWPORT INITIALIZATION + PROGRESSIVE BUFFER HYDRATION
+         * =====================================================================
+         * Spreading card DOM construction across animation frames completely
+         * eliminates the synchronous main-thread freeze on low-power TV chipsets.
+         *
+         * The visible viewport rows (EAGER_ROWS) are populated with real media cards
+         * immediately so the initial frame paints in < 16ms and visible posters
+         * start loading without socket contention.
+         *
+         * Deferred buffer rows in the pool are initially seeded with lightweight
+         * skeleton tracks (preserving layout geometry) and hydrated frame-by-frame
+         * via requestAnimationFrame before the user can scroll to them.
+         * =====================================================================
+         */
+        const EAGER_ROWS = isListView ? 6 : 3;
+        const eagerRowsCount = Math.min(poolRows, EAGER_ROWS);
+        const viewMode = this.state.viewMode || 'poster';
+        const cardLabelStyle = storage.getItem('pref:cardLabelStyle') || 'default';
+        const skeletonHideLabels = cardLabelStyle === 'hidden';
 
-        // Eagerly measure row height while layout is already being computed
-        // from the initial render. This caches gridCardRowHeight before any
-        // user interaction, so _syncGridWindow and _prependGridChunk never
-        // need to force a synchronous layout reflow by reading offsetTop
-        // during a focus change or scroll event on the hot path.
-        this._measureGridRowHeight(grid, columns);
+        // Build initial pool: in skip-lazy mode (< 60 items), render all rows with media cards upfront
+        let rowsHtml = '';
+        for (let r = 0; r < poolRows; r++) {
+            const rowStart = r * columns;
+            const rowEnd = Math.min(items.length, (r + 1) * columns);
+            const rowItems = items.slice(rowStart, rowEnd);
 
-        // Lazy Load Images (observe the initial chunk)
-        lazyLoader.observe(grid);
+            if (isSkipLazy || r < eagerRowsCount) {
+                rowsHtml += `<div class="virtual-grid-row" data-row-index="${r}">${this._buildGridChunkHtml(rowItems)}</div>`;
+            } else {
+                rowsHtml += `<div class="virtual-grid-row" data-row-index="${r}" data-skeleton="true">${CardRenderer.createSkeletonHtml(rowItems.length, isLandscape, viewMode, skeletonHideLabels)}</div>`;
+            }
+        }
+        grid.innerHTML = rowsHtml;
+
+        // Eagerly measure row step geometry while initial DOM elements are fresh
+        const rowHeight = this._measureGridRowHeight(grid, columns) || (isListView ? 132 : 380);
+
+        // Assign explicit absolute top positions to all pool rows
+        const rowElements = grid.querySelectorAll('.virtual-grid-row');
+        for (let r = 0; r < rowElements.length; r++) {
+            rowElements[r].style.top = `${r * rowHeight}px`;
+        }
+
+        // Fix container height upfront to reflect total library geometry
+        grid.style.height = `${totalRows * rowHeight}px`;
+
+        // Cancel any pending progressive hydration from a previous render
+        if (this._progressiveHydrationFrameId) {
+            cancelAnimationFrame(this._progressiveHydrationFrameId);
+            this._progressiveHydrationFrameId = null;
+        }
+
+        // Cancel any pending idle chunk queue from a previous render
+        this._cancelIdleChunkQueue();
+
+        if (isSkipLazy) {
+            /*
+             * =================================================================
+             * SKIP LAZY LOADING PIPELINE (LOW PAGE LIMIT < 60 ITEMS)
+             * =================================================================
+             * For small paginated batches (e.g. 50 items):
+             * 1. All cards exist in the DOM from Frame 1 for instant D-pad navigation.
+             * 2. Instead of dumping all 50 src attributes simultaneously (which would
+             *    flood sockets and cause a decoding freeze), load the first 14 items
+             *    (the visible screen) immediately on Frame 1.
+             * 3. Progressively load the remaining 36 items in chunks of 10 using
+             *    requestIdleCallback (or a 50ms setTimeout chain).
+             * 4. By the time the user scrolls down two rows, the rest of the page
+             *    is already loaded and decoded in GPU memory.
+             * 5. LazyLoader.observer is completely bypassed for the grid, allowing
+             *    butter-smooth native GPU scrolling with 0ms JavaScript overhead.
+             * =================================================================
+             */
+            const allCards = grid.querySelectorAll('.media-card');
+
+            // Hook shimmer observer for off-screen cards while bypassing LazyLoader.observer
+            this._hookGridCards(allCards, false);
+
+            // Immediately load visible viewport items (first 14 cards)
+            const initialCount = Math.min(14, allCards.length);
+            for (let i = 0; i < initialCount; i++) {
+                const img = allCards[i].querySelector('img[data-src]');
+                if (img) {
+                    lazyLoader.forceLoad(img, true);
+                }
+            }
+
+            // Schedule remaining cards in background idle chunks of 10
+            if (allCards.length > initialCount) {
+                this._scheduleIdleImageChunks(allCards, initialCount);
+            }
+        } else {
+            // Register initial eager cards with image observer and lazy loader (eagerLoad = true for viewport)
+            this._hookGridCards(grid.querySelectorAll('.virtual-grid-row:not([data-skeleton="true"]) .media-card'), true);
+
+            // Progressively hydrate remaining buffer rows frame-by-frame
+            let nextHydrateRow = eagerRowsCount;
+            const hydrateNextChunk = () => {
+                if (this._isDestroyed || nextHydrateRow >= poolRows) return;
+                const rowsToHydrate = Math.min(2, poolRows - nextHydrateRow);
+                for (let i = 0; i < rowsToHydrate; i++) {
+                    const r = nextHydrateRow + i;
+                    const rowEl = grid.querySelector(`.virtual-grid-row[data-row-index="${r}"]`);
+                    if (rowEl && rowEl.dataset.skeleton === 'true') {
+                        const rowStart = r * columns;
+                        const rowEnd = Math.min(items.length, (r + 1) * columns);
+                        const chunkItems = items.slice(rowStart, rowEnd);
+                        rowEl.innerHTML = this._buildGridChunkHtml(chunkItems);
+                        delete rowEl.dataset.skeleton;
+                        rowEl.removeAttribute('data-skeleton');
+                        this._hookGridCards(rowEl.querySelectorAll('.media-card'), false);
+                    }
+                }
+                nextHydrateRow += rowsToHydrate;
+                if (nextHydrateRow < poolRows) {
+                    this._progressiveHydrationFrameId = requestAnimationFrame(hydrateNextChunk);
+                } else {
+                    this._progressiveHydrationFrameId = null;
+                    focusManager.invalidateCache('library-grid');
+                    // Pool is fully hydrated: schedule lookahead image pre-warm & idle prefetch
+                    this._schedulePreWarm(poolRows, 1);
+                    if (this.state.isInfinite && this.state.items.length < (this.state.totalRecordCount || 0)) {
+                        this._scheduleLibraryIdlePrefetch(400);
+                    }
+                }
+            };
+
+            if (nextHydrateRow < poolRows) {
+                this._progressiveHydrationFrameId = requestAnimationFrame(hydrateNextChunk);
+            } else {
+                this._schedulePreWarm(poolRows, 1);
+                if (this.state.isInfinite && this.state.items.length < (this.state.totalRecordCount || 0)) {
+                    this._scheduleLibraryIdlePrefetch(400);
+                }
+            }
+        }
 
         // Calculate expected alpha visibility (avoids DOM race conditions with _updateHeaderVisibility)
         const collectionType = this.state.libraryInfo?.CollectionType;
@@ -3327,39 +3526,31 @@ class LibraryPage extends Page {
             onMove: (direction, focusedElement) => {
                 if (!focusedElement) return false;
 
-                // Guard for UP navigation on the first rendered row
-                if (direction === 'up') {
-                    if (this.state.gridWindowStart <= 0) return false;
-
-                    const allCards = grid.querySelectorAll('.media-card');
-                    let domIndex = -1;
-                    for (let i = 0; i < allCards.length; i++) {
-                        if (allCards[i] === focusedElement) {
-                            domIndex = i;
-                            break;
-                        }
+                const columns = currentColumns || 1;
+                const allCards = grid.querySelectorAll('.media-card');
+                let domIndex = -1;
+                for (let i = 0; i < allCards.length; i++) {
+                    if (allCards[i] === focusedElement) {
+                        domIndex = i;
+                        break;
                     }
-                    // domIndex < currentColumns means the card is in the first row
-                    if (domIndex < 0 || domIndex >= currentColumns) return false;
+                }
+                if (domIndex < 0) return false;
 
-                    this._prependGridChunk(grid, this.state.items, currentColumns);
-                    return false;
+                // Intercept UP navigation when on the first rendered row in the pool
+                if (direction === 'up') {
+                    if (domIndex < columns && (this._currentStartRow || 0) > 0) {
+                        this._syncVirtualGrid(Math.max(0, (this._currentStartRow || 0) - 1));
+                        return false;
+                    }
                 }
 
-                // Guard for DOWN navigation on the last rendered row
+                // Intercept DOWN navigation when on the last rendered row in the pool
                 if (direction === 'down') {
-                    const allCards = grid.querySelectorAll('.media-card');
-                    let domIndex = -1;
-                    for (let i = 0; i < allCards.length; i++) {
-                        if (allCards[i] === focusedElement) {
-                            domIndex = i;
-                            break;
-                        }
-                    }
-                    // If focus is on the last rendered row, append next chunk or trigger infinite batch
-                    if (domIndex >= 0 && domIndex + currentColumns >= allCards.length) {
-                        if (this.state.gridWindowEnd < this.state.items.length) {
-                            this._appendGridChunk(grid, this.state.items, currentColumns);
+                    const totalRows = Math.ceil(this.state.items.length / columns);
+                    if (domIndex + columns >= allCards.length) {
+                        if ((this._currentEndRow || 0) < totalRows - 1) {
+                            this._syncVirtualGrid(Math.min(totalRows - 1, (this._currentEndRow || 0) + 1));
                         } else if (this.state.isInfinite) {
                             const hasMore =
                                 this.state._hasMoreInfinite !== false &&
@@ -3369,7 +3560,6 @@ class LibraryPage extends Page {
                             }
                         }
                     }
-                    return false;
                 }
 
                 return false;
@@ -3564,189 +3754,116 @@ class LibraryPage extends Page {
     _measureGridRowHeight(grid, columns) {
         if (this.state.gridCardRowHeight) return this.state.gridCardRowHeight;
 
-        const cards = grid.querySelectorAll('.media-card');
-        // Need at least 2 full rows to calculate the difference
-        if (cards.length < columns + 1) return null;
+        const firstCard = grid.querySelector('.media-card');
+        if (!firstCard) return null;
 
-        // Row height = offsetTop delta between row 0 card 0 and row 1 card 0.
-        // This naturally captures the card height + any CSS gap between rows.
-        const rowHeight = cards[columns].offsetTop - cards[0].offsetTop;
-        if (rowHeight > 0) {
-            this.state.gridCardRowHeight = rowHeight;
+        // Calculate exact vertical footprint: card height plus row margin
+        const cardHeight = firstCard.offsetHeight;
+        let marginBottom = 0;
+        try {
+            const style = window.getComputedStyle(firstCard);
+            marginBottom = parseFloat(style.marginBottom) || 0;
+        } catch (_) {
+            marginBottom = 0;
         }
-        return rowHeight || null;
+
+        const calculatedHeight = cardHeight + marginBottom;
+        if (calculatedHeight > 0) {
+            this.state.gridCardRowHeight = calculatedHeight;
+            return calculatedHeight;
+        }
+
+        // Fallback default estimates per view mode if layout has not yet painted
+        const isListView = this.state.viewMode === 'list';
+        const fallback = isListView ? 132 : this.state.viewMode === 'banner' ? 180 : 380;
+        return fallback;
     }
 
     /**
      * =========================================================================
-     * HOOK NEW CARDS INTO LAZY LOADERS + FOCUS CACHE
+     * REGISTER GRID CARDS WITH OBSERVERS & NAVIGATION
      * =========================================================================
-     * After inserting DOM nodes, register their images with the lazy image
-     * observer and their shimmer wrappers with the shimmer pause observer.
-     * Then invalidate the FocusManager cache so new cards become navigable.
-     * @param {HTMLElement[]} newCards - Array of newly-inserted .media-card elements
+     * After inserting DOM nodes, registers their skeleton shimmer elements with
+     * the shimmer pause observer and connects images to the lazy loader.
+     *
+     * To prevent main-thread freezing and connection saturation during row recycling,
+     * noncritical image loading is delegated to IntersectionObserver or scheduled
+     * pre-warming rather than synchronously calling forceLoad() during navigation.
+     *
+     * @param {NodeList|HTMLElement[]} newCards - Array or NodeList of .media-card elements
+     * @param {boolean} [eagerLoad=false] - If true, immediately triggers image fetch
      * =========================================================================
      */
-    _hookGridCards(newCards) {
+    _hookGridCards(newCards, eagerLoad = false) {
         if (!newCards || !newCards.length) return;
 
-        newCards.forEach((card, index) => {
+        // Skip lazy loading when in direct/paginated mode (< 60 items)
+        const skipLazy = !this.state.isInfinite && this.state.limit < 60;
+
+        /*
+         * Iterate through all newly inserted card elements and connect them
+         * to the lightweight observers without blocking critical navigation.
+         */
+        for (let i = 0; i < newCards.length; i++) {
+            const card = newCards[i];
             const img = card.querySelector('img[data-src]');
             if (img) {
-                // Eagerly force-load the first 14 images of any newly appended chunk (2 full rows)
-                // so they appear immediately without waiting on IntersectionObserver
-                if (index < 14) {
-                    lazyLoader.forceLoad(img);
-                } else {
-                    lazyLoader.observeElement(img);
+                if (eagerLoad) {
+                    // Eagerly force-load initial visible cards on initial render
+                    lazyLoader.forceLoad(img, true);
+                } else if (!skipLazy && lazyLoader && lazyLoader.observer) {
+                    // Observe through IntersectionObserver for smooth lookahead loading
+                    lazyLoader.observer.observe(img);
                 }
             }
+            // Register shimmer skeleton with pause observer to conserve TV GPU layers
             const shimmer = card.querySelector('.card-image.skeleton-shimmer');
-            if (shimmer && lazyLoader._shimmerObserver) {
+            if (shimmer && lazyLoader && lazyLoader._shimmerObserver) {
                 lazyLoader._shimmerObserver.observe(shimmer);
             }
-        });
-
-        // Tell FocusManager about the new focusable nodes
-        focusManager.invalidateCache('library-grid');
+        }
     }
 
     /**
      * =========================================================================
-     * PROGRESSIVE GRID CHUNK APPENDER — with sliding window eviction
+     * GRID CHUNK FORWARDER (backward compatibility)
      * =========================================================================
-     * Appends the next batch of cards at the BOTTOM of the rendered window.
-     *
-     * Window cap: when the DOM count exceeds MAX_WINDOW_ROWS, the oldest rows
-     * at the top are removed and the top spacer div is grown by the same
-     * pixel amount. Since the spacer occupies the same space in the flex layout
-     * as the evicted cards, the scroll position stays perfectly stable.
-     *
-     * @param {HTMLElement} grid    - The #library-grid container element
-     * @param {Array}       items   - Full items array
-     * @param {number}      columns - Grid column count
-     * @returns {boolean}           - true if more items remain after this chunk
+     * Delegates directly to _syncVirtualGrid to maintain compatibility with any
+     * legacy callers without mutating the DOM destructively or forcing reflows.
      * =========================================================================
      */
     _appendGridChunk(grid, items, columns) {
         if (!grid || !items || !items.length) return false;
 
-        const windowEnd = this.state.gridWindowEnd;
+        // Keep container height strictly synchronized with newly available total records
+        const rowHeight = this.state.gridCardRowHeight || this._measureGridRowHeight(grid, columns) || 350;
+        const totalRows = Math.ceil(items.length / (columns || 1));
+        grid.style.height = `${totalRows * rowHeight}px`;
 
-        // All items already rendered — nothing to do
-        if (windowEnd >= items.length) return false;
-
-        // -----------------------------------------------------------------------
-        // CHUNK SIZE
-        // -----------------------------------------------------------------------
-        // In list view (single column, row height ~132px), cards are much taller
-        // and vertically compact in count. With columns === 1, a 5-row initial chunk
-        // is only 5 items (~660px, less than 1 1080p screen), and a 2-row buffer
-        // evicts items almost immediately on scroll.
-        // For list view:
-        //   - INITIAL_ROWS = 20 (~2.5 screens)
-        //   - INCREMENTAL_ROWS = 10 (~1.2 screens)
-        //   - MAX_WINDOW_ROWS = 35 (~4.5 screens)
-        // For standard multi-column grids:
-        //   - INITIAL_ROWS = 5 (columns * 5 = 25-35 items, ~1.5 - 2 screens)
-        //   - INCREMENTAL_ROWS = 3 (columns * 3 = 15-21 items)
-        //   - MAX_WINDOW_ROWS = 8
-        // -----------------------------------------------------------------------
-        const isListView = this.state.viewMode === 'list';
-        const INITIAL_ROWS = isListView ? 20 : 5;
-        const INCREMENTAL_ROWS = isListView ? 10 : 3;
-        const MAX_WINDOW_ROWS = isListView ? 35 : 8;
-
-        const isFirstChunk = windowEnd === 0;
-        const chunkSize = isFirstChunk ? columns * INITIAL_ROWS : columns * INCREMENTAL_ROWS;
-
-        const chunkItems = items.slice(windowEnd, windowEnd + chunkSize);
-        if (!chunkItems.length) return false;
-
-        // Generate and append HTML for this chunk
-        grid.insertAdjacentHTML('beforeend', this._buildGridChunkHtml(chunkItems));
-        this.state.gridWindowEnd = windowEnd + chunkItems.length;
-
-        // Hook new cards into observers and focus cache (skip for first chunk —
-        // _renderGrid calls lazyLoader.observe(grid) separately for that case)
-        if (!isFirstChunk) {
-            const allCards = grid.querySelectorAll('.media-card');
-            // The new cards are the last chunkItems.length entries
-            const newCards = Array.from(allCards).slice(allCards.length - chunkItems.length);
-            this._hookGridCards(newCards);
-        }
-
-        // Eviction is handled by _syncGridWindow (position-based, one row at a
-        // time, always off-screen) rather than here inside the append operation.
-        return this.state.gridWindowEnd < items.length;
+        const currentRow = this._currentEndRow != null ? this._currentEndRow + 1 : 0;
+        this._syncVirtualGrid(currentRow);
+        return (this._currentEndRow || 0) < totalRows - 1;
     }
 
     /**
      * =========================================================================
-     * PROGRESSIVE GRID CHUNK PREPENDER — for navigating back upward
+     * GRID CHUNK PREPENDER (backward compatibility)
      * =========================================================================
-     * Adds rows at the TOP of the rendered window when the user navigates back
-     * toward cards that were previously evicted from the DOM.
-     *
-     * Inserts new cards AFTER the spacer div so they appear visually above the
-     * existing rendered cards. Shrinks the spacer by the same amount so scroll
-     * position stays stable. Evicts rows from the bottom if the window cap is
-     * exceeded.
-     *
-     * @param {HTMLElement} grid    - The #library-grid container element
-     * @param {Array}       items   - Full items array
-     * @param {number}      columns - Grid column count
-     * @returns {boolean}           - true if more items remain above this chunk
+     * Delegates directly to _syncVirtualGrid to maintain compatibility with any
+     * legacy callers without mutating the DOM destructively or forcing reflows.
      * =========================================================================
      */
     _prependGridChunk(grid, items, columns) {
         if (!grid || !items || !items.length) return false;
 
-        const windowStart = this.state.gridWindowStart;
+        // Keep container height strictly synchronized with newly available total records
+        const rowHeight = this.state.gridCardRowHeight || this._measureGridRowHeight(grid, columns) || 350;
+        const totalRows = Math.ceil(items.length / (columns || 1));
+        grid.style.height = `${totalRows * rowHeight}px`;
 
-        // Nothing above the current window — already at the very top
-        if (windowStart <= 0) return false;
-
-        const isListView = this.state.viewMode === 'list';
-        const INCREMENTAL_ROWS = isListView ? 10 : 3;
-        const MAX_WINDOW_ROWS = isListView ? 35 : 8;
-
-        const chunkSize = Math.min(columns * INCREMENTAL_ROWS, windowStart);
-        const newStart = windowStart - chunkSize;
-
-        const chunkItems = items.slice(newStart, windowStart);
-        if (!chunkItems.length) return false;
-
-        // Measure row height BEFORE modifying the DOM (cards are still in place)
-        const rowHeight = this._measureGridRowHeight(grid, columns);
-
-        // Insert the new cards after the spacer, before the first existing card
-        const spacer = grid.querySelector('#grid-top-spacer');
-        if (spacer) {
-            spacer.insertAdjacentHTML('afterend', this._buildGridChunkHtml(chunkItems));
-        }
-
-        // Update window boundary
-        this.state.gridWindowStart = newStart;
-
-        // Shrink the spacer by exactly the height of the newly added rows.
-        // This keeps the cards below the insertion point at the same pixel
-        // offset from the top, so scrollTop doesn't need any adjustment.
-        if (rowHeight && spacer) {
-            const rowsAdded = Math.ceil(chunkSize / columns);
-            const currentSpacerHeight = parseInt(spacer.style.height, 10) || 0;
-            const newSpacerHeight = Math.max(0, currentSpacerHeight - rowsAdded * rowHeight);
-            spacer.style.height = `${newSpacerHeight}px`;
-        }
-
-        // Register the new cards with observers
-        const allCards = grid.querySelectorAll('.media-card');
-        const newCards = Array.from(allCards).slice(0, chunkSize);
-        this._hookGridCards(newCards);
-
-        // Eviction from the bottom is handled by _syncGridWindow — same
-        // position-based approach, symmetric to the top eviction.
-        return this.state.gridWindowStart > 0;
+        const currentRow = this._currentStartRow != null ? Math.max(0, this._currentStartRow - 1) : 0;
+        this._syncVirtualGrid(currentRow);
+        return (this._currentStartRow || 0) > 0;
     }
 
     /**
@@ -3817,30 +3934,9 @@ class LibraryPage extends Page {
             return -1;
         }
 
-        // Determine forward buffer rows ahead of the target item
-        // List view has single column and needs more rows; multi-column needs 5 rows
-        const isListView = this.state.viewMode === 'list';
-        const ROWS_BELOW = isListView ? 15 : 5;
+        // Synchronize virtual row pool directly to encompass the target card
         const currentRow = Math.floor(itemIndex / columns);
-
-        // Calculate target forward index encompassing the target item plus forward buffer
-        const forwardTargetIndex = Math.min(
-            this.state.items.length,
-            (currentRow + ROWS_BELOW + 1) * columns
-        );
-
-        // Append chunks until the target item AND the rows ahead of it are rendered
-        while (
-            forwardTargetIndex > this.state.gridWindowEnd &&
-            this.state.gridWindowEnd < this.state.items.length
-        ) {
-            this._appendGridChunk(grid, this.state.items, columns);
-        }
-
-        // Prepend chunks if the target item was evicted above the top boundary
-        while (itemIndex < this.state.gridWindowStart && this.state.gridWindowStart > 0) {
-            this._prependGridChunk(grid, this.state.items, columns);
-        }
+        this._syncVirtualGrid(currentRow, itemIndex);
 
         // Pre-emptively record target item index so the focus direction evaluator starts from this card
         this._lastFocusItemIndex = itemIndex;
@@ -3917,36 +4013,23 @@ class LibraryPage extends Page {
 
                 // Direction isolation: only append when moving down,
                 // only prepend when moving up (prevents oscillation)
-                const movingDown = itemIndex > (this._lastFocusItemIndex || 0);
                 this._lastFocusItemIndex = itemIndex;
 
-                if (movingDown) {
-                    // For list view (columns=1), look ahead 6 items instead of 2 items
-                    const lookAheadItems = currentColumns === 1 ? 6 : currentColumns * 2;
-                    const appendThreshold = this.state.gridWindowEnd - lookAheadItems;
-                    if (itemIndex >= appendThreshold && this.state.gridWindowEnd < this.state.items.length) {
-                        this._appendGridChunk(grid, this.state.items, currentColumns);
-                    }
-                } else {
-                    const lookBehindItems = currentColumns === 1 ? 6 : currentColumns * 2;
-                    const prependThreshold = this.state.gridWindowStart + lookBehindItems;
-                    if (itemIndex <= prependThreshold && this.state.gridWindowStart > 0) {
-                        this._prependGridChunk(grid, this.state.items, currentColumns);
-                    }
-                }
-
-                // Proactively stream next batch when approaching end of loaded array (works on both moves & letter jumps)
-                const prefetchThreshold = this.state.items.length - currentColumns * 4;
+                // Proactively stream next batch silently when within 10 rows of end of loaded array
+                const prefetchThreshold = this.state.items.length - currentColumns * 10;
                 const hasMore =
                     this.state._hasMoreInfinite !== false &&
                     (!this.state.totalRecordCount || this.state.items.length < this.state.totalRecordCount);
                 if (this.state.isInfinite && itemIndex >= prefetchThreshold && hasMore) {
-                    this._loadNextInfiniteBatch();
+                    this._loadNextInfiniteBatch(true);
+                } else if (this.state.isInfinite && hasMore) {
+                    // Reschedule background idle prefetch so pipeline stays ahead
+                    this._scheduleLibraryIdlePrefetch(500);
                 }
 
                 const currentRow = Math.floor(itemIndex / currentColumns);
-                // Forward explicit itemIndex so alphabet rail matches focused card precisely
-                this._syncGridWindow(grid, this.state.items, currentColumns, currentRow, itemIndex);
+                // Synchronize virtual row pool directly to active row and card
+                this._syncVirtualGrid(currentRow, itemIndex);
                 return;
             }
         }
@@ -3971,54 +4054,24 @@ class LibraryPage extends Page {
             this._gridScrollTop = null; // Consume the scroll input
             this._pendingScrollEval = false;
 
-            const containerHeight = scrollContainer.clientHeight;
-            const scrollHeight = scrollContainer.scrollHeight;
-            const rowHeight = this.state.gridCardRowHeight || this._measureGridRowHeight(grid, currentColumns);
+            const rowHeight = this.state.gridCardRowHeight || this._measureGridRowHeight(grid, currentColumns) || 350;
 
             // Direction tracking
-            const isScrollingDown = scrollTop > (this._lastGridScrollTop || 0);
-            const isScrollingUp = scrollTop < (this._lastGridScrollTop || 0);
             this._lastGridScrollTop = scrollTop;
 
-            // Distance calculations
-            const distanceFromBottom = scrollHeight - (scrollTop + containerHeight);
-            const spacer = grid.querySelector('#grid-top-spacer');
-            const spacerHeight = spacer ? parseFloat(spacer.style.height || 0) : 0;
-            const distanceFromRenderedTop = scrollTop - spacerHeight;
-
-            // Check append: if user is scrolling down OR near the bottom boundary of rendered items
-            const hasMoreToFetch =
-                this.state._hasMoreInfinite !== false &&
-                (!this.state.totalRecordCount || this.state.items.length < this.state.totalRecordCount);
-
-            if (
-                (isScrollingDown || distanceFromBottom <= containerHeight) &&
-                distanceFromBottom <= containerHeight * 1.5
-            ) {
-                if (this.state.gridWindowEnd < this.state.items.length) {
-                    this._appendGridChunk(grid, this.state.items, currentColumns);
-                }
-                // Proactively stream next batch when within 4 rows of loaded array boundary during scroll
-                if (
-                    this.state.isInfinite &&
-                    this.state.items.length - this.state.gridWindowEnd < currentColumns * 4 &&
-                    hasMoreToFetch
-                ) {
-                    this._loadNextInfiniteBatch();
-                }
+            // Calculate grid container top offset relative to scrollContainer
+            let gridTop = 0;
+            let el = grid;
+            while (el && el !== scrollContainer && el !== document.body) {
+                gridTop += el.offsetTop || 0;
+                el = el.offsetParent;
             }
 
-            // Check prepend: if user is scrolling up OR near the top boundary of rendered items
-            if (
-                (isScrollingUp || distanceFromRenderedTop <= containerHeight) &&
-                this.state.gridWindowStart > 0 &&
-                distanceFromRenderedTop <= containerHeight * 1.5
-            ) {
-                this._prependGridChunk(grid, this.state.items, currentColumns);
-            }
+            const scrolledPastGridTop = Math.max(0, scrollTop - gridTop);
+            const totalRows = Math.ceil(this.state.items.length / currentColumns);
+            const derivedRow = Math.min(totalRows - 1, Math.floor(scrolledPastGridTop / rowHeight));
 
-            // Keep the focus-based direction cursor in sync so subsequent D-pad moves
-            // compare against the actual position after wheel scrolling
+            // Keep the focus-based direction cursor in sync if a card is currently focused
             let focusedIndex = null;
             if (focusedElement && grid.contains(focusedElement)) {
                 const allCards = grid.querySelectorAll('.media-card');
@@ -4031,147 +4084,198 @@ class LibraryPage extends Page {
                 }
             }
 
-            if (rowHeight) {
-                const spacer = grid.querySelector('#grid-top-spacer');
-                const spacerHeight = spacer ? parseFloat(spacer.style.height || 0) : 0;
-                const scrolledPastRenderedTop = Math.max(0, scrollTop - spacerHeight);
+            // Proactively stream next batch silently when within 10 rows of end of loaded array
+            const hasMoreToFetch =
+                this.state._hasMoreInfinite !== false &&
+                (!this.state.totalRecordCount || this.state.items.length < this.state.totalRecordCount);
+            if (this.state.isInfinite && totalRows - derivedRow <= 10 && hasMoreToFetch) {
+                this._loadNextInfiniteBatch(true);
+            } else if (this.state.isInfinite && hasMoreToFetch) {
+                // Reschedule background idle prefetch while scrolling
+                this._scheduleLibraryIdlePrefetch(500);
+            }
 
-                // ----------------------------------------------------------------
-                // OVERSHOOT GUARD — skip eviction when scrolled past the grid
-                // ----------------------------------------------------------------
-                // When the user presses DOWN from the last grid row, the page
-                // scrolls to reveal the pagination section below the grid.
-                // scrollTop now includes the pagination section's height, pushing
-                // the computed currentRow ABOVE the last real row. _syncGridWindow
-                // would then evict most of the visible grid to match a phantom row
-                // that doesn't exist, causing all UI elements to "disappear".
-                //
-                // We detect this by checking whether the visible grid content (from
-                // the rendered top + scroll offset within it) would exceed the last
-                // item in the array. If the derived row is higher than the last real
-                // row, we know scrollTop has strayed into the pagination/padding zone
-                // and skip _syncGridWindow entirely for this scroll event.
-                // ----------------------------------------------------------------
-                const maxRow = Math.max(0, Math.ceil(this.state.items.length / currentColumns) - 1);
-                const derivedRow =
-                    Math.floor(scrolledPastRenderedTop / rowHeight) +
-                    Math.floor(this.state.gridWindowStart / currentColumns);
-
-                // Only sync window if the derived row is within actual content bounds
-                if (derivedRow <= maxRow) {
-                    // Forward focused card index if navigating via D-pad so alphabet rail
-                    // maintains lock on focused card rather than reverting to the top row
-                    const targetIndexForSync = !this._isManualScroll && focusedIndex !== null ? focusedIndex : null;
-                    this._syncGridWindow(grid, this.state.items, currentColumns, derivedRow, targetIndexForSync);
-                }
+            if (derivedRow >= 0 && derivedRow < totalRows) {
+                const targetIndexForSync = !this._isManualScroll && focusedIndex !== null ? focusedIndex : null;
+                this._syncVirtualGrid(derivedRow, targetIndexForSync);
             }
         }
     }
 
     /**
      * =========================================================================
-     * POSITION-BASED GRID WINDOW SYNC
+     * O(1) NODE RECYCLING VIRTUAL GRID SYNCHRONIZER
      * =========================================================================
-     * Called after every D-pad move or scroll event with the current "row" the
-     * user is on (0-indexed from the start of the full items array).
+     * Synchronizes the fixed DOM row pool (.virtual-grid-row) with the active
+     * viewport position. Instead of allocating/destroying DOM cards or adjusting
+     * flex spacer heights, off-screen row elements are detached and repositioned
+     * to the opposite boundary using pure CSS position: absolute.
      *
-     * Computes the ideal window based on fixed lookahead/lookbehind constants:
-     *   ROWS_ABOVE  — rows to keep rendered above the current view
-     *   ROWS_BELOW  — rows to keep rendered below the current view
+     * • Downward navigation: The top off-screen row is detached, re-pointed to
+     *   the new bottom row, populated with new cards, and appended to the grid.
+     * • Upward navigation: The bottom off-screen row is detached, re-pointed to
+     *   the new top row, populated with new cards, and prepended before row 0.
+     * • Batch jumps (alphabet rail / fast page navigation): Pool rows are
+     *   re-indexed in a single linear pass around the target row without
+     *   intermediate layout thrashing.
      *
-     * By tying eviction to the current position rather than to append/prepend
-     * operations, we get:
-     *   • Top eviction always happens exactly 1 row above the off-screen area
-     *     → completely invisible to the user (it's already scrolled past)
-     *   • No batch eviction of 3 rows at once — always exactly 1 row removed
-     *     per row the user advances
-     *   • Bottom eviction mirrors the same behaviour when scrolling up
+     * Because DOM rows are moved in and out of the grid element in strict
+     * sequential order, FocusManager's querySelectorAll('.media-card') remains
+     * perfectly sorted in row-major order across the entire rendered window.
      *
-     * @param {HTMLElement} grid         - The #library-grid container element
-     * @param {Array}       items        - Full items array
-     * @param {number}      columns      - Grid column count
-     * @param {number}      currentRow   - Current row index (0-based) in items[]
+     * @param {number} currentRow - The active row index (0-based)
+     * @param {number|null} [targetItemIndex=null] - Specific focused item index
      * =========================================================================
      */
-    _syncGridWindow(grid, items, columns, currentRow, targetItemIndex = null) {
-        if (!grid || !items || !columns) return;
+    _syncVirtualGrid(currentRow, targetItemIndex = null) {
+        const grid = this.$('#library-grid');
+        const items = this.state.items;
+        const columns = this.state._gridColumns;
+        if (!grid || !items || !items.length || !columns) return;
 
-        /* -----------------------------------------------------------------
-         * Real-time Alphabet Rail Synchronization:
-         * Dynamically activates the corresponding letter button as the user
-         * navigates items or scrolls through rows in unlimited library mode.
-         * Passes explicit targetItemIndex when triggered by focused D-pad item.
-         * ----------------------------------------------------------------- */
+        // Synchronize real-time Alphabet Rail button indicator
         this._updateAlphaPickerActiveLetter(currentRow, items, columns, targetItemIndex);
 
-        // -----------------------------------------------------------------------
-        // WINDOW CONSTANTS
-        // -----------------------------------------------------------------------
-        // In list view (single column), each row is only ~132px high.
-        // A ROWS_ABOVE of 2 is only ~264px (less than 1/4th of a 1080p screen!),
-        // which causes top items to be aggressively evicted while still near or on-screen.
-        // For list view:
-        //   ROWS_ABOVE: 12 rows (~1.5 screens above)
-        //   ROWS_BELOW: 15 rows (~1.8 screens below)
-        // For multi-column grids (each card ~300-400px high):
-        //   ROWS_ABOVE: 2 rows (~2 screen-heights of backward buffer)
-        //   ROWS_BELOW: 5 rows (~1.5 screen-heights of forward buffer)
-        // -----------------------------------------------------------------------
+        const totalRows = Math.ceil(items.length / columns);
         const isListView = this.state.viewMode === 'list';
-        const ROWS_ABOVE = isListView ? 12 : 2;
-        const ROWS_BELOW = isListView ? 15 : 5;
+        const isSkipLazy = !this.state.isInfinite && this.state.limit < 60;
+        const POOL_ROWS = isSkipLazy ? totalRows : (isListView ? 22 : 10);
 
-        // Ideal first/last item index in the window
-        const idealStart = Math.max(0, (currentRow - ROWS_ABOVE) * columns);
-        const idealEnd = Math.min(items.length, (currentRow + ROWS_BELOW + 1) * columns);
-
-        // -----------------------------------------------------------------------
-        // TOP EVICTION
-        // -----------------------------------------------------------------------
-        // If the window starts too early (rows are now behind the ROWS_ABOVE
-        // buffer), remove exactly one row at a time so each eviction corresponds
-        // to exactly one row of advancement — invisible because that row is
-        // already above the viewport.
-        // -----------------------------------------------------------------------
-        if (this.state.gridWindowStart < idealStart) {
-            const rowHeight = this._measureGridRowHeight(grid, columns);
-            if (rowHeight) {
-                const cardsToEvict = idealStart - this.state.gridWindowStart;
-                const allCards = grid.querySelectorAll('.media-card');
-                const count = Math.min(cardsToEvict, allCards.length);
-                for (let i = 0; i < count; i++) {
-                    allCards[i].remove();
-                }
-                this.state.gridWindowStart += count;
-
-                // Grow the top spacer by the same pixel amount so the scroll
-                // position is completely undisturbed
-                const spacer = grid.querySelector('#grid-top-spacer');
-                if (spacer) {
-                    spacer.style.height = `${Math.floor(this.state.gridWindowStart / columns) * rowHeight}px`;
-                }
-                focusManager.invalidateCache('library-grid');
-            }
+        // If total rows fit entirely within the pool (or skip lazy mode is active),
+        // all cards exist in the DOM and no row recycling is needed.
+        if (isSkipLazy || totalRows <= POOL_ROWS) {
+            return;
         }
 
-        // -----------------------------------------------------------------------
-        // BOTTOM EVICTION
-        // -----------------------------------------------------------------------
-        // Mirror of the top eviction — removes rendered rows from the bottom
-        // that have fallen outside the ROWS_BELOW buffer when scrolling up.
-        // Also happens invisibly because those rows are below the viewport.
-        // -----------------------------------------------------------------------
-        if (this.state.gridWindowEnd > idealEnd) {
-            const cardsToEvict = this.state.gridWindowEnd - idealEnd;
-            const allCards = grid.querySelectorAll('.media-card');
-            const total = allCards.length;
-            const count = Math.min(cardsToEvict, total);
-            for (let i = total - 1; i >= total - count && i >= 0; i--) {
-                allCards[i].remove();
+        const BUFFER_ABOVE = isListView ? 6 : 3;
+        const poolRows = Math.min(totalRows, POOL_ROWS);
+        const rowHeight = this.state.gridCardRowHeight || this._measureGridRowHeight(grid, columns) || 350;
+
+        // Compute ideal start and end row indices bounded within valid library range
+        let idealStartRow = Math.max(0, currentRow - BUFFER_ABOVE);
+        let idealEndRow = idealStartRow + poolRows - 1;
+        if (idealEndRow >= totalRows) {
+            idealEndRow = totalRows - 1;
+            idealStartRow = Math.max(0, idealEndRow - poolRows + 1);
+        }
+
+        let startRow = this._currentStartRow != null ? this._currentStartRow : 0;
+        let endRow = this._currentEndRow != null ? this._currentEndRow : (startRow + poolRows - 1);
+
+        // Guard: If the pool already encompasses the ideal window, no DOM mutation needed
+        if (startRow === idealStartRow && endRow === idealEndRow) {
+            return;
+        }
+
+        const rowNodes = grid.querySelectorAll('.virtual-grid-row');
+        if (!rowNodes.length) return;
+
+        // Detect large jumps (e.g. alphabet letter jump or fast page scroll)
+        // If the jump delta exceeds half the pool, perform an O(N) full re-index
+        if (Math.abs(idealStartRow - startRow) >= Math.floor(poolRows / 2)) {
+            const rowsArray = Array.from(rowNodes);
+            for (let i = 0; i < rowsArray.length; i++) {
+                const targetRowIndex = idealStartRow + i;
+                const rowEl = rowsArray[i];
+                const rowStart = targetRowIndex * columns;
+                const rowEnd = Math.min(items.length, (targetRowIndex + 1) * columns);
+                const chunkItems = items.slice(rowStart, rowEnd);
+
+                rowEl.dataset.rowIndex = targetRowIndex;
+                rowEl.style.top = `${targetRowIndex * rowHeight}px`;
+                rowEl.innerHTML = this._buildGridChunkHtml(chunkItems);
+                delete rowEl.dataset.skeleton;
+                rowEl.removeAttribute('data-skeleton');
             }
-            this.state.gridWindowEnd -= count;
+
+            this._currentStartRow = idealStartRow;
+            this._currentEndRow = idealStartRow + rowsArray.length - 1;
+            this.state.gridWindowStart = idealStartRow * columns;
+            this.state.gridWindowEnd = Math.min(items.length, (this._currentEndRow + 1) * columns);
+
+            this._hookGridCards(grid.querySelectorAll('.media-card'), false);
+            // Restore focus/navigation state immediately across the re-indexed grid
             focusManager.invalidateCache('library-grid');
+            // Schedule speculative lookahead image pre-warm after the navigation frame settles
+            this._schedulePreWarm(this._currentEndRow + 1, 1);
+            return;
         }
+
+        // Incremental recycling for continuous scrolling and step-by-step D-pad navigation
+        let domChanged = false;
+
+        // Navigate DOWN: recycle top rows to the bottom
+        while (startRow < idealStartRow && endRow < totalRows - 1) {
+            const topRow = grid.firstElementChild;
+            if (!topRow || !topRow.classList.contains('virtual-grid-row')) break;
+
+            const nextRowIndex = endRow + 1;
+            const rowStart = nextRowIndex * columns;
+            const rowEnd = Math.min(items.length, (nextRowIndex + 1) * columns);
+            const chunkItems = items.slice(rowStart, rowEnd);
+
+            topRow.dataset.rowIndex = nextRowIndex;
+            topRow.style.top = `${nextRowIndex * rowHeight}px`;
+            topRow.innerHTML = this._buildGridChunkHtml(chunkItems);
+            delete topRow.dataset.skeleton;
+            topRow.removeAttribute('data-skeleton');
+
+            // Detach and append to the bottom to maintain ascending row-major order
+            grid.appendChild(topRow);
+
+            startRow++;
+            endRow++;
+            domChanged = true;
+
+            // Register cards with observers without synchronous image force-load
+            this._hookGridCards(topRow.querySelectorAll('.media-card'), false);
+        }
+
+        // Navigate UP: recycle bottom rows to the top
+        while (startRow > idealStartRow && startRow > 0) {
+            const bottomRow = grid.lastElementChild;
+            if (!bottomRow || !bottomRow.classList.contains('virtual-grid-row')) break;
+
+            const prevRowIndex = startRow - 1;
+            const rowStart = prevRowIndex * columns;
+            const rowEnd = Math.min(items.length, (prevRowIndex + 1) * columns);
+            const chunkItems = items.slice(rowStart, rowEnd);
+
+            bottomRow.dataset.rowIndex = prevRowIndex;
+            bottomRow.style.top = `${prevRowIndex * rowHeight}px`;
+            bottomRow.innerHTML = this._buildGridChunkHtml(chunkItems);
+            delete bottomRow.dataset.skeleton;
+            bottomRow.removeAttribute('data-skeleton');
+
+            // Detach and prepend before the first row to maintain ascending order
+            grid.insertBefore(bottomRow, grid.firstElementChild);
+
+            startRow--;
+            endRow--;
+            domChanged = true;
+
+            // Register cards with observers without synchronous image force-load
+            this._hookGridCards(bottomRow.querySelectorAll('.media-card'), false);
+        }
+
+        this._currentStartRow = startRow;
+        this._currentEndRow = endRow;
+        this.state.gridWindowStart = startRow * columns;
+        this.state.gridWindowEnd = Math.min(items.length, (endRow + 1) * columns);
+
+        if (domChanged) {
+            // Restore focus/navigation state immediately across the recycled grid
+            focusManager.invalidateCache('library-grid');
+            // Schedule speculative lookahead image pre-warming after the navigation frame
+            this._schedulePreWarm(endRow + 1, 1);
+        }
+    }
+
+    /**
+     * Backward-compatible alias for legacy callers
+     */
+    _syncGridWindow(grid, items, columns, currentRow, targetItemIndex = null) {
+        this._syncVirtualGrid(currentRow, targetItemIndex);
     }
 
     _renderHorizontalRows(rows) {
@@ -4735,8 +4839,8 @@ class LibraryPage extends Page {
 
         const columns = this.state._gridColumns || 7;
         const isListView = this.state.viewMode === 'list';
-        const ROWS_ABOVE = isListView ? 12 : 3;
-        const ROWS_BELOW = isListView ? 15 : 6;
+        const ROWS_ABOVE = isListView ? 15 : 8;
+        const ROWS_BELOW = isListView ? 20 : 10;
 
         // ---------------------------------------------------------------------
         // STEP 1: Determine exact 0-based target index in the full library
@@ -4842,24 +4946,29 @@ class LibraryPage extends Page {
         }
 
         // ---------------------------------------------------------------------
-        // STEP 3: Reconstruct virtual DOM window around target row
+        // STEP 3: Reposition recycled virtual row pool around target row
         // ---------------------------------------------------------------------
+        // Calculate the target row coordinate and compute the total required
+        // pixel height for the entire collection geometry upfront.
         const targetRow = Math.floor(targetIndex / columns);
-        const idealStart = Math.max(0, (targetRow - ROWS_ABOVE) * columns);
-        const idealEnd = Math.min(this.state.items.length, (targetRow + ROWS_BELOW + 1) * columns);
         const rowHeight = this.state.gridCardRowHeight || this._measureGridRowHeight(grid, columns) || 350;
+        const totalRows = Math.ceil(this.state.items.length / columns);
 
-        if (this.state.gridWindowStart !== idealStart || this.state.gridWindowEnd < idealEnd) {
-            const chunkItems = this.state.items.slice(idealStart, idealEnd);
-            const spacerHeight = Math.floor(idealStart / columns) * rowHeight;
+        // Keep container height strictly synchronized with total items
+        grid.style.height = `${totalRows * rowHeight}px`;
 
-            grid.innerHTML = `<div id="grid-top-spacer" style="height:${spacerHeight}px;width:100%;flex:0 0 100%"></div>${this._buildGridChunkHtml(chunkItems)}`;
+        /*
+         * Recycle and populate virtual rows to position targetRow firmly
+         * within the active rendered window. For jumps across distant letter
+         * boundaries, _syncVirtualGrid detects the large row delta and executes
+         * a clean single-pass batch re-index without destroying or recreating
+         * DOM row nodes.
+         */
+        this._syncVirtualGrid(targetRow, targetIndex);
 
-            this.state.gridWindowStart = idealStart;
-            this.state.gridWindowEnd = idealEnd;
-            this._hookGridCards(grid.querySelectorAll('.media-card'));
-            focusManager.invalidateCache('library-grid');
-        }
+        // Invalidate spatial navigation cache so FocusManager recognizes newly mapped cards
+        focusManager.invalidateCache('library-grid');
+
 
         // ---------------------------------------------------------------------
         // STEP 4: Smoothly glide viewport to target position using exact DOM coordinates
@@ -4882,7 +4991,9 @@ class LibraryPage extends Page {
             const img = allCards[i].querySelector('img[data-src]');
             if (img) lazyLoader.forceLoad(img);
         }
-        lazyLoader.observe(grid);
+        if (this.state.isInfinite || this.state.limit >= 60) {
+            lazyLoader.observe(grid);
+        }
 
         // Resolve target card either by computed index offset or unique item identifier
         let targetCard =
@@ -5212,18 +5323,39 @@ class LibraryPage extends Page {
      * LOAD NEXT INFINITE SCROLL BATCH
      * =========================================================================
      * Triggered proactively when the user scrolls near the end of the currently
-     * loaded media items. Streams the next chunk, enriches metadata if needed,
-     * appends the new DOM cards, and invalidates focus cache for seamless traversal.
+     * loaded media items or via background idle prefetching. Streams the next
+     * chunk, enriches metadata if needed, expands container geometry, and
+     * synchronizes the virtual row pool.
+     *
+     * @param {boolean} [silent=false] - When true, background prefetch runs without
+     * displaying the bottom activity indicator to keep scrolling uninterrupted.
      * =========================================================================
      */
-    async _loadNextInfiniteBatch() {
+    async _loadNextInfiniteBatch(silent = false) {
         if (this._isLoadingMore || this._isDestroyed) return;
         if (!this.state.isInfinite) return;
         if (this.state._hasMoreInfinite === false) return;
         if (this.state.totalRecordCount > 0 && this.state.items.length >= this.state.totalRecordCount) return;
 
+        // If viewport is running an active scroll animation and this is a background prefetch,
+        // defer the fetch until scrolling settles to keep compositor frame rates steady at 60fps.
+        if (silent && (scrollController.isVerticalAnimating || (window.__scrollController && window.__scrollController.isAnimating))) {
+            const onScrollFinish = () => {
+                eventBus.off('scroll:finished', onScrollFinish);
+                if (!this._isDestroyed && !this._isLoadingMore) {
+                    this._loadNextInfiniteBatch(true);
+                }
+            };
+            eventBus.on('scroll:finished', onScrollFinish);
+            return;
+        }
+
         this._isLoadingMore = true;
-        this._showInfiniteLoading(true);
+
+        // Only display visible loading indicator when the user explicitly reaches the edge
+        if (!silent) {
+            this._showInfiniteLoading(true);
+        }
 
         try {
             const startIndex = this.state.items.length;
@@ -5247,7 +5379,19 @@ class LibraryPage extends Page {
                     const grid = this.$('#library-grid');
                     if (grid) {
                         const columns = this.state._gridColumns || 7;
-                        this._appendGridChunk(grid, this.state.items, columns);
+                        const rowHeight = this.state.gridCardRowHeight || this._measureGridRowHeight(grid, columns) || 350;
+                        const totalRows = Math.ceil(this.state.items.length / columns);
+
+                        // Expand container height to fit the full item count geometry
+                        grid.style.height = `${totalRows * rowHeight}px`;
+
+                        // Re-sync virtual row pool to ensure the forward buffer is loaded
+                        const currentRow = this._lastFocusItemIndex != null
+                            ? Math.floor(this._lastFocusItemIndex / columns)
+                            : (this._currentStartRow || 0);
+                        this._syncVirtualGrid(currentRow, this._lastFocusItemIndex);
+
+                        // Invalidate spatial navigation cache
                         focusManager.invalidateCache('library-grid');
                     }
 
@@ -5256,6 +5400,15 @@ class LibraryPage extends Page {
                         const total = this.state.totalRecordCount || this.state.items.length;
                         countIndicator.textContent = i18n.t('ListPaging', [1, this.state.items.length, total]);
                     }
+
+                    // Pre-warm upcoming images into browser HTTP cache (scheduled after navigation frame)
+                    const currentEnd = this._currentEndRow || 0;
+                    this._schedulePreWarm(currentEnd + 1, 1);
+
+                    // If collection still contains further unloaded items, schedule continuous background prefetch
+                    if (this.state._hasMoreInfinite && (!this.state.totalRecordCount || this.state.items.length < this.state.totalRecordCount)) {
+                        this._scheduleLibraryIdlePrefetch(300);
+                    }
                 }
             }
         } catch (err) {
@@ -5263,6 +5416,271 @@ class LibraryPage extends Page {
         } finally {
             this._isLoadingMore = false;
             this._showInfiniteLoading(false);
+        }
+    }
+
+    /**
+     * =========================================================================
+     * SCHEDULE LIBRARY IDLE PREFETCH
+     * =========================================================================
+     * Schedules a low-priority background idle prefetch. Silently streams the
+     * subsequent slice of items ahead of time so media is already decoded and
+     * resident in memory before the user navigates or scrolls down to it.
+     *
+     * @param {number} [delay=400] - Inactivity delay in milliseconds before triggering
+     * =========================================================================
+     */
+    _scheduleLibraryIdlePrefetch(delay = 400) {
+        if (this._libraryIdlePrefetchTimer) clearTimeout(this._libraryIdlePrefetchTimer);
+        this._libraryIdlePrefetchTimer = setTimeout(() => {
+            this._libraryIdlePrefetchTimer = null;
+            if (this._isDestroyed || !this.state.isInfinite || this.state._hasMoreInfinite === false) return;
+            if (this.state.totalRecordCount > 0 && this.state.items.length >= this.state.totalRecordCount) return;
+
+            // Defer if scroll animation is actively in flight
+            if (scrollController.isVerticalAnimating || (window.__scrollController && window.__scrollController.isAnimating)) {
+                const onScrollFinish = () => {
+                    eventBus.off('scroll:finished', onScrollFinish);
+                    if (!this._isDestroyed) {
+                        this._scheduleLibraryIdlePrefetch(200);
+                    }
+                };
+                eventBus.on('scroll:finished', onScrollFinish);
+                return;
+            }
+
+            this._loadNextInfiniteBatch(true);
+        }, delay);
+    }
+
+    /**
+     * =========================================================================
+     * SCHEDULE PROGRESSIVE IDLE IMAGE CHUNK LOADING
+     * =========================================================================
+     * When lazy loading is bypassed for low-page-size library grids (< 60 items),
+     * we avoid flooding the network socket pool and GPU texture decoder on Frame 1
+     * by loading the visible screen (first 14 cards) immediately and scheduling the
+     * remaining cards in progressive batches of 10 during idle browser intervals.
+     *
+     * Falls back to a 50ms timer chain on older smart TV engines lacking
+     * native window.requestIdleCallback support.
+     *
+     * @param {NodeList|HTMLElement[]} allCards - Array or NodeList of .media-card nodes
+     * @param {number} startIndex - Card index to begin progressive chunk loading from
+     * @private
+     * =========================================================================
+     */
+    _scheduleIdleImageChunks(allCards, startIndex = 14) {
+        if (!allCards || !allCards.length || this._isDestroyed) return;
+
+        // Cancel any existing chunk processing loop before scheduling a new one
+        this._cancelIdleChunkQueue();
+
+        const chunkSize = 10;
+        let currentIndex = startIndex;
+        const totalCards = allCards.length;
+
+        /*
+         * Recursive step function executing one chunk of 10 card images
+         * per idle slice or timer tick until the entire page is decoded.
+         */
+        const processNextChunk = () => {
+            // Guard against unmounted page or completed card processing
+            if (this._isDestroyed || currentIndex >= totalCards) {
+                this._idleChunkId = null;
+                this._idleChunkType = null;
+                return;
+            }
+
+            // Slice out the current chunk window (up to 10 cards)
+            const chunkEnd = Math.min(currentIndex + chunkSize, totalCards);
+            for (let i = currentIndex; i < chunkEnd; i++) {
+                const img = allCards[i].querySelector('img[data-src]');
+                if (img) {
+                    lazyLoader.forceLoad(img);
+                }
+            }
+            currentIndex = chunkEnd;
+
+            // If additional cards remain, schedule the next chunk
+            if (currentIndex < totalCards) {
+                if (typeof window.requestIdleCallback === 'function') {
+                    this._idleChunkType = 'idle';
+                    this._idleChunkId = window.requestIdleCallback(
+                        () => processNextChunk(),
+                        { timeout: 100 }
+                    );
+                } else {
+                    this._idleChunkType = 'timer';
+                    this._idleChunkId = setTimeout(processNextChunk, 50);
+                }
+            } else {
+                this._idleChunkId = null;
+                this._idleChunkType = null;
+            }
+        };
+
+        // Dispatch the initial deferred chunk right after initial render frame
+        if (typeof window.requestIdleCallback === 'function') {
+            this._idleChunkType = 'idle';
+            this._idleChunkId = window.requestIdleCallback(
+                () => processNextChunk(),
+                { timeout: 100 }
+            );
+        } else {
+            this._idleChunkType = 'timer';
+            this._idleChunkId = setTimeout(processNextChunk, 50);
+        }
+    }
+
+    /**
+     * =========================================================================
+     * CANCEL IDLE IMAGE CHUNK QUEUE
+     * =========================================================================
+     * Cancels any active idle callback or timer chain for progressive image loading.
+     * Prevents memory leaks or orphaned async operations on navigation.
+     * @private
+     * =========================================================================
+     */
+    _cancelIdleChunkQueue() {
+        if (this._idleChunkId !== null && this._idleChunkId !== undefined) {
+            if (this._idleChunkType === 'idle' && typeof window.cancelIdleCallback === 'function') {
+                window.cancelIdleCallback(this._idleChunkId);
+            } else {
+                clearTimeout(this._idleChunkId);
+            }
+            this._idleChunkId = null;
+            this._idleChunkType = null;
+        }
+    }
+
+    /**
+     * =========================================================================
+     * SCHEDULE IMAGE PRE-WARM (AFTER NAVIGATION FRAME)
+     * =========================================================================
+     * Separates critical navigation/DOM recycling work from noncritical image
+     * fetches. Defers image pre-warming until after the navigation frame has painted
+     * and only executes if the user is not continuing to navigate or scroll rapidly.
+     *
+     * @param {number} targetRow - The starting row index to pre-warm
+     * @param {number} [rowCount=1] - Number of forward rows to pre-warm (defaults to 1)
+     * @private
+     * =========================================================================
+     */
+    _schedulePreWarm(targetRow, rowCount = 1) {
+        if (!imageCache || this._isDestroyed) return;
+
+        // Record timestamp of navigation step to detect continuous rapid motion
+        this._lastGridNavTime = performance.now();
+
+        // Cancel any pending pre-warm timer so rapid key repeats don't accumulate
+        if (this._preWarmTimer) {
+            clearTimeout(this._preWarmTimer);
+            this._preWarmTimer = null;
+        }
+
+        // Schedule pre-warming after the navigation frame settles (150ms debounce)
+        this._preWarmTimer = setTimeout(() => {
+            this._preWarmTimer = null;
+            if (this._isDestroyed) return;
+
+            // If another navigation step occurred within 140ms, user is still moving rapidly
+            if (performance.now() - (this._lastGridNavTime || 0) < 140) {
+                return;
+            }
+
+            // If smooth scrolling animation is active, defer until transition settles
+            if (lazyLoader && typeof lazyLoader._isScrolling === 'function' && lazyLoader._isScrolling()) {
+                this._schedulePreWarm(targetRow, rowCount);
+                return;
+            }
+
+            // Run pre-warm on the next idle animation frame
+            requestAnimationFrame(() => {
+                if (!this._isDestroyed) {
+                    this._preWarmUpcomingRows(targetRow, rowCount);
+                }
+            });
+        }, 150);
+    }
+
+    /**
+     * =========================================================================
+     * PRE-WARM UPCOMING ROW POSTERS
+     * =========================================================================
+     * Resolves poster/backdrop URLs for media items in upcoming rows and feeds
+     * them into imageCache.preload(). Pre-loaded images hit the browser's native
+     * memory cache on arrival, providing instant, pop-in-free card rendering
+     * when the rows cycle into the active DOM window.
+     *
+     * Work is deduplicated through an in-memory set to prevent redundant URL
+     * resolution and duplicate in-flight requests.
+     *
+     * @param {number} targetRow - The starting row index to pre-warm
+     * @param {number} [rowCount=1] - Number of forward rows to pre-warm (defaults to 1)
+     * =========================================================================
+     */
+    _preWarmUpcomingRows(targetRow, rowCount = 1) {
+        if (!imageCache || this._isDestroyed) return;
+        const items = this.state.items;
+        const columns = this.state._gridColumns;
+        if (!items || !items.length || !columns) return;
+
+        const totalRows = Math.ceil(items.length / columns);
+        const startR = Math.max(0, targetRow);
+        const endR = Math.min(totalRows, startR + rowCount);
+
+        const startIdx = startR * columns;
+        const endIdx = Math.min(items.length, endR * columns);
+        if (startIdx >= endIdx) return;
+
+        const slice = items.slice(startIdx, endIdx);
+        const ctx = this.state._gridRenderContext || {};
+        const isLandscape = ctx.isLandscape || false;
+        const isSquare = this.state.viewMode === 'square' || this.state.viewMode === 'artist';
+        const sizeType = isLandscape ? 'card-backdrop' : isSquare ? 'square' : 'poster';
+        const { maxWidth, quality } = imageService.getParams(sizeType, 'library');
+
+        // Track pre-warmed image URLs in an instance Set to avoid repeating work
+        if (!this._preWarmedUrls) {
+            this._preWarmedUrls = new Set();
+        }
+
+        const urls = [];
+        for (let i = 0; i < slice.length; i++) {
+            const item = slice[i];
+            const itemId = item.Id;
+            let url = null;
+            if (isLandscape) {
+                if (item.ImageTags?.Thumb) {
+                    url = api.getImageUrl(itemId, 'Thumb', { maxWidth, quality, tag: item.ImageTags.Thumb });
+                } else if (item.BackdropImageTags?.length > 0) {
+                    url = api.getImageUrl(itemId, 'Backdrop', { maxWidth, quality });
+                } else if (item.SeriesId && item.SeriesThumbImageTag) {
+                    url = api.getImageUrl(item.SeriesId, 'Thumb', { maxWidth, quality, tag: item.SeriesThumbImageTag });
+                } else if (item.ImageTags?.Primary) {
+                    url = api.getImageUrl(itemId, 'Primary', { maxWidth, quality, tag: item.ImageTags.Primary });
+                }
+            } else {
+                if (item.ImageTags?.Primary) {
+                    url = api.getImageUrl(itemId, 'Primary', { maxWidth, quality, tag: item.ImageTags.Primary });
+                } else if (item.SeriesId) {
+                    url = api.getImageUrl(item.SeriesId, 'Primary', { maxWidth, quality });
+                }
+            }
+            if (url && !this._preWarmedUrls.has(url)) {
+                this._preWarmedUrls.add(url);
+                urls.push(url);
+            }
+        }
+
+        // Bound memory usage of pre-warm tracking registry
+        if (this._preWarmedUrls.size > 800) {
+            this._preWarmedUrls.clear();
+        }
+
+        if (urls.length > 0) {
+            imageCache.preload(urls);
         }
     }
 
@@ -7082,6 +7500,47 @@ class LibraryPage extends Page {
                 enterTo: 'default-element'
             });
         }
+    }
+
+    /**
+     * Clean up timers, animation frames, and background preloads when page unmounts.
+     */
+    onDestroyed() {
+        this._isDestroyed = true;
+
+        // Cancel any pending progressive image idle chunk queue
+        this._cancelIdleChunkQueue();
+
+        // Cancel any pending scheduled pre-warm timers
+        if (this._preWarmTimer) {
+            clearTimeout(this._preWarmTimer);
+            this._preWarmTimer = null;
+        }
+
+        // Cancel pending background prefetch timeouts
+        if (this._libraryIdlePrefetchTimer) {
+            clearTimeout(this._libraryIdlePrefetchTimer);
+            this._libraryIdlePrefetchTimer = null;
+        }
+
+        // Cancel progressive hydration animation frame
+        if (this._progressiveHydrationFrameId) {
+            cancelAnimationFrame(this._progressiveHydrationFrameId);
+            this._progressiveHydrationFrameId = null;
+        }
+
+        // Immediately abort any in-flight speculative preloads so connection pool is freed
+        if (imageCache && typeof imageCache.cancel === 'function') {
+            imageCache.cancel();
+        }
+
+        // Clear pre-warmed URL registry
+        if (this._preWarmedUrls) {
+            this._preWarmedUrls.clear();
+            this._preWarmedUrls = null;
+        }
+
+        super.onDestroyed?.();
     }
 }
 

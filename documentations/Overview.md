@@ -25,7 +25,7 @@ Outputs 4 specialized tiers per platform (8 builds total) orchestrated via Webpa
 
 ### 3. Desktop (Windows, Linux, macOS)
 
-- Cross-platform desktop bundles (`.exe` / `.msi` on Windows, `.AppImage` / `.deb` on Linux, `.dmg` on macOS) built with **Tauri v2**.
+- Cross-platform desktop bundles (`.exe` / `.msi` on Windows, `.AppImage` / `.deb` / `.rpm` on Linux, `.dmg` on macOS) built with **Tauri v2**.
 - High-performance WASM & WebCodecs engine (`movi-player`) alongside an optimized HTML5 video player backend with auto-failover.
 - Window management, native keyboard navigation, and mouse-friendly interactions.
 

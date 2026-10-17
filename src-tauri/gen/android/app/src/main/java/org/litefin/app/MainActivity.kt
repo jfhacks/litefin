@@ -10,6 +10,7 @@ import android.view.KeyEvent
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.widget.FrameLayout
@@ -110,7 +111,15 @@ class MainActivity : TauriActivity() {
     })
 
     super.onCreate(savedInstanceState)
-    setFullscreen(true)
+    // -------------------------------------------------------------------------
+    // Set Initial Fullscreen Mode Based on Device Type
+    // -------------------------------------------------------------------------
+    // Android TV platforms lack status and navigation bars and run locked to
+    // immersive fullscreen. Mobile phones and tablets default to non-fullscreen
+    // (displaying status bar and navigation bar in safe area) until toggled.
+    // -------------------------------------------------------------------------
+    val defaultFullscreen = isTvDevice()
+    setFullscreen(defaultFullscreen)
   }
 
   /**
@@ -129,6 +138,8 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onDestroy() {
+    // Release screen wake lock to avoid holding display flags when activity terminates
+    setKeepScreenOn(false)
     if (instance == this) {
       instance = null
     }
@@ -198,49 +209,109 @@ class MainActivity : TauriActivity() {
     webView.requestFocus()
   }
 
-  // Reference to whether fullscreen mode is currently engaged
-  private var isFullscreen: Boolean = true
+  // ---------------------------------------------------------------------------
+  // Fullscreen State Tracking
+  // ---------------------------------------------------------------------------
+  // Tracks active OS immersive mode state across activity lifecycle events
+  // (pausing, resuming, and window focus changes).
+  // ---------------------------------------------------------------------------
+  private var isFullscreen: Boolean = false
 
   /**
-   * Enforces native immersive sticky fullscreen mode.
-   * Hides status and navigation bars across the entire application.
+   * ===========================================================================
+   * Device Form Factor Detection (Television vs Mobile/Tablet)
+   * ===========================================================================
+   * Evaluates system UI mode manager and package manager Leanback/TV feature
+   * flags to reliably identify Android TV / Google TV hardware.
+   * ===========================================================================
+   */
+  fun isTvDevice(): Boolean {
+    return try {
+      // Query system UI mode manager for dedicated television mode configuration
+      val uiModeManager = getSystemService(android.content.Context.UI_MODE_SERVICE) as? android.app.UiModeManager
+      val isTelevision = uiModeManager?.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+      
+      // Check package manager hardware feature tokens
+      val hasLeanback = packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
+      val hasTvFeature = packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEVISION)
+      
+      isTelevision || hasLeanback || hasTvFeature
+    } catch (e: Exception) {
+      false
+    }
+  }
+
+  /**
+   * ===========================================================================
+   * Native Android Fullscreen & System Inset Manager
+   * ===========================================================================
+   * Controls system status and navigation bar visibility:
+   * - When fullscreen is true:
+   *   Hides system bars using transient swipe gestures and extends layout
+   *   edge-to-edge across the physical display.
+   * - When fullscreen is false:
+   *   Reveals status bar and navigation bar while enforcing window insets
+   *   via setDecorFitsSystemWindows(true) to keep content within the safe zone.
+   * ===========================================================================
+   * @param fullscreen True for edge-to-edge fullscreen; false for safe zone layout.
    */
   fun setFullscreen(fullscreen: Boolean = true) {
-    isFullscreen = true
+    isFullscreen = fullscreen
     runOnUiThread {
       try {
+        // Modern WindowInsetsControllerCompat implementation (Android 11+ / API 30+)
         val windowInsetsController = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
-        windowInsetsController.systemBarsBehavior =
-          androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        windowInsetsController.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        
+        if (fullscreen) {
+          // Configure transient gesture bars that auto-hide after swipe interactions
+          windowInsetsController.systemBarsBehavior =
+            androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+          
+          // Hide both top status bar and bottom navigation bar
+          windowInsetsController.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+          
+          // Expand window decor to full physical screen boundaries
+          androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        } else {
+          // Restore standard system bars (status bar + gesture/button navigation bar)
+          windowInsetsController.show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+          
+          // Confine content layout to system safe zone between status bar and nav bar
+          androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, true)
+        }
       } catch (e: Exception) {
-        // Fallback legacy flags for older Android versions
+        // Fallback flags for older Android API levels
         @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = (
-          View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-            or View.SYSTEM_UI_FLAG_FULLSCREEN
-            or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-            or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-            or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-            or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-        )
+        if (fullscreen) {
+          window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+              or View.SYSTEM_UI_FLAG_FULLSCREEN
+              or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+              or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+              or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+              or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+          )
+        } else {
+          window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        }
       }
     }
   }
 
   override fun onResume() {
     super.onResume()
-    // Re-assert focus onto the active WebView when resuming from background
+    // Re-assert focus onto active WebView when resuming from background
     activeWebView?.requestFocus()
-    setFullscreen(true)
+    // Synchronize fullscreen state to current configuration
+    setFullscreen(isFullscreen)
   }
 
   override fun onWindowFocusChanged(hasFocus: Boolean) {
     super.onWindowFocusChanged(hasFocus)
-    // Guarantee that whenever the window regains focus, the WebView has active focus and fullscreen is asserted
+    // Maintain active WebView focus and ensure system bars match user preference
     if (hasFocus) {
       activeWebView?.requestFocus()
-      setFullscreen(true)
+      setFullscreen(isFullscreen)
     }
   }
 
@@ -371,6 +442,8 @@ class MainActivity : TauriActivity() {
       // on the hardware TextureView to show through cleanly to the compositor
       rootContainer?.setBackgroundColor(Color.TRANSPARENT)
       window.setBackgroundDrawableResource(android.R.color.transparent)
+      // Prevent Android system screensaver / display sleep during active playback
+      setKeepScreenOn(true)
     }
   }
 
@@ -391,6 +464,46 @@ class MainActivity : TauriActivity() {
       // Restore solid pitch black backgrounds for standard navigation UI
       rootContainer?.setBackgroundColor(Color.BLACK)
       window.setBackgroundDrawableResource(android.R.color.black)
+      // Clear keep-screen-on flag once video plane is hidden
+      setKeepScreenOn(false)
+    }
+  }
+
+  /**
+   * ===========================================================================
+   * Screen Wake Lock / Keep-Awake Flag Management
+   * ===========================================================================
+   * Toggles Android OS WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON and the
+   * container's keepScreenOn property on the UI thread.
+   *
+   * By keeping the screen on at the window and view level during media playback,
+   * this prevents Android TV ambient mode, Daydream, and device sleep timeouts
+   * (typically 15 minutes of inactivity) from interrupting movie watching.
+   *
+   * @param keepOn When true, locks display awake. When false, restores system timers.
+   * ===========================================================================
+   */
+  fun setKeepScreenOn(keepOn: Boolean) {
+    runOnUiThread {
+      try {
+        // Guard against window manipulation if activity is already finishing
+        if (isFinishing || isDestroyed) {
+          return@runOnUiThread
+        }
+        if (keepOn) {
+          // Engage OS window flag keeping display illuminated without sleep/screensaver
+          window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+          // Dual guarantee: set view keepScreenOn flag on root container
+          rootContainer?.keepScreenOn = true
+        } else {
+          // Clear window flag allowing system screensaver and sleep timer to resume
+          window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+          // Clear view keepScreenOn flag on root layout
+          rootContainer?.keepScreenOn = false
+        }
+      } catch (e: Exception) {
+        android.util.Log.w("MainActivity", "Failed updating keepScreenOn flag: ${e.message}")
+      }
     }
   }
 
@@ -504,17 +617,130 @@ class MainActivity : TauriActivity() {
    * ===========================================================================
    */
   override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+    // -------------------------------------------------------------------------
+    // 1. Hardware Back Interception
+    // -------------------------------------------------------------------------
+    // Consumes Android back button to drive unified web-level routing and modal dismissal,
+    // preventing Chromium from performing an unintended window history navigation.
+    // -------------------------------------------------------------------------
     if (event.keyCode == KeyEvent.KEYCODE_BACK) {
       if (event.action == KeyEvent.ACTION_UP) {
         handleHardwareBack()
       }
-      // Return true for both ACTION_DOWN and ACTION_UP to fully consume
-      // the hardware back event and prevent any default browser history navigation.
       return true
     }
 
     // -------------------------------------------------------------------------
-    // Android TV Directional D-Pad Direct Dispatch Guard
+    // 2. Hardware TV Remote Contextual Color Buttons (Red, Green, Yellow, Blue)
+    // -------------------------------------------------------------------------
+    // Physical TV remotes (TCL, Philips, Sony, Panasonic) feature 4 programmable
+    // contextual color keys. Chromium's WebView often swallows or misidentifies
+    // these keycodes. By intercepting them natively in dispatchKeyEvent, we ensure
+    // they are dispatched cleanly to Litefin's RemoteButtonManager and OSD without drops.
+    // -------------------------------------------------------------------------
+    when (event.keyCode) {
+      KeyEvent.KEYCODE_PROG_RED -> {
+        if (event.action == KeyEvent.ACTION_UP) {
+          handleColorButton("red")
+        }
+        return true
+      }
+      KeyEvent.KEYCODE_PROG_GREEN -> {
+        if (event.action == KeyEvent.ACTION_UP) {
+          handleColorButton("green")
+        }
+        return true
+      }
+      KeyEvent.KEYCODE_PROG_YELLOW -> {
+        if (event.action == KeyEvent.ACTION_UP) {
+          handleColorButton("yellow")
+        }
+        return true
+      }
+      KeyEvent.KEYCODE_PROG_BLUE -> {
+        if (event.action == KeyEvent.ACTION_UP) {
+          handleColorButton("blue")
+        }
+        return true
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. Television Function & Utility Shortcuts
+    // -------------------------------------------------------------------------
+    // Captures remote keys for subtitles (captions), display info, electronic program
+    // guide (EPG), bookmarks, and channel stepping.
+    // -------------------------------------------------------------------------
+    when (event.keyCode) {
+      KeyEvent.KEYCODE_CAPTIONS -> {
+        if (event.action == KeyEvent.ACTION_UP) {
+          handleTvShortcut("captions")
+        }
+        return true
+      }
+      KeyEvent.KEYCODE_INFO -> {
+        if (event.action == KeyEvent.ACTION_UP) {
+          handleTvShortcut("info")
+        }
+        return true
+      }
+      KeyEvent.KEYCODE_GUIDE -> {
+        if (event.action == KeyEvent.ACTION_UP) {
+          handleTvShortcut("guide")
+        }
+        return true
+      }
+      KeyEvent.KEYCODE_BOOKMARK -> {
+        if (event.action == KeyEvent.ACTION_UP) {
+          handleTvShortcut("bookmark")
+        }
+        return true
+      }
+      KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_PAGE_UP -> {
+        if (event.action == KeyEvent.ACTION_UP) {
+          handleTvShortcut("channelUp")
+        }
+        return true
+      }
+      KeyEvent.KEYCODE_CHANNEL_DOWN, KeyEvent.KEYCODE_PAGE_DOWN -> {
+        if (event.action == KeyEvent.ACTION_UP) {
+          handleTvShortcut("channelDown")
+        }
+        return true
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // 4. Physical Remote Media Playback Controls
+    // -------------------------------------------------------------------------
+    // When native ExoPlayer is active, Media3 MediaSession automatically handles
+    // OS media events. If ExoPlayer is not active (e.g. user is browsing cards
+    // on the home screen or web audio is playing), forward the media transport
+    // command directly to the web layer so quick play or cards act accordingly.
+    // -------------------------------------------------------------------------
+    val isExoActive = ExoPlayerPlugin.instance?.hasActivePlayer() == true
+    if (!isExoActive) {
+      val mediaCmd = when (event.keyCode) {
+        KeyEvent.KEYCODE_MEDIA_PLAY -> "play"
+        KeyEvent.KEYCODE_MEDIA_PAUSE -> "pause"
+        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK -> "playPause"
+        KeyEvent.KEYCODE_MEDIA_STOP -> "stop"
+        KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_MEDIA_STEP_FORWARD, KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD -> "fastForward"
+        KeyEvent.KEYCODE_MEDIA_REWIND, KeyEvent.KEYCODE_MEDIA_STEP_BACKWARD, KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD -> "rewind"
+        KeyEvent.KEYCODE_MEDIA_NEXT -> "next"
+        KeyEvent.KEYCODE_MEDIA_PREVIOUS -> "previous"
+        else -> null
+      }
+      if (mediaCmd != null) {
+        if (event.action == KeyEvent.ACTION_UP) {
+          handleMediaCommand(mediaCmd)
+        }
+        return true
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. Android TV Directional D-Pad Direct Dispatch Guard
     // -------------------------------------------------------------------------
     // If the system window focus ever drifted to the FrameLayout root or DecorView,
     // immediately re-anchor focus to activeWebView so directional keys (Left, Right,
@@ -544,6 +770,74 @@ class MainActivity : TauriActivity() {
           } else {
             var evt = new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true });
             document.dispatchEvent(evt);
+          }
+        })();
+        """.trimIndent(),
+        null
+      )
+    }
+  }
+
+  /**
+   * Dispatches a contextual remote color button event to the Litefin frontend.
+   *
+   * @param color Normalized color name ("red", "green", "yellow", "blue").
+   */
+  fun handleColorButton(color: String) {
+    runOnUiThread {
+      activeWebView?.evaluateJavascript(
+        """
+        (function() {
+          if (window.androidAdapter && typeof window.androidAdapter.handleColorButton === 'function') {
+            window.androidAdapter.handleColorButton('$color');
+          } else if (typeof window.__litefinAndroidColorButton === 'function') {
+            window.__litefinAndroidColorButton('$color');
+          } else if (window.eventBus && typeof window.eventBus.emit === 'function') {
+            window.eventBus.emit('key:$color', { source: 'native-remote' });
+          }
+        })();
+        """.trimIndent(),
+        null
+      )
+    }
+  }
+
+  /**
+   * Dispatches a media transport command to the Litefin frontend.
+   *
+   * @param command Normalized transport command ("play", "pause", "playPause", "rewind", "fastForward", "stop", "next", "previous").
+   */
+  fun handleMediaCommand(command: String) {
+    runOnUiThread {
+      activeWebView?.evaluateJavascript(
+        """
+        (function() {
+          if (window.androidAdapter && typeof window.androidAdapter.handleMediaCommand === 'function') {
+            window.androidAdapter.handleMediaCommand('$command');
+          } else if (typeof window.__litefinAndroidMediaCommand === 'function') {
+            window.__litefinAndroidMediaCommand('$command');
+          } else if (window.eventBus && typeof window.eventBus.emit === 'function') {
+            window.eventBus.emit('key:$command', { source: 'native-media-bridge' });
+          }
+        })();
+        """.trimIndent(),
+        null
+      )
+    }
+  }
+
+  /**
+   * Dispatches a TV shortcut key event to the Litefin frontend.
+   *
+   * @param shortcut Action identifier ("captions", "info", "guide", "bookmark", "channelUp", "channelDown").
+   */
+  fun handleTvShortcut(shortcut: String) {
+    runOnUiThread {
+      activeWebView?.evaluateJavascript(
+        """
+        (function() {
+          if (window.eventBus && typeof window.eventBus.emit === 'function') {
+            window.eventBus.emit('key:$shortcut', { source: 'native-remote' });
           }
         })();
         """.trimIndent(),
@@ -591,23 +885,37 @@ class MainActivity : TauriActivity() {
      */
     @JavascriptInterface
     fun isTv(): Boolean {
-      return try {
-        val uiModeManager = getSystemService(android.content.Context.UI_MODE_SERVICE) as? android.app.UiModeManager
-        val isTelevision = uiModeManager?.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
-        val hasLeanback = packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
-        val hasTvFeature = packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEVISION)
-        isTelevision || hasLeanback || hasTvFeature
-      } catch (e: Exception) {
-        false
-      }
+      // Delegate to centralized activity device check
+      return this@MainActivity.isTvDevice()
     }
 
     /**
-     * Toggles native Android immersive fullscreen mode from JavaScript.
+     * =========================================================================
+     * Fullscreen Bridge Dispatcher
+     * =========================================================================
+     * Controls native OS immersive mode and system bar visibility dynamically
+     * based on user preference or player lifecycle state.
+     * =========================================================================
      */
     @JavascriptInterface
     fun setFullscreen(fullscreen: Boolean) {
-      this@MainActivity.setFullscreen(true)
+      // Pass requested boolean state to main activity window insets manager
+      this@MainActivity.setFullscreen(fullscreen)
+    }
+
+    /**
+     * =========================================================================
+     * Keep Screen Awake Bridge Interface
+     * =========================================================================
+     * Controls native screen wake lock to keep the display awake during video playback.
+     * Prevents the Android system screensaver (Ambient Mode, Daydream) from activating.
+     *
+     * @param keepOn True to prevent display sleep/screensaver, false to restore defaults.
+     * =========================================================================
+     */
+    @JavascriptInterface
+    fun setKeepScreenOn(keepOn: Boolean) {
+      this@MainActivity.setKeepScreenOn(keepOn)
     }
 
     /**

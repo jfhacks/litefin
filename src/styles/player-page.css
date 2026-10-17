@@ -648,19 +648,19 @@ html[data-light-music-player="true"] .audio-subtitle {
 /* Single Subtitle: Primary bottom text subtitle elevates above controls */
 .player-page.osd-active:not(.osd-dodging-disabled) .subtitle-overlay:not(.secondary),
 .player-container.osd-active:not(.osd-dodging-disabled) ~ .subtitle-overlay:not(.secondary) {
-    -webkit-transform: translateY(-13.5vh) !important;
-    -webkit-transform: translateY(calc(var(--litefin-app-h, 100vh) * -0.135)) !important;
-    transform: translateY(-13.5vh) !important;
-    transform: translateY(calc(var(--litefin-app-h, 100vh) * -0.135)) !important;
+    -webkit-transform: translateY(-18.5vh) !important;
+    -webkit-transform: translateY(calc(var(--litefin-app-h, 100vh) * -0.185)) !important;
+    transform: translateY(-18.5vh) !important;
+    transform: translateY(calc(var(--litefin-app-h, 100vh) * -0.185)) !important;
 }
 
 /* Dual Subtitles Active: Bottom Subtitle (elevated + compact scale) */
 .player-page.osd-active.has-dual-subtitles:not(.osd-dodging-disabled) .subtitle-overlay:not(.secondary),
 .player-container.osd-active.has-dual-subtitles:not(.osd-dodging-disabled) ~ .subtitle-overlay:not(.secondary) {
-    -webkit-transform: translateY(-12.5vh) scale(0.88) !important;
-    -webkit-transform: translateY(calc(var(--litefin-app-h, 100vh) * -0.125)) scale(0.88) !important;
-    transform: translateY(-12.5vh) scale(0.88) !important;
-    transform: translateY(calc(var(--litefin-app-h, 100vh) * -0.125)) scale(0.88) !important;
+    -webkit-transform: translateY(-17.5vh) scale(0.88) !important;
+    -webkit-transform: translateY(calc(var(--litefin-app-h, 100vh) * -0.175)) scale(0.88) !important;
+    transform: translateY(-17.5vh) scale(0.88) !important;
+    transform: translateY(calc(var(--litefin-app-h, 100vh) * -0.175)) scale(0.88) !important;
 }
 
 /* Dual Subtitles Active: Top Subtitle (compact scale in-place at top, no vertical translation) */
@@ -670,12 +670,11 @@ html[data-light-music-player="true"] .audio-subtitle {
     transform: scale(0.88) !important;
 }
 
-/* Secondary Subtitle baseline: Always stationary at top of screen without vertical translation */
+/* Secondary Subtitle baseline: Stationary without vertical translation, position configured dynamically */
 .subtitle-overlay.secondary,
 .player-page .subtitle-overlay.secondary,
 .player-container ~ .subtitle-overlay.secondary {
-    bottom: auto !important;
-    top: 10% !important;
+    bottom: auto;
     -webkit-transform-origin: top center;
     transform-origin: top center;
 }
@@ -798,9 +797,8 @@ html[data-layout-tier="ultra-legacy"] .subtitle-overlay {
 }
 
 html[data-layout-tier="ultra-legacy"] .subtitle-overlay.secondary {
-    /* Secondary subtitles sit at the top */
+    /* Secondary subtitles sit at the top, position configured dynamically */
     bottom: auto !important;
-    top: 10% !important;
     -webkit-transform-origin: top center !important;
     transform-origin: top center !important;
     -webkit-transform: none !important;
@@ -809,14 +807,14 @@ html[data-layout-tier="ultra-legacy"] .subtitle-overlay.secondary {
 
 html[data-layout-tier="ultra-legacy"] .player-page.osd-active:not(.osd-dodging-disabled) .subtitle-overlay:not(.secondary),
 html[data-layout-tier="ultra-legacy"] .player-container.osd-active:not(.osd-dodging-disabled) ~ .subtitle-overlay:not(.secondary) {
-    -webkit-transform: translateY(-13.5vh) !important;
-    transform: translateY(-13.5vh) !important;
+    -webkit-transform: translateY(-18.5vh) !important;
+    transform: translateY(-18.5vh) !important;
 }
 
 html[data-layout-tier="ultra-legacy"] .player-page.osd-active.has-dual-subtitles:not(.osd-dodging-disabled) .subtitle-overlay:not(.secondary),
 html[data-layout-tier="ultra-legacy"] .player-container.osd-active.has-dual-subtitles:not(.osd-dodging-disabled) ~ .subtitle-overlay:not(.secondary) {
-    -webkit-transform: translateY(-12.5vh) scale(0.88) !important;
-    transform: translateY(-12.5vh) scale(0.88) !important;
+    -webkit-transform: translateY(-17.5vh) scale(0.88) !important;
+    transform: translateY(-17.5vh) scale(0.88) !important;
 }
 
 html[data-layout-tier="ultra-legacy"] .player-page.osd-active.has-dual-subtitles:not(.osd-dodging-disabled) .subtitle-overlay.secondary,

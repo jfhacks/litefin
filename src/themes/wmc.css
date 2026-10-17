@@ -11,6 +11,7 @@
        Base Colors - Dark with green tint
        ======================================================================== */
    --jf-background: #0a120a;
+   --jf-background-rgb: 10, 18, 10;
    --jf-background-alt: #101a10;
    --jf-surface: #152015;
    --jf-card-bg: #1a2a1a;

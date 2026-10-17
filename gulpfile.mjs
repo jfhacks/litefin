@@ -85,11 +85,11 @@ function cleanIpk() {
 
 /*
  * Remove all desktop and mobile Tauri application packages from the repository root.
- * Targets Windows installers (.exe, .msi), Linux packages (.deb, .AppImage),
+ * Targets Windows installers (.exe, .msi), Linux packages (.deb, .AppImage, .rpm),
  * macOS disk images (.dmg), and Android packages (.apk, .aab).
  */
 function cleanTauri() {
-    return del(['*.exe', '*.msi', '*.deb', '*.AppImage', '*.dmg', '*.apk', '*.aab']);
+    return del(['*.exe', '*.msi', '*.deb', '*.AppImage', '*.rpm', '*.dmg', '*.apk', '*.aab']);
 }
 
 // ============================================================================

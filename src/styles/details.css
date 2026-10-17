@@ -32,6 +32,15 @@
     stroke-width: 1.5;
 }
 
+:root {
+    /*
+     * Default Background RGB Fallback:
+     * Used by .backdrop-gradient to calculate dynamic alpha stops that match
+     * active theme colors without hardcoding charcoal/black color channels.
+     */
+    --jf-background-rgb: 16, 16, 16;
+}
+
 .details-backdrop {
     /* Fixed viewport background layer */
     position: fixed;
@@ -46,28 +55,67 @@
     pointer-events: none;
 
     /*
-     * Hardware Layer Optimization (Android / Smart TV WebViews):
-     * Avoid CSS mask-image on fixed full-viewport elements. In Chromium engines
-     * on low-end ARM GPUs, mask-image forces an offscreen FBO surface allocation
-     * and a Skia CPU/GPU alpha blend pass on every compositor frame.
-     * The child .backdrop-gradient already handles the visual gradient fade
-     * directly in the fragment shader without FBO or CPU overhead.
+     * Hardware Layer & Compositor Isolation:
+     * Promotes the fixed backdrop layer to its own hardware compositing layer (translateZ(0) + contain: strict).
+     * During vertical scrolling of .details-content, the compositor simply composites the scrolling DOM content
+     * directly over this pre-cached surface without geometry recalculations or repaint invalidations.
+     *
+     * In Chromium engines on low-end ARM TV GPUs, mask-image on fixed viewport elements forces an offscreen FBO
+     * allocation and Skia CPU/GPU blend pass per frame. The child .backdrop-gradient handles the visual gradient
+     * fade directly in the fragment shader without FBO or CPU compositing overhead.
      */
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+    will-change: opacity;
+    contain: strict;
 }
 
 .backdrop-gradient {
-    /* Full-bleed overlay positioning */
+    /* Full-bleed overlay positioning with hardware layer promotion */
     position: absolute;
     top: 0;
     left: 0;
     right: 0;
     bottom: 0;
-    /* Clean gradient blend transitioning seamlessly into the page background */
-    background: linear-gradient(to bottom,
-            rgba(16, 16, 16, 0.45) 0%,
-            rgba(16, 16, 16, 0.75) 60%,
-            var(--jf-background) 100%);
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+
+    /*
+     * Theme-Aware Polynomial Gradient Blend:
+     * Rather than hardcoding static charcoal gray (rgba(16, 16, 16, ...)), dynamic CSS token
+     * --jf-background-rgb harmonizes the overlay with whatever theme is active (Purple Haze,
+     * Blue Radiance, Tinted, OLED Black, Classic Dark, Classic Light, etc.).
+     *
+     * 1. 0% to 45%: Light 35%-60% veil leaves character faces and high-res artwork details clear.
+     * 2. 75% to 88%: Smooth ease transition into var(--jf-background) behind synopsis typography.
+     * 3. 88% to 100%: 100% theme background eliminates dual-layer GPU fill-rate overdraw beneath cast rows.
+     */
+    background: linear-gradient(
+        to bottom,
+        rgba(var(--jf-background-rgb, 16, 16, 16), 0.35) 0%,
+        rgba(var(--jf-background-rgb, 16, 16, 16), 0.60) 45%,
+        rgba(var(--jf-background-rgb, 16, 16, 16), 0.90) 75%,
+        var(--jf-background) 88%,
+        var(--jf-background) 100%
+    );
     pointer-events: none;
+}
+
+/*
+ * Ambient Glow Mode Atmospheric Bleed:
+ * In Ambient mode, the body element projects dynamic accent-colored radial gradients.
+ * Easing the bottom boundary to a soft translucent veil (rgba(10, 11, 12, 0.82)) allows
+ * the accent volumetric light on the body to shine through behind the cast and episode rows.
+ */
+[data-theme-mode="ambient"] .backdrop-gradient {
+    background: linear-gradient(
+        to bottom,
+        rgba(10, 11, 12, 0.35) 0%,
+        rgba(10, 11, 12, 0.60) 45%,
+        rgba(10, 11, 12, 0.88) 75%,
+        rgba(10, 11, 12, 0.96) 88%,
+        rgba(10, 11, 12, 0.82) 100%
+    );
 }
 
 /* Details Content Scroller */

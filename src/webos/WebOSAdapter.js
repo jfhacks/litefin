@@ -136,7 +136,7 @@ class WebOSAdapter {
 
                 // Find the nearest scrollable container
                 const container = e.target.closest(
-                    '.page-content, .modal-options, .filter-main, .sidebar-libraries-wrapper, .settings-content'
+                    '.page-content, .modal-options, .filter-main, .filter-sidebar, .sidebar-libraries-wrapper, .settings-content, .sidebar-content'
                 );
 
                 if (container) {

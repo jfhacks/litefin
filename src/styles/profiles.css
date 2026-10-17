@@ -221,8 +221,15 @@
     transition: color 0.2s ease;
 }
 
-/* When the card above is focused, the name brightens and adopts the accent */
-.profiles-profile-item:focus-within .profiles-card-name,
+/* 
+ * When the card above is focused, the name brightens and adopts the accent.
+ * Separated into distinct selectors to prevent legacy webviews (Chromium <63)
+ * from dropping the entire selector block when encountering :focus-within.
+ */
+.profiles-profile-item:focus-within .profiles-card-name {
+    color: var(--jf-accent);
+}
+
 .profiles-profile-item .profiles-card.focused + .profiles-card-name {
     color: var(--jf-accent);
 }

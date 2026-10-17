@@ -18,6 +18,7 @@ import { logger } from '../utils/Logger.js';
 import { platformInfo } from '../utils/PlatformInfo.js';
 import { cssVarsPolyfill } from '../utils/CssVarsPolyfill.js';
 import { themeUtils } from '../utils/ThemeUtils.js';
+import { getFallbackFontFamily, isFallbackFont } from '../utils/FallbackFonts.js';
 
 import { debugOverlay } from './DebugOverlay.js';
 import CardRenderer from '../utils/CardRenderer.js';
@@ -116,6 +117,10 @@ class LayoutManager {
 
         // Disable BlurHash: Disables color-accurate blurred canvas rendering during image load
         this._disableBlurhash = false;
+
+        // Disable Library BlurHash: Specifically disables BlurHash DCT canvas decodes in library grids
+        // Defaults to true (disabled) to maximize navigation and scrolling performance on weak TV chipsets.
+        this._disableLibraryBlurhash = true;
 
         // Only BlurHash Backdrop: Uses only decoded blurhash for details backdrop background without loading image
         this._onlyBlurHashBackdrop = false;
@@ -254,6 +259,13 @@ class LayoutManager {
          */
         const savedLoaderStyle = storage.getItem('litefin:loaderStyle') || (savedSimpleLoader ? 'ring' : 'ring');
         const savedDisableBlurhash = storage.getItem('litefin:disableBlurhash') === 'true';
+        /*
+         * Disable BlurHash in Library preference.
+         * Default is true (enabled toggle = disabled blurhash in library grids)
+         * to eliminate DCT canvas decoding overhead during fast scrolling on low-power TV processors.
+         * Only evaluates to false if explicitly saved as 'false'.
+         */
+        const savedDisableLibraryBlurhash = storage.getItem('pref:disableLibraryBlurhash') !== 'false';
         const savedOnlyBlurHashBackdrop = storage.getItem('litefin:onlyBlurHashBackdrop') === 'true';
         const savedLightMusicPlayer = storage.getItem('pref:lightMusicPlayer') === 'true';
         const savedBadgeStyle = storage.getItem('litefin:badgeStyle') || 'auto';
@@ -306,6 +318,8 @@ class LayoutManager {
         // Apply loading indicator style and sync legacy simple loader flag
         this.setLoaderStyle(savedLoaderStyle, false);
         this.setDisableBlurhash(savedDisableBlurhash, false);
+        // Apply saved disable library blurhash state to DOM attributes and runtime tracking
+        this.setDisableLibraryBlurhash(savedDisableLibraryBlurhash, false);
         this.setOnlyBlurHashBackdrop(savedOnlyBlurHashBackdrop, false);
         this.setLightMusicPlayer(savedLightMusicPlayer, false);
         this.setBadgeStyle(savedBadgeStyle, false);
@@ -338,6 +352,13 @@ class LayoutManager {
         // Stamp the tier and platform for CSS targeting
         document.documentElement.setAttribute('data-layout-tier', platformInfo.layoutTier);
         document.documentElement.setAttribute('data-platform', platformInfo.platformString);
+
+        // Dedicated television identification for styling and layout separation.
+        // Stamping data-device-type allows CSS rules to definitively distinguish
+        // 1080p television panels from mobile/tablet touch canvases.
+        if (platformInfo.isTv) {
+            document.documentElement.setAttribute('data-device-type', 'tv');
+        }
 
         // Apply dedicated rendering quirk class/attribute for devices on ancient layout engines
         // (Chrome < 32) such as early LG WebOS 1.x and ancient Samsung Tizen 2.x firmware.
@@ -685,9 +706,18 @@ class LayoutManager {
              */
             const bg = this._lighterBackground ? tints.backgroundAlt : tints.background;
             const bgAlt = this._lighterBackground ? tints.background : tints.backgroundAlt;
+            const bgRgb = themeUtils.hexToRgb(bg);
+            const bgRgbStr = bgRgb ? `${bgRgb.r}, ${bgRgb.g}, ${bgRgb.b}` : '245, 245, 245';
+
+            /*
+             * Assign dedicated background tokens and explicitly bind --sidebar-bg
+             * so navigation and settings-sidebar surfaces cleanly reflect tinted tones.
+             */
             dynamicCss += `
             --jf-background: ${bg};
+            --jf-background-rgb: ${bgRgbStr};
             --jf-background-alt: ${bgAlt};
+            --sidebar-bg: ${bgAlt};
             --jf-surface: ${tints.surface};
             --jf-card-bg: ${tints.cardBg};
             --jf-card-bg-hover: ${tints.cardBgHover};
@@ -701,9 +731,18 @@ class LayoutManager {
              */
             const bg = this._lighterBackground ? tints.backgroundAlt : tints.background;
             const bgAlt = this._lighterBackground ? tints.background : tints.backgroundAlt;
+            const bgRgb = themeUtils.hexToRgb(bg);
+            const bgRgbStr = bgRgb ? `${bgRgb.r}, ${bgRgb.g}, ${bgRgb.b}` : '16, 16, 16';
+
+            /*
+             * Bind --sidebar-bg directly to ${bgAlt} to guarantee that settings split-view
+             * and settings-mode navigation rails take on the calculated chromatic shade.
+             */
             dynamicCss += `
             --jf-background: ${bg};
+            --jf-background-rgb: ${bgRgbStr};
             --jf-background-alt: ${bgAlt};
+            --sidebar-bg: ${bgAlt};
             --jf-surface: ${tints.surface};
             --jf-card-bg: ${tints.cardBg};
             --jf-card-bg-hover: ${tints.cardBgHover};
@@ -716,16 +755,24 @@ class LayoutManager {
             // Set sidebar background to transparent to ensure ambient glow bleeds through cleanly.
             dynamicCss += `
             --jf-background: #0a0b0c;
+            --jf-background-rgb: 10, 11, 12;
             --jf-background-alt: #070809;
+            --sidebar-bg: transparent;
             --jf-surface: rgba(255, 255, 255, 0.035);
             --jf-card-bg: rgba(255, 255, 255, 0.045);
             --jf-card-bg-hover: rgba(255, 255, 255, 0.1);
             --jf-divider: rgba(255, 255, 255, 0.06);
             --jf-navbar-bg: rgba(7, 8, 9, 0.85);`;
         } else if (this._themeMode === THEME_MODES.BLACK) {
+            /*
+             * True Pitch Black canvas for OLED displays.
+             * Eliminates backlighting bleed while setting sidebar-bg to pure black.
+             */
             dynamicCss += `
             --jf-background: #000000;
+            --jf-background-rgb: 0, 0, 0;
             --jf-background-alt: #000000;
+            --sidebar-bg: #000000;
             --jf-surface: #0a0a0a;
             --jf-card-bg: #080808;
             --jf-card-bg-hover: #121212;
@@ -737,9 +784,17 @@ class LayoutManager {
              */
             const bg = this._lighterBackground ? '#151515' : '#101010';
             const bgAlt = this._lighterBackground ? '#101010' : '#151515';
+            const bgRgb = themeUtils.hexToRgb(bg);
+            const bgRgbStr = bgRgb ? `${bgRgb.r}, ${bgRgb.g}, ${bgRgb.b}` : '16, 16, 16';
+
+            /*
+             * Expose --sidebar-bg mapped to the secondary charcoal surface shade.
+             */
             dynamicCss += `
             --jf-background: ${bg};
+            --jf-background-rgb: ${bgRgbStr};
             --jf-background-alt: ${bgAlt};
+            --sidebar-bg: ${bgAlt};
             --jf-surface: #1a1a1a;
             --jf-card-bg: #151515;
             --jf-card-bg-hover: #252525;
@@ -751,9 +806,17 @@ class LayoutManager {
              */
             const bg = this._lighterBackground ? '#f5f5f5' : '#fdfdfd';
             const bgAlt = this._lighterBackground ? '#fdfdfd' : '#f5f5f5';
+            const bgRgb = themeUtils.hexToRgb(bg);
+            const bgRgbStr = bgRgb ? `${bgRgb.r}, ${bgRgb.g}, ${bgRgb.b}` : '253, 253, 253';
+
+            /*
+             * Expose --sidebar-bg mapped to the softer light neutral background tone.
+             */
             dynamicCss += `
             --jf-background: ${bg};
+            --jf-background-rgb: ${bgRgbStr};
             --jf-background-alt: ${bgAlt};
+            --sidebar-bg: ${bgAlt};
             --jf-surface: #ffffff;
             --jf-card-bg: #ffffff;
             --jf-card-bg-hover: #fcfcfc;
@@ -794,6 +857,11 @@ class LayoutManager {
             dynamicCss += `\n/* Direct theme overrides for Chrome < 32 */\n`;
             dynamicCss += `html[data-layout-quirks="c26"] body {
                 background-color: ${resolvedBg} !important;
+            }\n`;
+
+            // Ensure focused setting item row background updates cleanly with active accent on ancient engines
+            dynamicCss += `html[data-layout-quirks="c26"] .setting-item.focused-row {
+                background-color: rgba(${accents.accentRgb}, 0.15) !important;
             }\n`;
 
             if (this._themeMode === THEME_MODES.AMBIENT) {
@@ -892,13 +960,20 @@ class LayoutManager {
         this._uiFont = font;
         if (font && font !== 'default') document.documentElement.setAttribute('data-ui-font', font);
         else document.documentElement.removeAttribute('data-ui-font');
-        if (save) storage.setItem('litefin:uiFont', font);
+        if (save) {
+            storage.setItem('litefin:uiFont', font);
+            storage.flush();
+        }
 
         // Load the fallback font dynamically if selected
-        if (font === 'fallback-font') {
-            import('../utils/FontLoader.js').then((module) => {
-                module.default.loadFont('fallback-font');
-            });
+        document.documentElement.style.removeProperty('--ui-fallback-font-family');
+        if (isFallbackFont(font)) {
+            document.documentElement.style.setProperty('--ui-fallback-font-family', `"${getFallbackFontFamily(font)}"`);
+            if (state.get('user:authenticated')) {
+                import('../utils/FontLoader.js').then((module) => {
+                    module.default.loadFont(font);
+                });
+            }
         }
     }
 
@@ -932,22 +1007,42 @@ class LayoutManager {
     }
 
     /**
-     * Set the global text scale multiplier
-     * @param {number} scale Multiplier for the base font size (e.g. 1.2 for 120%)
-     * @param {boolean} [save=true]
+    /**
+     * ========================================================================
+     * Global Typography & Text Scaling Engine
+     * ========================================================================
+     * Adjusts the foundational root font sizing and propagates the scale factor
+     * across all adaptive stylesheets via the `--litefin-text-scale` CSS variable.
+     *
+     * In standard desktop/TV viewport profiles, scaling the document root font size
+     * dynamically recalculates all relative rem-based layout tokens.
+     * In mobile portrait and landscape viewports, stylesheets consume the
+     * `--litefin-text-scale` variable within calc() expressions to maintain calibrated
+     * touch proportions and legibility without hardcoded layout breakage.
+     *
+     * @param {number} scale Multiplier for base typography (e.g. 1.2 for 120%)
+     * @param {boolean} [save=true] Whether to persist the scale preference
+     * ========================================================================
      */
     setTextScale(scale, save = true) {
+        // Update internal text scale tracker
         this._textScale = scale;
 
-        // Calculate and apply base font size directly to the root element.
-        // Standard base is 16px. Scaling this scales all 'rem' units.
-        const pixelSize = 16 * scale;
-        document.documentElement.style.fontSize = `${pixelSize}px`;
+        // Propagate custom CSS property to document root so all responsive rules
+        // and platform-specific stylesheets (including Android mobile & TV) can scale typography
+        document.documentElement.style.setProperty('--litefin-text-scale', String(scale));
 
+        // Calculate and apply base font size directly to root element with priority flag.
+        // Standard base is 16px. Scaling this scales all 'rem' units across the UI canvas.
+        const pixelSize = 16 * scale;
+        document.documentElement.style.setProperty('font-size', `${pixelSize}px`, 'important');
+
+        // Persist preference to local storage when requested
         if (save) {
             storage.setItem('litefin:textScale', scale.toString());
         }
 
+        // Emit change event to allow listening components to update if necessary
         log.info(`Text scale updated: ${scale} (${pixelSize}px)`);
         eventBus.emit('textScale:changed', { scale });
     }
@@ -1030,11 +1125,10 @@ class LayoutManager {
         const appEl = document.getElementById('app');
         if (!root) return;
 
-        // Dedicated television environments run at fixed 1080p framebuffer
-        const isNativeTv =
-            platformInfo.isTizen ||
-            platformInfo.isWebOS ||
-            (platformInfo.isAndroid && Boolean(window.LitefinAndroid?.isTv?.()));
+        // Dedicated television environments run at fixed 1080p framebuffer.
+        // platformInfo.isTv comprehensively evaluates Samsung Tizen, LG webOS,
+        // and Android TV / Google TV runtimes (native bridge isTv calls and UA tokens).
+        const isNativeTv = platformInfo.isTv;
 
         // Resolve user display scale multiplier from settings ('auto' => 1.0, '0.8' => 0.8, etc.)
         const userMultiplier = this._displayScale === 'auto' ? 1.0 : (parseFloat(this._displayScale) || 1.0);
@@ -1043,14 +1137,18 @@ class LayoutManager {
             // Television panels run natively at 1:1 scale unless user sets manual factor
             const tvScale = userMultiplier;
             if (Math.abs(tvScale - 1.0) < 0.02) {
+                // Return to natural unzoomed 1:1 pixel grid
                 root.style.removeProperty('zoom');
                 root.removeAttribute('data-display-scale');
             } else {
+                // Apply user-selected television display zoom factor
                 root.style.setProperty('zoom', String(tvScale));
                 root.setAttribute('data-display-scale', '1');
             }
+            // Strip mobile-specific responsive attributes on television hardware
             root.removeAttribute('data-litefin-portrait');
             root.removeAttribute('data-litefin-scaled');
+            root.removeAttribute('data-litefin-touch');
             root.style.removeProperty('--litefin-app-w');
             root.style.removeProperty('--litefin-app-h');
             if (appEl) {
@@ -1671,6 +1769,50 @@ class LayoutManager {
      */
     getDisableBlurhash() {
         return this._disableBlurhash;
+    }
+
+    /**
+     * Disable or enable BlurHash placeholder rendering specifically in library grids.
+     * When disabled (true), cards in the library skip canvas generation and DCT decoding,
+     * relying on lightweight CSS background skeletons to ensure maximum framerate and fluidity.
+     *
+     * @param {boolean} disabled - True to disable library BlurHash; false to enable.
+     * @param {boolean} [save=true] - Whether to persist the setting to storage.
+     * @public
+     */
+    setDisableLibraryBlurhash(disabled, save = true) {
+        // Track the updated preference state in memory
+        this._disableLibraryBlurhash = disabled;
+
+        // Apply HTML attribute flag to document root for stylesheet selector optimization
+        if (disabled) {
+            document.documentElement.setAttribute('data-disable-library-blurhash', 'true');
+        } else {
+            document.documentElement.removeAttribute('data-disable-library-blurhash');
+        }
+
+        // Persist setting inside the StorageService database
+        if (save) {
+            storage.setItem('pref:disableLibraryBlurhash', disabled ? 'true' : 'false');
+        }
+
+        // Invalidate card HTML cache so cards refresh instantly on navigation or re-render
+        CardRenderer.clearCache();
+
+        // Dispatch status update event to notify any interested subscribers
+        log.info(`Disable Library BlurHash set to: ${disabled}`);
+        eventBus.emit('disableLibraryBlurhash:changed', { disabled });
+    }
+
+    /**
+     * Retrieve the current preference state for disabling BlurHash in library grids.
+     * Defaults to true unless explicitly toggled off by the user.
+     *
+     * @returns {boolean} True if BlurHash is disabled in library grids; false otherwise.
+     * @public
+     */
+    getDisableLibraryBlurhash() {
+        return this._disableLibraryBlurhash;
     }
 
     /**

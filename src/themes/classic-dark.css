@@ -6,7 +6,13 @@
 
 [data-theme-mode="classic-dark"] {
     --jf-background: #101010;
+    --jf-background-rgb: 16, 16, 16;
     --jf-background-alt: #181818;
+    /*
+     * Sidebar and Settings split-view navigation surface background.
+     * Matches the charcoal secondary background tone of Classic Dark mode.
+     */
+    --sidebar-bg: var(--jf-background-alt, #181818);
     --jf-card-bg: #1a1a1a;
     --jf-card-bg-hover: #252525;
     --jf-overlay-bg: rgba(0, 0, 0, 0.85);

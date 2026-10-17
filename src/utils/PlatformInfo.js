@@ -15,7 +15,9 @@ const log = logger.create('PlatformInfo');
 
 class PlatformInfo {
     constructor() {
-        this._platform = 'web'; // Default to web
+        // Evaluate platform eagerly during instantiation to support capability checks
+        // and setting defaults (e.g. recommended video backend) at module import time
+        this._platform = this._detectPlatform();
 
         /*
          * Layout tier controls which CSS rendering path is used.
@@ -82,6 +84,71 @@ class PlatformInfo {
     }
 
     /**
+     * =========================================================================
+     * Device Platform Detection
+     * =========================================================================
+     * Evaluates global hardware APIs and User Agent signatures to identify the
+     * active runtime environment (Tizen, webOS, Android, Desktop, or Web).
+     *
+     * Evaluated eagerly in the constructor so platform getters work reliably
+     * at module import time before App.init() runs.
+     *
+     * @private
+     * @returns {'tizen'|'webos'|'android'|'desktop'|'web'}
+     */
+    _detectPlatform() {
+        // Fall back safely if running in headless node / test environment
+        if (typeof window === 'undefined' && typeof navigator === 'undefined') {
+            return 'web';
+        }
+
+        // ---------------------------------------------------------------------
+        // Samsung Smart TV (Tizen) Detection
+        // ---------------------------------------------------------------------
+        // Check hardware namespaces (window.tizen, window.webapis) or Tizen UA token
+        if (
+            (typeof window !== 'undefined' && (typeof window.tizen !== 'undefined' || typeof window.webapis?.avplay !== 'undefined')) ||
+            (typeof navigator !== 'undefined' && /Tizen/i.test(navigator.userAgent || ''))
+        ) {
+            return 'tizen';
+        }
+
+        // ---------------------------------------------------------------------
+        // LG Smart TV (webOS) Detection
+        // ---------------------------------------------------------------------
+        // LG TVs reliably include WebOS/NetCast in their UA across all webOS versions
+        if (typeof navigator !== 'undefined' && /Web[O0]S|NetCast|LG[ -]Browser/i.test(navigator.userAgent || '')) {
+            return 'webos';
+        }
+
+        // ---------------------------------------------------------------------
+        // Android / Android TV Detection
+        // ---------------------------------------------------------------------
+        // Checks UA tokens and native bridge injection objects
+        if (
+            (typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent || '')) ||
+            (typeof window !== 'undefined' &&
+                (typeof window.LitefinAndroid !== 'undefined' || typeof window.AndroidBridge !== 'undefined'))
+        ) {
+            return 'android';
+        }
+
+        // ---------------------------------------------------------------------
+        // Desktop Shell (Tauri / Electron) Detection
+        // ---------------------------------------------------------------------
+        if (
+            typeof window !== 'undefined' &&
+            (window.__TAURI__ || window.__TAURI_METADATA__ || window.__TAURI_INTERNALS__ ||
+             window.process?.versions?.electron || (typeof navigator !== 'undefined' && /Electron/i.test(navigator.userAgent || '')))
+        ) {
+            return 'desktop';
+        }
+
+        // Default to standard web browser environment
+        return 'web';
+    }
+
+    /**
      * Determine the current platform and cache it in storage.
      * Should be called exactly once during App init.
      */
@@ -95,42 +162,8 @@ class PlatformInfo {
             this._platform = savedPlatform;
             log.info(`Platform restored from cache: ${this._platform}`);
         } else {
-            // 2. Perform fresh detection
-            log.info('Detecting device platform...');
-
-            // Tizen check
-            if (typeof window.tizen !== 'undefined' || typeof window.webapis?.avplay !== 'undefined') {
-                this._platform = 'tizen';
-            }
-            // WebOS check — handle both WebOS (letter O) and Web0S (zero) variants, and NetCast/LG Browser
-            // NOTE: We don't check for window.webOS here because webOSTV.js is included in index.html
-            // and defines the namespace even on standard browsers, causing false positives.
-            // LG TVs reliably include WebOS/NetCast in their UA.
-            else if (/Web[O0]S|NetCast|LG[ -]Browser/i.test(navigator.userAgent)) {
-                this._platform = 'webos';
-            }
-            // Android check — Android TV, Google TV, or Android app wrapper
-            // Explicitly distinguished from desktop/web to prevent TV remotes from getting web-only arrows
-            else if (
-                /Android/i.test(navigator.userAgent) ||
-                (typeof window !== 'undefined' &&
-                    (typeof window.LitefinAndroid !== 'undefined' || typeof window.AndroidBridge !== 'undefined'))
-            ) {
-                this._platform = 'android';
-            }
-            // Desktop check — Tauri desktop application shell or Electron wrapper
-            // Specifically covers desktop builds (Windows, macOS, Linux)
-            else if (
-                typeof window !== 'undefined' &&
-                (window.__TAURI__ || window.__TAURI_METADATA__ || window.__TAURI_INTERNALS__ ||
-                 window.process?.versions?.electron || /Electron/i.test(navigator?.userAgent || ''))
-            ) {
-                this._platform = 'desktop';
-            }
-            // Default: Web browser environment
-            else {
-                this._platform = 'web';
-            }
+            // Run device platform detection
+            this._platform = this._detectPlatform();
 
             log.info(`Detected platform: ${this._platform}`);
 
@@ -170,7 +203,11 @@ class PlatformInfo {
 
     /** @returns {boolean} True if running on a Samsung Tizen TV */
     get isTizen() {
-        return this._platform === 'tizen';
+        return (
+            this._platform === 'tizen' ||
+            (typeof window !== 'undefined' && (typeof window.tizen !== 'undefined' || typeof window.webapis?.avplay !== 'undefined')) ||
+            (typeof navigator !== 'undefined' && /Tizen/i.test(navigator.userAgent || ''))
+        );
     }
 
     /**
@@ -198,7 +235,10 @@ class PlatformInfo {
 
     /** @returns {boolean} True if running on an LG WebOS TV */
     get isWebOS() {
-        return this._platform === 'webos';
+        return (
+            this._platform === 'webos' ||
+            (typeof navigator !== 'undefined' && /Web[O0]S|NetCast|LG[ -]Browser/i.test(navigator.userAgent || ''))
+        );
     }
 
     /** @returns {boolean} True if running in a standard web browser (excluding Android TV, Smart TVs, and desktop app shells) */

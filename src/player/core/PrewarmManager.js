@@ -16,7 +16,8 @@ import { buildJellyfinProfile } from '../../api/DeviceProfile.js';
 import FontLoader from '../../utils/FontLoader.js';
 import SubtitleStyles from '../../utils/SubtitleStyles.js';
 import { platformInfo } from '../../utils/PlatformInfo.js';
-import { resolveBestAudioStream, doesAudioTrackRequireDirectStream } from './JellyfinPlayer.js';
+import { webCodecsProbe } from '../../utils/WebCodecsProbe.js';
+import { resolveBestAudioStream, doesAudioTrackRequireDirectStream, resolveSubtitleStream } from './JellyfinPlayer.js';
 
 const log = logger.create('PrewarmManager');
 
@@ -77,8 +78,25 @@ export class PrewarmManager {
             }
         }
 
-        // Resolve target subtitle track (specified override or null/default)
-        const targetSubtitleIndex = prewarmOptions.subtitleStreamIndex ?? null;
+        // ---------------------------------------------------------------------
+        // Resolve Target Subtitle Track
+        // ---------------------------------------------------------------------
+        // If an explicit subtitle stream index is provided, use it.
+        // Otherwise, resolve the subtitle stream using the user's active Subtitle Mode.
+        let targetSubtitleIndex = prewarmOptions.subtitleStreamIndex;
+        if (targetSubtitleIndex === undefined) {
+            const fallbackSource = item.MediaSources?.[0];
+            const ms = targetMediaSourceId && item.MediaSources
+                ? item.MediaSources.find(m => m.Id === targetMediaSourceId)
+                : fallbackSource;
+            if (ms && ms.MediaStreams) {
+                targetSubtitleIndex = resolveSubtitleStream(ms, {
+                    audioStreamIndex: targetAudioIndex
+                });
+            } else {
+                targetSubtitleIndex = -1;
+            }
+        }
 
         // Check if item is already prewarmed with identical track and media source options
         const isSameItem = this._cachedItemId === item.Id;
@@ -149,6 +167,11 @@ export class PrewarmManager {
             // on WebOS / HTML5 to prevent prewarming in DirectPlay and falling back to AC3
             const needsRemux = targetSource && targetAudioIndex !== null && targetAudioIndex !== undefined &&
                 doesAudioTrackRequireDirectStream(targetSource, targetAudioIndex, backendType);
+
+            // The desktop and web profiles depend on the WebCodecs AV1 probe; skip prewarming until it has run
+            if ((platformInfo.isDesktop || platformInfo.isWeb) && platformInfo.hasWebCodecsSupport && webCodecsProbe.av1Decodes === null) {
+                return;
+            }
 
             const prewarmPlaybackMode = needsRemux ? 'remux' : 'auto';
 
@@ -223,8 +246,14 @@ export class PrewarmManager {
                 requestBody.AudioStreamIndex = targetAudioIndex;
             }
 
-            // Attach requested SubtitleStreamIndex if explicitly provided (and not disabled -1)
-            if (targetSubtitleIndex !== null && targetSubtitleIndex !== undefined && targetSubtitleIndex >= 0) {
+            // -----------------------------------------------------------------
+            // Subtitle Selection in Prewarm Payload
+            // -----------------------------------------------------------------
+            // Attach requested SubtitleStreamIndex if resolved (including -1 for off).
+            // Explicitly sending -1 prevents the Jellyfin server from falling back to
+            // internal default subtitles or generating burned-in subtitles during transcode.
+            const isAudioItem = item.MediaType === 'Audio' || item.Type === 'Audio';
+            if (!isAudioItem && targetSubtitleIndex !== null && targetSubtitleIndex !== undefined) {
                 requestBody.SubtitleStreamIndex = targetSubtitleIndex;
             }
 

@@ -34,7 +34,7 @@ const log = logger.create('PlayerSettings');
  * =========================================================================
  * @returns {'exoplayer'|'avplay'|'webos'|'movi'|'html5'}
  */
-export function getRecommendedPlayerBackend() {
+function getRecommendedPlayerBackend() {
     // Fall back safely if platformInfo is unavailable
     if (typeof platformInfo === 'undefined') return 'html5';
     // Samsung Tizen TV hardware platform
@@ -403,13 +403,16 @@ const DEFAULTS = {
     // -------------------------------------------------------------------------
     // PLAYER BACKEND SELECTION
     // -------------------------------------------------------------------------
-    // Directly binds to the optimal native player backend for the detected platform:
+    // Dynamically binds to the optimal native player backend for the detected platform:
     //  - Android TV/Mobile → 'exoplayer'
     //  - Samsung Tizen     → 'avplay'
     //  - LG webOS          → 'webos'
     //  - Web / Desktop     → 'movi' (WebCodecs) or 'html5' (standard browser)
+    // Evaluated via getter so platform state is queried accurately at runtime
     // -------------------------------------------------------------------------
-    playerBackend: getRecommendedPlayerBackend(),
+    get playerBackend() {
+        return getRecommendedPlayerBackend();
+    },
 
     /*
      * Interlaced Content Backend Fallback
@@ -689,8 +692,8 @@ const DEFAULTS = {
     resetSeekSpeedOnDirectionChange: false,
 
     // Enable mouse/magic cursor support in the OSD (hover and click)
-    // Disabled by default on Tizen due to cursor interaction bugs
-    enableMagicCursor: !platformInfo.isTizen,
+    // Enabled by default across all platforms whenever a pointer/mouse is active
+    enableMagicCursor: true,
 
     // Show timestamp and trickplay images on hover with mouse
     enableHoverTrickplay: false,
@@ -857,6 +860,11 @@ export const PlayerSettings = {
 
         const stored = storage.getItem(STORAGE_PREFIX + key);
         if (stored === null) {
+            // Dynamic resolution: if playerBackend has never been explicitly customized,
+            // query the hardware platform directly instead of relying on a stale static fallback
+            if (key === 'playerBackend') {
+                return getRecommendedPlayerBackend();
+            }
             return DEFAULTS[key];
         }
 
@@ -904,16 +912,12 @@ export const PlayerSettings = {
         // If 'movi' was saved but the device lacks WebCodecs, falls back to 'html5'.
         // =====================================================================
         if (key === 'playerBackend') {
-            // Determine platform recommended backend
+            // Determine platform recommended backend dynamically
             const recommended = getRecommendedPlayerBackend();
-            // Automatically re-select and persist if previously set to 'auto'
-            if (stored === 'auto') {
+            // Automatically re-select and persist if previously set to 'auto' or unconfigured
+            if (stored === 'auto' || !stored) {
                 log.info(`Migrating legacy 'auto' playerBackend preference to recommended backend: ${recommended}`);
                 storage.setItem(STORAGE_PREFIX + key, recommended);
-                return recommended;
-            }
-            // Fall back to recommended backend if empty
-            if (!stored) {
                 return recommended;
             }
             // Fall back to html5 if movi is persisted but WebCodecs is unsupported or on TV builds

@@ -44,12 +44,9 @@ const WEB_KEYS = {
     MEDIA_PLAY: 415,
     MEDIA_PAUSE: 19,
     MEDIA_PLAY_PAUSE: 179,
-    MEDIA_PLAY_PAUSE_ALT: 85,
     MEDIA_STOP: 178,
     MEDIA_NEXT: 176,
-    MEDIA_NEXT_ALT: 87,
     MEDIA_PREV: 177,
-    MEDIA_PREV_ALT: 88,
     FAST_FORWARD: 228,
     REWIND: 227
 };
@@ -100,6 +97,12 @@ class WebAdapter {
         document.addEventListener('mousedown', () => this.reportInput(), { passive: true });
         document.addEventListener('touchstart', () => this.reportInput(), { passive: true });
         document.addEventListener('wheel', () => this.reportInput(), { passive: true });
+
+        // Synchronize HTML5 fullscreen changes with web client state
+        document.addEventListener('fullscreenchange', () => {
+            const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+            eventBus.emit('window:fullscreen', isFs);
+        });
 
         // Query browser platform device identity
         this._loadDeviceInfo();
@@ -163,8 +166,37 @@ class WebAdapter {
             // Identify whether user is actively typing inside an input or textarea
             const activeElem = document.activeElement;
             const isTextInput =
-                activeElem &&
-                ((activeElem.tagName === 'INPUT' && activeElem.type !== 'range') || activeElem.tagName === 'TEXTAREA');
+                Boolean(activeElem) &&
+                (activeElem.tagName === 'TEXTAREA' ||
+                    activeElem.isContentEditable ||
+                    (activeElem.tagName === 'INPUT' &&
+                        !['range', 'checkbox', 'radio', 'button', 'submit', 'reset'].includes(activeElem.type)));
+
+            // -----------------------------------------------------------------
+            // Form Input Field Guard: Allow All Letters and Characters
+            // -----------------------------------------------------------------
+            // When user is typing inside an input field, textarea, or editable element,
+            // never intercept or suppress any typing, editing, navigation, or letter keys.
+            // Allow all characters (including W, X, U, etc.) to be typed unimpeded.
+            if (isTextInput) {
+                // F11 should toggle HTML5 fullscreen unconditionally from anywhere.
+                if (keyCode === WEB_KEYS.F11 || key === 'F11') {
+                    e.preventDefault();
+                    this.toggleFullscreen();
+                    return;
+                }
+
+                // Escape always triggers back navigation / dialog dismissal
+                if (keyCode === WEB_KEYS.ESCAPE || key === 'Escape') {
+                    e.preventDefault();
+                    eventBus.emit('key:back', e);
+                    return;
+                }
+
+                // Let all other keys (letters, digits, backspace, enter, arrows, etc.)
+                // pass through to native text input handling without interference.
+                return;
+            }
 
             // Detect if video player is currently active in view
             const isPlayerActive = window.location.hash.startsWith('#/player');
@@ -296,7 +328,6 @@ class WebAdapter {
                     break;
 
                 case WEB_KEYS.MEDIA_PLAY_PAUSE:
-                case WEB_KEYS.MEDIA_PLAY_PAUSE_ALT:
                     e.preventDefault();
                     eventBus.emit('key:playPause', e);
                     break;
@@ -308,13 +339,11 @@ class WebAdapter {
 
                 // Media Next / Previous track keys
                 case WEB_KEYS.MEDIA_NEXT:
-                case WEB_KEYS.MEDIA_NEXT_ALT:
                     e.preventDefault();
                     eventBus.emit('key:next', e);
                     break;
 
                 case WEB_KEYS.MEDIA_PREV:
-                case WEB_KEYS.MEDIA_PREV_ALT:
                     e.preventDefault();
                     eventBus.emit('key:previous', e);
                     break;
@@ -370,6 +399,23 @@ class WebAdapter {
             }
         } catch (err) {
             log.warn('Web HTML5 fullscreen toggle failed:', err);
+        }
+
+        return false;
+    }
+
+    /**
+     * ========================================================================
+     * Fullscreen State Inspection
+     * ========================================================================
+     * Determines whether the web browser viewport is currently in fullscreen mode.
+     * ========================================================================
+     * @returns {boolean} True if in fullscreen mode, false otherwise.
+     */
+    isFullscreen() {
+        // Query active document fullscreen elements across browser engines
+        if (typeof document !== 'undefined') {
+            return !!(document.fullscreenElement || document.webkitFullscreenElement);
         }
 
         return false;

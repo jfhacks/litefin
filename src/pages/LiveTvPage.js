@@ -41,7 +41,7 @@ class LiveTvPage extends Page {
         // Pagination State
         this._startIndex = 0;
         this._totalCount = 0;
-        this._limit = Number(storage.getItem('pref:libraryPageSize')) || 100;
+        this._limit = Number(storage.getItem('pref:libraryPageSize')) || 50;
 
         // Handlers
         this._onPageChange = this._handlePageChange.bind(this);
@@ -84,7 +84,7 @@ class LiveTvPage extends Page {
 
         this._currentTab = savedState.currentTab || storage.getItem('pref:defaultLiveTvTab') || 'suggestions';
         this._startIndex = savedState.startIndex || 0;
-        this._limit = savedState.limit || Number(storage.getItem('pref:libraryPageSize')) || 100;
+        this._limit = savedState.limit || Number(storage.getItem('pref:libraryPageSize')) || 50;
 
         this._tabState.clear();
         if (savedState.tabStates) {

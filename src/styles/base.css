@@ -35,6 +35,9 @@
 :root {
     --jf-font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 
+    /* Global typography scale multiplier (1.0 = 100%) */
+    --litefin-text-scale: 1;
+
     /* Global Action Button Defaults (Fallbacks for themes) */
     --jf-action-btn-bg: rgba(255, 255, 255, 0.10);
     --jf-action-btn-border: rgba(255, 255, 255, 0.20);
@@ -801,6 +804,10 @@ html[data-ui-font="fallback-font"] {
     --jf-font-family: 'Jellyfin Fallback Font', sans-serif;
 }
 
+html[data-ui-font^="fallback-font:"] {
+    --jf-font-family: var(--ui-fallback-font-family), sans-serif;
+}
+
 html {
     /* Apply global font-family here so it inherits downwards to * */
     font-family: var(--jf-font-family);
@@ -821,12 +828,19 @@ html {
     scroll-behavior: auto;
 }
 
-body {
+/*
+ * Main Viewport & Body Surface:
+ * Anchors the global viewport canvas to the active theme palette (--jf-background).
+ * Marked with !important to ensure full coverage across all theme modes (Classic Dark,
+ * Classic Light, Tinted, Black, Ambient) and prevent dark letterbox gaps under collapsed
+ * or floating navigation sidebars on non-home pages such as the library.
+ */
+body:not(.player-active) {
     line-height: 1.5;
     overflow-x: hidden;
 
-    /* Theme colors applied via CSS variables */
-    background-color: var(--jf-background);
+    /* Theme canvas background applied globally */
+    background-color: var(--jf-background) !important;
     color: var(--jf-text-primary);
 }
 
@@ -1463,22 +1477,15 @@ html[data-badge-style="dark"] .game-card-badge {
 }
 
 /* ============================================================================
-   Magic Remote Support (WebOS) & Mouse Cursor Visibility
+   Universal Mouse & Pointer Support Across All Platforms
    ============================================================================ */
 
 /* 
- * By default on dedicated TV platforms (Tizen, webOS) we hide 
- * the mouse cursor unless the Magic Remote (pointer mode) is active.
- * Desktop (Tauri/Electron), Web, and mobile/touch Android platforms must 
- * keep cursor interaction active without unwanted hiding.
+ * Baseline cursor for all platforms (Web, Desktop, Android, Tizen, webOS).
+ * Whenever a physical mouse, air-mouse, touchpad, or pointer device is
+ * present and moved, native cursor visibility and hover interactions are enabled.
  */
-html:not([data-platform="web"]):not([data-platform="desktop"]):not([data-platform="android"]) body:not(.webos-cursor-active) {
-    cursor: none !important;
-}
-
-/* Explicit baseline cursor for mouse-driven desktop and web platforms */
-html[data-platform="desktop"] body,
-html[data-platform="web"] body {
+body {
     cursor: default;
 }
 

@@ -24,7 +24,7 @@ The project uses **Webpack** (multi-target configurations) for bundling, **Gulp*
 | `npm run serve:legacy`       | Webpack dev server (Legacy variant)                                                       |
 | `npm run serve:ultra-legacy` | Webpack dev server (Ultra-Legacy variant)                                                 |
 | `npm run test`               | Run Node.js built-in test runner (`node --test tests/*.test.js`)                          |
-| `npm run clean`              | Removes `dist/`, `*.wgt`, `*.ipk`, `*.apk`, `*.exe`, `*.msi`, `*.deb`, `*.AppImage`, `*.dmg`, and `src-tauri/target/` |
+| `npm run clean`              | Removes `dist/`, `*.wgt`, `*.ipk`, `*.apk`, `*.exe`, `*.msi`, `*.deb`, `*.AppImage`, `*.rpm`, `*.dmg`, and `src-tauri/target/` |
 | `npm run lint` / `lint:fix`  | ESLint check / auto-fix on `src/`                                                         |
 | `npm run format` / `check`   | Prettier format / check on `src/`                                                         |
 
@@ -58,12 +58,12 @@ The project uses **Webpack** (multi-target configurations) for bundling, **Gulp*
 
 | Command                         | Output                                                                           |
 | ------------------------------- | -------------------------------------------------------------------------------- |
-| `npm run package:desktop`       | Host desktop release bundle (`.exe`/`.msi` Windows, `.deb`/`.AppImage` Linux, `.dmg` macOS) |
+| `npm run package:desktop`       | Host desktop release bundle (`.exe`/`.msi` Windows, `.deb`/`.AppImage`/`.rpm` Linux, `.dmg` macOS) |
 | `npm run package:desktop-debug` | Host desktop unminified debug bundle with console logging enabled                |
 | `npm run package:windows`       | Windows release installer (`_x64-setup.exe`) and MSI package (`.msi`)            |
 | `npm run package:windows-debug` | Windows debug installer with DevTools enabled                                    |
-| `npm run package:linux`         | Linux release `.deb` package and standalone `.AppImage`                          |
-| `npm run package:linux-debug`   | Linux debug `.deb` / `.AppImage` with console logs                                |
+| `npm run package:linux`         | Linux release `.deb` package, `.rpm` package, and standalone `.AppImage`          |
+| `npm run package:linux-debug`   | Linux debug `.deb` / `.rpm` / `.AppImage` with console logs                        |
 | `npm run package:macos`         | macOS release disk image (`.dmg`)                                                |
 | `npm run package:macos-debug`   | macOS debug disk image (`.dmg`)                                                  |
 
@@ -141,7 +141,21 @@ The project uses **Webpack** (multi-target configurations) for bundling, **Gulp*
 - **Installation**: Sideload `.apk` via **ADB** (`adb install <file>.apk`), **Downloader**, or **Send Files to TV (SFTV)**.
 
 ### Desktop
-- **Installation**: Run `.exe` / `.msi` (Windows), execute `.AppImage` / install `.deb` (Linux), or mount `.dmg` (macOS).
+- **Installation**: Run `.exe` / `.msi` (Windows), execute `.AppImage` / install `.deb` or `.rpm` (Linux), or mount `.dmg` (macOS).
+
+#### Keyboard Controls (Desktop & Web)
+
+| Key / Shortcut | Action |
+| :------------- | :----- |
+| **`Space`** / **`K`** | Play / Pause toggle |
+| **`J`** / **`L`** | Seek backward / forward 10 seconds |
+| **`←`** / **`→`** | Navigate UI items or seek timeline during playback |
+| **`↑`** / **`↓`** | Navigate UI items, menus, and OSD controls |
+| **`Enter`** | Select / Activate focused item or reveal OSD |
+| **`Esc`** / **`Backspace`** | Go back / Close modal / Exit player |
+| **`F`** / **`F11`** | Toggle Fullscreen |
+| **`M`** | Mute / Unmute audio |
+| **Media Keys** | Hardware Play, Pause, Next, Previous, Stop |
 
 ### Jellyfin Web Plugin
 - **Installation**: Sideload repository manifest or extract `Litefin.Client.Plugin_*.zip` into the Jellyfin server `plugins/Litefin_Client` directory and restart the server.

@@ -23,7 +23,7 @@ Litefin is a high-performance, hardware-accelerated Jellyfin client engineered f
   - **Android (Tauri v2 + Media3 ExoPlayer)**:
     - ABI-split APKs (`arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`), universal APK, and Android App Bundle (`.aab`).
   - **Desktop (Tauri v2)**:
-    - Native packages for Windows (`.exe` setup, `.msi`), Linux (`.deb`, `.AppImage`), and macOS (`.dmg`).
+    - Native packages for Windows (`.exe` setup, `.msi`), Linux (`.deb`, `.AppImage`, `.rpm`), and macOS (`.dmg`).
   - **Web Client Plugin**:
     - Sideloadable server plugin (`Litefin.Client.Plugin_*.zip`) and repository manifest distribution for Jellyfin servers.
 
@@ -176,7 +176,7 @@ The player includes 23 modular interactive overlays managed by `OSDController.js
     5. **Floating Island**: Glassmorphic floating control dock.
 - **Multi-Platform Input Paradigms**:
   - **10-Foot TV Remotes (`FocusManager.js`, `SpatialNavigator.js`)**: Precision spatial directional calculation, section memory, colored button handlers (Red, Green, Yellow, Blue), and OK button behavior toggles (play/pause vs show OSD).
-  - **Desktop Keyboard & Mouse**: Mouse hover card zoom, mouse wheel list scrolling, keyboard shortcuts (Space, M, F, Esc, arrows), and frameless titlebar drag/window controls via Tauri v2.
+  - **Desktop Keyboard & Mouse**: Mouse hover card zoom, mouse wheel list scrolling, comprehensive keyboard shortcuts (Space/K for play/pause, J/L for seeking, M for mute, F/F11 for fullscreen, Esc/Backspace for back, arrow keys & Enter for navigation), and frameless titlebar drag/window controls via Tauri v2.
   - **Mobile & Tablet Touch**: Fluid touch scrolling on `VirtualCardRow` and media grids, touch-friendly tap targets, and responsive layout adaptivity.
 - **Internationalization (i18n)**:
   - Flat JSON localization engine covering 100+ languages.

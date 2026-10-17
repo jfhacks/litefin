@@ -4,9 +4,12 @@
 <head>
     <meta charset="UTF-8">
     <style>
-        /* Immediate critical dark background to prevent any white canvas flash during boot */
+        /* 
+         * Immediate critical dark baseline to prevent white canvas flash during boot.
+         * Kept without !important so active theme backgrounds cascade cleanly once CSS initializes.
+         */
         html:not(.player-active), body:not(.player-active) {
-            background-color: #000000 !important;
+            background-color: #000000;
             margin: 0;
             padding: 0;
         }
@@ -26,7 +29,7 @@
             background: transparent !important;
         }
     </style>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <script>
         /*
          * TV & Android 1080p Viewport Normalization
@@ -79,7 +82,8 @@
             try {
                 var savedScale = localStorage.getItem('pref:displayScale') || 'auto';
                 var ua = navigator.userAgent;
-                var isNativeTv = /Tizen|Web[O0]S/i.test(ua);
+                // TV platforms run at native 1080p canvas unless explicitly scaled
+                var isNativeTv = /Tizen|Web[O0]S/i.test(ua) || (typeof isAndroidTv !== 'undefined' && isAndroidTv);
                 var effectiveScale = 1.0;
 
                 if (savedScale === 'auto') {

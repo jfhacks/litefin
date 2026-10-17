@@ -129,4 +129,17 @@ export class BaseProfile {
         }
         return deviceId;
     }
+
+    /**
+     * AudioCodec values for the per-codec video TranscodingProfiles. Jellyfin does not treat E-AC-3
+     * as an encode target (ffmpeg's encoder is worse than AC-3 at the same bitrate), so a profile
+     * offering E-AC-3 alone gets that weaker encoder for other sources, and MP3 when an E-AC-3 source
+     * has to be re-encoded (e.g. downmixed to stereo). Paired with the next codec, E-AC-3 is still
+     * copied when it can be and the server encodes the next codec otherwise.
+     * @param {string[]} codecs - Transcode audio codecs in order of preference
+     * @returns {string[]} One AudioCodec value per transcoding profile
+     */
+    static getTranscodeAudioCodecs(codecs) {
+        return codecs.map((codec, i) => (codec === 'eac3' && i + 1 < codecs.length ? `eac3,${codecs[i + 1]}` : codec));
+    }
 }

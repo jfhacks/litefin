@@ -26,7 +26,20 @@ The application uses a custom-built design system that avoids generic browser de
 
 ### 2. Desktop Environment (Keyboard & Mouse)
 - **Cursor & Hover Interactions**: Smooth card zoom, active states, and focus-on-hover behavior.
-- **Keyboard Navigation**: Standard arrow key navigation, media controls (Space for play/pause, M for mute, F for fullscreen, Esc for back).
+- **Keyboard Navigation & Media Controls**: Standard arrow key navigation, media controls, and full keyboard shortcuts for desktop and web:
+
+| Key / Shortcut | Action |
+| :------------- | :----- |
+| **`Space`** / **`K`** | Play / Pause toggle |
+| **`J`** / **`L`** | Seek backward / forward 10 seconds |
+| **`←`** / **`→`** | Navigate UI items or seek timeline during playback |
+| **`↑`** / **`↓`** | Navigate UI items, menus, and OSD controls |
+| **`Enter`** | Select / Activate focused item or reveal OSD |
+| **`Esc`** / **`Backspace`** | Go back / Close modal / Exit player |
+| **`F`** / **`F11`** | Toggle Fullscreen |
+| **`M`** | Mute / Unmute audio |
+| **Media Keys** | Hardware Play, Pause, Next, Previous, Stop |
+
 - **Window Management**: Custom frameless titlebar controls, draggable header areas, and native window resize listeners via Tauri v2.
 
 ### 3. Mobile & Tablet (Touch)

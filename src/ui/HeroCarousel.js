@@ -71,11 +71,19 @@ class HeroCarousel {
         const isCompact = storage.getItem('pref:heroCarouselCompact') !== 'false';
         const isZoomEnabled = storage.getItem('pref:heroCarouselZoom') === 'true';
         const isAnimationEnabled = storage.getItem('pref:heroCarouselIndicatorAnimation') !== 'false';
+        // BlurHash ambient color fill is exclusive to Immersive (Performance) mode and disabled by default
+        const isBlurhashFill = carouselStyle === 'immersive-performance' && storage.getItem('pref:heroCarouselBlurhashFill') === 'true';
         const intervalInSeconds = (this._autoScrollInterval / 1000).toFixed(1) + 's';
 
         let navArrowsHtml = '';
-        // Render navigation arrows on pointer-driven platforms (Web, Desktop, WebOS Magic Remote)
-        if ((platformInfo.isWeb || platformInfo.isDesktop || platformInfo.isWebOS) && this._items.length > 1) {
+        // ---------------------------------------------------------------------
+        // Interactive Carousel Navigation Arrows
+        // ---------------------------------------------------------------------
+        // Render navigation arrows across all platforms whenever multiple slides
+        // exist. Arrows are styled with opacity: 0 and tabindex="-1" so they never
+        // interfere with D-pad navigation, and smoothly reveal on mouse hover.
+        // ---------------------------------------------------------------------
+        if (this._items.length > 1) {
             navArrowsHtml = `
                 <div class="hero-nav-arrows">
                     <button class="hero-arrow hero-arrow-left" aria-label="Previous" tabindex="-1">
@@ -90,11 +98,12 @@ class HeroCarousel {
 
         // Apply compact to the container to manage external margins (Banner Mode)
         // Use with-zoom to conditionally apply the focus transform
+        // Use with-blurhash-fill to apply background ambient fill styling
         // Use no-indicator-animation to disable the progress bar fill
         // Use indicator-${indicatorStyle} to switch between lines, dots, or progress pills
         return `
             <div id="hero-carousel-container" 
-                 class="hero-carousel-container ${carouselStyle} indicator-${indicatorStyle} ${isCompact ? 'compact' : ''} ${isZoomEnabled ? 'with-zoom' : ''} ${!isAnimationEnabled ? 'no-indicator-animation' : ''} focusable" 
+                 class="hero-carousel-container ${carouselStyle} indicator-${indicatorStyle} ${isCompact ? 'compact' : ''} ${isZoomEnabled ? 'with-zoom' : ''} ${isBlurhashFill ? 'with-blurhash-fill' : ''} ${!isAnimationEnabled ? 'no-indicator-animation' : ''} focusable" 
                  style="--indicator-duration: ${intervalInSeconds}"
                  tabindex="0">
                 <div class="hero-carousel">
@@ -205,15 +214,10 @@ class HeroCarousel {
             metaHtml += this._renderMdbMetadata(item._mdbMetadata);
         }
 
-        // Resolve BlurHash for the hero backdrop
-        const isBlurHashDisabled = storage.getItem('litefin:disableBlurhash') === 'true';
-        let blurHash = '';
-        if (!isBlurHashDisabled && item.ImageBlurHashes?.Backdrop) {
-            const keys = Object.keys(item.ImageBlurHashes.Backdrop);
-            if (keys.length > 0) {
-                blurHash = item.ImageBlurHashes.Backdrop[keys[0]];
-            }
-        }
+        // Resolve BlurHash for the hero backdrop and ambient fill background
+        const blurHash = this._resolveBlurHash(item);
+        // Ambient BlurHash fill is exclusive to the Immersive (Performance) style and off by default
+        const isBlurhashFill = carouselStyle === 'immersive-performance' && storage.getItem('pref:heroCarouselBlurhashFill') === 'true';
 
         // ---------------------------------------------------------------------
         // Lazy Backdrop & BlurHash Texture Allocation
@@ -228,6 +232,12 @@ class HeroCarousel {
 
         return `
             <div class="hero-item ${isActive ? 'active' : ''}" data-index="${index}"${!isActive ? ' style="visibility:hidden"' : ''}>
+                ${isBlurhashFill && blurHash ? `
+                    <div class="hero-blurhash-fill-wrap">
+                        <canvas class="hero-blurhash-fill-canvas" data-blurhash="${blurHash}"></canvas>
+                        <div class="hero-blurhash-fill-vignette"></div>
+                    </div>
+                ` : ''}
                 <div class="hero-backdrop" data-backdrop="${backdropUrl}"${backdropStyle}>
                     ${blurHash && isActive ? `<canvas class="hero-blurhash-canvas" data-blurhash="${blurHash}" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; transition: opacity 500ms ease-out; z-index: 0; pointer-events: none; opacity: 1;"></canvas>` : ''}
                 </div>
@@ -512,20 +522,23 @@ class HeroCarousel {
             this._handleFocus();
         }
 
-        // Bind click navigation for mouse/pointer devices (Web browsers, Desktop app, WebOS)
-        if (platformInfo.isWeb || platformInfo.isDesktop || platformInfo.isWebOS) {
-            const leftBtn = this._container.querySelector('.hero-arrow-left');
-            const rightBtn = this._container.querySelector('.hero-arrow-right');
-            if (leftBtn && rightBtn) {
-                leftBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this.previous();
-                });
-                rightBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this.next();
-                });
-            }
+        // ---------------------------------------------------------------------
+        // Pointer & Mouse Click Navigation for Carousel Arrows
+        // ---------------------------------------------------------------------
+        // Binds previous and next slide transitions on mouse click events.
+        // Works seamlessly across all platforms when buttons exist in the DOM.
+        // ---------------------------------------------------------------------
+        const leftBtn = this._container.querySelector('.hero-arrow-left');
+        const rightBtn = this._container.querySelector('.hero-arrow-right');
+        if (leftBtn && rightBtn) {
+            leftBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.previous();
+            });
+            rightBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.next();
+            });
         }
 
         // Start auto-scroll
@@ -612,6 +625,20 @@ class HeroCarousel {
             };
             img.src = url;
         });
+
+        // ────────────────────────────────────────────────────────────────────
+        // Ambient BlurHash Background Color Fill for Active Slide
+        // ────────────────────────────────────────────────────────────────────
+        // Exclusive to the Immersive (Performance) style and disabled by default.
+        // Extracts ambient colors from BlurHash to fill any empty canvas area.
+        const carouselStyle = storage.getItem('pref:heroCarouselStyle') || 'immersive';
+        const isBlurhashFill = carouselStyle === 'immersive-performance' && storage.getItem('pref:heroCarouselBlurhashFill') === 'true';
+        if (isBlurhashFill) {
+            const activeSlide = this._container.querySelector('.hero-item.active');
+            if (activeSlide) {
+                this._decodeBlurhashFill(activeSlide);
+            }
+        }
 
         // ---------------------------------------------------------------------
         // Viewport Visibility Observer (Off-screen CPU/GPU Suspension)
@@ -863,6 +890,17 @@ class HeroCarousel {
         const item = items[index];
         if (!item) return;
 
+        // ────────────────────────────────────────────────────────────────────
+        // Pre-decode Ambient BlurHash Fill Canvas for Preloaded Slide
+        // ────────────────────────────────────────────────────────────────────
+        // Prepares the background ambient gradient before the slide transitions into view.
+        // Exclusive to the Immersive (Performance) carousel style (disabled by default).
+        const carouselStyle = storage.getItem('pref:heroCarouselStyle') || 'immersive';
+        const isBlurhashFill = carouselStyle === 'immersive-performance' && storage.getItem('pref:heroCarouselBlurhashFill') === 'true';
+        if (isBlurhashFill) {
+            this._decodeBlurhashFill(item);
+        }
+
         // Preload backdrop image
         const backdrop = item.querySelector('.hero-backdrop');
         if (backdrop && backdrop.dataset.backdrop && !backdrop.style.backgroundImage) {
@@ -1053,8 +1091,100 @@ class HeroCarousel {
      * freezes in place. When focus returns, _handleFocus restarts everything
      * fresh from index 0 of the timer so the user always sees a full 8-second
      * cycle from whatever slide is currently shown.
+    /**
+     * Resolves the most suitable BlurHash string for a carousel item.
+     * Evaluates backdrop blurhashes first (checking both direct item and
+     * parent series hashes), and falls back to primary artwork hashes.
+     *
      * @private
+     * @param {Object} item - Media item from Jellyfin API
+     * @returns {string} BlurHash string or empty string
      */
+    _resolveBlurHash(item) {
+        if (!item) return '';
+
+        // Check if BlurHash decoding is globally disabled in user preferences
+        const isBlurHashDisabled = storage.getItem('litefin:disableBlurhash') === 'true';
+        if (isBlurHashDisabled) return '';
+
+        // Check item backdrop blurhash
+        if (item.ImageBlurHashes?.Backdrop) {
+            const keys = Object.keys(item.ImageBlurHashes.Backdrop);
+            if (keys.length > 0) return item.ImageBlurHashes.Backdrop[keys[0]];
+        }
+
+        // Check parent backdrop blurhash (e.g. for series / seasons)
+        if (item.ParentImageBlurHashes?.Backdrop) {
+            const keys = Object.keys(item.ParentImageBlurHashes.Backdrop);
+            if (keys.length > 0) return item.ParentImageBlurHashes.Backdrop[keys[0]];
+        }
+
+        // Fall back to item primary blurhash
+        if (item.ImageBlurHashes?.Primary) {
+            const keys = Object.keys(item.ImageBlurHashes.Primary);
+            if (keys.length > 0) return item.ImageBlurHashes.Primary[keys[0]];
+        }
+
+        // Fall back to parent primary blurhash
+        if (item.ParentImageBlurHashes?.Primary) {
+            const keys = Object.keys(item.ParentImageBlurHashes.Primary);
+            if (keys.length > 0) return item.ParentImageBlurHashes.Primary[keys[0]];
+        }
+
+        return '';
+    }
+
+    /**
+     * Decodes and renders the ambient BlurHash color fill background for a slide.
+     * Extracts low-frequency ambient colors to fill any exposed canvas area
+     * behind right-aligned or masked hero backdrop artwork.
+     *
+     * @private
+     * @param {HTMLElement} itemElement - Hero slide container (.hero-item)
+     */
+    _decodeBlurhashFill(itemElement) {
+        if (!itemElement) return;
+
+        // Locate the blurhash fill canvas element within this slide
+        const canvas = itemElement.querySelector('.hero-blurhash-fill-canvas');
+        if (!canvas || canvas.dataset.decoded === 'true') return;
+
+        const hash = canvas.dataset.blurhash;
+        if (!hash) return;
+
+        // Mark decoding initiated to avoid redundant decode passes
+        canvas.dataset.decoded = 'true';
+
+        // Load the BlurHash decoder module asynchronously
+        import('../utils/BlurHashDecoder.js')
+            .then(({ default: BlurHashDecoder }) => {
+                // Decode at low resolution (32x18) for ultra-fast processing and negligible memory.
+                // The browser's GPU bilinear texture scaling will stretch this across 4K smoothly.
+                const width = 32;
+                const height = 18;
+                const pixels = BlurHashDecoder.decode(hash, width, height);
+
+                if (pixels && canvas) {
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    const imageData = ctx.createImageData(width, height);
+                    imageData.data.set(pixels);
+                    ctx.putImageData(imageData, 0, 0);
+
+                    // Fade in smoothly once canvas buffer is committed
+                    requestAnimationFrame(() => {
+                        if (canvas) {
+                            canvas.style.opacity = '1';
+                        }
+                    });
+                }
+            })
+            .catch((err) => {
+                log.error('Failed to decode hero carousel blurhash fill', err);
+            });
+    }
+
     _handleBlur() {
         this._isFocused = false;
         this._container.classList.remove('focused');

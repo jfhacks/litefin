@@ -140,9 +140,9 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     html[data-litefin-scaled] {
-        /* Base rem scale calibrated for landscape mobile devices */
-        font-size: 22px !important;
-        --card-title-font-scale: 1.3 !important;
+        /* Base rem scale calibrated for landscape mobile devices, respecting user text scaling */
+        font-size: calc(22px * var(--litefin-text-scale, 1)) !important;
+        --card-title-font-scale: calc(1.3 * var(--litefin-text-scale, 1));
     }
 
     html[data-litefin-scaled] .details-backdrop {
@@ -222,7 +222,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     html[data-litefin-scaled] .library-title,
     html[data-litefin-touch] .library-title {
         /* Prominent header typography */
-        font-size: 38px !important;
+        font-size: calc(38px * var(--litefin-text-scale, 1)) !important;
         font-weight: 800 !important;
     }
 
@@ -242,7 +242,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         margin: 0 !important;
         padding: 14px 28px !important;
         min-height: 56px !important;
-        font-size: 22px !important;
+        font-size: calc(22px * var(--litefin-text-scale, 1)) !important;
         font-weight: 700 !important;
         border-radius: 28px !important;
         display: inline-flex !important;
@@ -268,7 +268,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     html[data-litefin-scaled] .count-indicator,
     html[data-litefin-touch] .count-indicator {
         /* Item counter readout */
-        font-size: 18px !important;
+        font-size: calc(18px * var(--litefin-text-scale, 1)) !important;
         font-weight: 600 !important;
         margin-right: 12px !important;
     }
@@ -279,7 +279,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         margin: 0 !important;
         padding: 12px 20px !important;
         min-height: 52px !important;
-        font-size: 20px !important;
+        font-size: calc(20px * var(--litefin-text-scale, 1)) !important;
         font-weight: 600 !important;
         border-radius: 18px !important;
         gap: 8px !important;
@@ -301,7 +301,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     html[data-litefin-scaled] .control-btn-text,
     html[data-litefin-touch] .control-btn-text {
         /* Button label text sizing */
-        font-size: 20px !important;
+        font-size: calc(20px * var(--litefin-text-scale, 1)) !important;
         line-height: 1 !important;
     }
 
@@ -329,7 +329,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         width: 48px !important;
         height: 48px !important;
         min-width: 48px !important;
-        font-size: 22px !important;
+        font-size: calc(22px * var(--litefin-text-scale, 1)) !important;
         font-weight: 700 !important;
         border-radius: 14px !important;
         margin: 3px !important;
@@ -350,214 +350,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         border-radius: 14px !important;
     }
 
-    html[data-litefin-scaled] .login-page .login-container {
-        /* Stretch login screen full width in landscape */
-        align-items: stretch !important;
-        max-width: none !important;
-        padding: 0 !important;
-        gap: 0 !important;
-    }
-
-    html[data-litefin-scaled] .login-page .login-header {
-        /* Sidebar layout for login branding in landscape */
-        flex: 0 0 420px !important;
-        width: 420px !important;
-        height: 100% !important;
-        margin: 0 !important;
-        padding: 0 44px !important;
-        justify-content: center !important;
-        align-items: flex-start !important;
-        gap: 0 !important;
-        border-right: 1px solid rgba(255, 255, 255, 0.08) !important;
-    }
-
-    html[data-litefin-scaled] .login-page .login-logo-container {
-        /* Logo and title horizontal arrangement */
-        flex-direction: row !important;
-        justify-content: flex-start !important;
-        align-items: center !important;
-        gap: 18px !important;
-        margin-bottom: 14px !important;
-    }
-
-    html[data-litefin-scaled] .login-page .login-logo-container img,
-    html[data-litefin-scaled] .login-page .login-logo-container svg,
-    html[data-litefin-scaled] .login-page .login-logo-svg,
-    html[data-litefin-scaled] .login-page .login-logo-img {
-        /* Logo size constraint */
-        width: 84px !important;
-        height: 84px !important;
-        max-height: 84px !important;
-    }
-
-    html[data-litefin-scaled] .login-page .login-logo {
-        /* Prominent title typography */
-        font-size: 4.2rem !important;
-        font-weight: 600 !important;
-        letter-spacing: -0.5px !important;
-        text-align: left !important;
-    }
-
-    html[data-litefin-scaled] .login-page .login-tagline {
-        /* Subtitle styling */
-        font-size: 1.35rem !important;
-        line-height: 1.5 !important;
-        text-align: left !important;
-        color: rgba(255, 255, 255, 0.6) !important;
-        max-width: 100% !important;
-        margin-top: 0 !important;
-        overflow-wrap: anywhere !important;
-    }
-
-    html[data-litefin-scaled] .login-page .login-section {
-        /* Main login form panel layout */
-        flex: 1 1 auto !important;
-        width: auto !important;
-        height: 100% !important;
-        justify-content: center !important;
-        align-items: stretch !important;
-        padding: 24px 72px 24px 64px !important;
-        overflow-y: hidden !important;
-    }
-
-    html[data-litefin-scaled] .login-page .section-title {
-        /* Section heading with clean gradient fill */
-        font-size: 3.4rem !important;
-        font-weight: 800 !important;
-        line-height: 1.08 !important;
-        letter-spacing: -1px !important;
-        text-align: left !important;
-        margin: 0 0 12px !important;
-        border: none !important;
-        background: linear-gradient(100deg, #ffffff 0%, #ffffff 34%, #a78bfa 58%, #60a5fa 82%) !important;
-        -webkit-background-clip: text !important;
-        background-clip: text !important;
-        -webkit-text-fill-color: transparent !important;
-        color: transparent !important;
-        max-width: 100% !important;
-        overflow-wrap: anywhere !important;
-    }
-
-    html[data-litefin-scaled] .login-page .input-label {
-        /* Input descriptive labels */
-        font-size: 1.3rem !important;
-        font-weight: 400 !important;
-        line-height: 1.4 !important;
-        color: rgba(255, 255, 255, 0.62) !important;
-        text-align: left !important;
-        margin: 0 0 20px !important;
-        max-width: 100% !important;
-    }
-
-    html[data-litefin-scaled] .login-page .server-input-container {
-        /* Container box for server connection inputs */
-        width: 100% !important;
-        max-width: 100% !important;
-        background: rgba(255, 255, 255, 0.045) !important;
-        border: 1px solid rgba(255, 255, 255, 0.09) !important;
-        border-radius: 24px !important;
-        padding: 20px !important;
-        box-sizing: border-box !important;
-    }
-
-    html[data-litefin-scaled] .login-page .server-url-input {
-        /* Touch-friendly text input box */
-        font-size: 1.4rem !important;
-        height: 72px !important;
-        width: 100% !important;
-        background: rgba(0, 0, 0, 0.35) !important;
-        border: 2px solid rgba(167, 139, 250, 0.55) !important;
-        border-radius: 18px !important;
-        padding: 0 24px !important;
-        box-sizing: border-box !important;
-        color: #fff !important;
-    }
-
-    html[data-litefin-scaled] .login-page .connect-btn {
-        /* Connect action button with vibrant gradient without shadows */
-        font-size: 1.4rem !important;
-        font-weight: 700 !important;
-        height: 72px !important;
-        width: 100% !important;
-        margin-top: 18px !important;
-        border: none !important;
-        border-radius: 999px !important;
-        background: linear-gradient(90deg, #8b5cf6 0%, #6366f1 45%, #3b82f6 100%) !important;
-        color: #ffffff !important;
-    }
-
-    html[data-litefin-scaled] .login-page .discovered-servers {
-        /* Discovered Jellyfin servers list container */
-        width: 100% !important;
-        max-width: 100% !important;
-        margin-top: 26px !important;
-        background: transparent !important;
-        border: none !important;
-        padding: 0 !important;
-    }
-
-    html[data-litefin-scaled] .login-page .discovered-header {
-        /* Divider line header for discovered servers */
-        display: flex !important;
-        align-items: center !important;
-        gap: 16px !important;
-        margin-bottom: 14px !important;
-    }
-
-    html[data-litefin-scaled] .login-page .discovered-header h3 {
-        /* Uppercase tracking for discovery title */
-        font-size: 1.15rem !important;
-        font-weight: 700 !important;
-        letter-spacing: 3px !important;
-        text-transform: uppercase !important;
-        color: rgba(255, 255, 255, 0.55) !important;
-        margin: 0 !important;
-        padding: 0 !important;
-    }
-
-    html[data-litefin-scaled] .login-page .discovered-header::after {
-        /* Accent horizontal rule */
-        content: "" !important;
-        flex: 1 !important;
-        height: 2px !important;
-        background: rgba(255, 255, 255, 0.18) !important;
-        margin-right: 8px !important;
-    }
-
-    html[data-litefin-scaled] .login-page .refresh-btn {
-        /* Discovered server refresh touch target */
-        color: rgba(255, 255, 255, 0.75) !important;
-        min-width: 52px !important;
-        min-height: 52px !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-    }
-
-    html[data-litefin-scaled] .login-page .refresh-btn svg {
-        /* Icon dimensions */
-        width: 26px !important;
-        height: 26px !important;
-    }
-
-    html[data-litefin-scaled] .login-page .server-list li,
-    html[data-litefin-scaled] .login-page .server-list .server-item {
-        /* Discovered server row items */
-        font-size: 1.3rem !important;
-        min-height: 76px !important;
-        padding: 14px 24px !important;
-        background: rgba(255, 255, 255, 0.045) !important;
-        border: 1px solid rgba(255, 255, 255, 0.09) !important;
-        border-radius: 20px !important;
-        margin-bottom: 12px !important;
-    }
-
-    html[data-litefin-scaled] .login-page .server-item.empty {
-        /* Empty discovery state */
-        color: rgba(255, 255, 255, 0.5) !important;
-        justify-content: center !important;
-        font-size: 1.25rem !important;
-    }
 
     html[data-litefin-scaled] .hero-carousel-container.immersive .hero-carousel {
         /* Hero height bounds for landscape mobile */
@@ -570,12 +362,14 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         bottom: 400px !important;
     }
 
-    html[data-litefin-scaled] .hero-carousel-container.immersive .hero-item {
+    html[data-litefin-scaled] .hero-carousel-container.immersive .hero-item,
+    html[data-litefin-scaled] .hero-carousel-container.immersive-performance .hero-item {
         /* Immersive item padding */
         padding-bottom: 423px !important;
     }
 
-    html[data-litefin-scaled] #home-hero-placeholder.style-immersive + .home-rows {
+    html[data-litefin-scaled] #home-hero-placeholder.style-immersive + .home-rows,
+    html[data-litefin-scaled] #home-hero-placeholder.style-immersive-performance + .home-rows {
         /* Pull media rows upward behind immersive backdrop */
         margin-top: -405px !important;
     }
@@ -661,7 +455,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     html[data-litefin-scaled] .profiles-title,
     html[data-litefin-touch] .profiles-title {
         /* Landscape title typography */
-        font-size: 40px !important;
+        font-size: calc(40px * var(--litefin-text-scale, 1)) !important;
         font-weight: 800 !important;
     }
 
@@ -695,7 +489,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     html[data-litefin-scaled] .profiles-card-name,
     html[data-litefin-touch] .profiles-card-name {
         /* Name label sizing */
-        font-size: 20px !important;
+        font-size: calc(20px * var(--litefin-text-scale, 1)) !important;
         margin-top: 12px !important;
     }
 
@@ -713,7 +507,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         /* Pill button touch proportions */
         min-height: 50px !important;
         padding: 12px 24px !important;
-        font-size: 18px !important;
+        font-size: calc(18px * var(--litefin-text-scale, 1)) !important;
         border-radius: 25px !important;
         margin: 0 !important;
     }
@@ -831,10 +625,11 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
  * horizontal spacing, and allow vertical document scrolling.
  */
 @media (orientation: portrait) {
-    html[data-litefin-scaled] {
-        /* Calibrated font scale and sidebar width for vertical screens */
-        font-size: 20px !important;
-        --card-title-font-scale: 1.15 !important;
+    html[data-litefin-scaled],
+    html[data-litefin-portrait] {
+        /* Calibrated font scale and sidebar width for vertical screens, scaled by user text scale */
+        font-size: calc(20px * var(--litefin-text-scale, 1)) !important;
+        --card-title-font-scale: calc(1.15 * var(--litefin-text-scale, 1));
         --sidebar-width-collapsed: 0px !important;
     }
 
@@ -911,7 +706,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     html[data-litefin-scaled] .library-title,
     html[data-litefin-portrait] .library-title {
         /* Bold, prominent page title readable on mobile screens */
-        font-size: 42px !important;
+        font-size: calc(42px * var(--litefin-text-scale, 1)) !important;
         font-weight: 800 !important;
         letter-spacing: -0.5px !important;
         color: var(--jf-text-primary) !important;
@@ -937,7 +732,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         margin: 0 !important;
         padding: 16px 30px !important;
         min-height: 64px !important;
-        font-size: 26px !important;
+        font-size: calc(26px * var(--litefin-text-scale, 1)) !important;
         font-weight: 700 !important;
         border-radius: 32px !important;
         border-width: 2px !important;
@@ -973,7 +768,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     html[data-litefin-scaled] .count-indicator,
     html[data-litefin-portrait] .count-indicator {
         /* Legible item count indicator */
-        font-size: 22px !important;
+        font-size: calc(22px * var(--litefin-text-scale, 1)) !important;
         font-weight: 600 !important;
         margin-right: 8px !important;
         color: var(--jf-text-secondary) !important;
@@ -985,7 +780,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         margin: 0 !important;
         padding: 14px 22px !important;
         min-height: 62px !important;
-        font-size: 24px !important;
+        font-size: calc(24px * var(--litefin-text-scale, 1)) !important;
         font-weight: 600 !important;
         border-radius: 20px !important;
         gap: 10px !important;
@@ -1015,7 +810,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     html[data-litefin-scaled] .control-btn-text,
     html[data-litefin-portrait] .control-btn-text {
         /* Label typography */
-        font-size: 24px !important;
+        font-size: calc(24px * var(--litefin-text-scale, 1)) !important;
         line-height: 1 !important;
     }
 
@@ -1048,7 +843,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         width: 46px !important;
         height: 52px !important;
         min-width: 46px !important;
-        font-size: 24px !important;
+        font-size: calc(24px * var(--litefin-text-scale, 1)) !important;
         font-weight: 700 !important;
         border-radius: 14px !important;
         margin: 2px !important;
@@ -1084,7 +879,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         width: 44px !important;
         height: 38px !important;
         min-width: 44px !important;
-        font-size: 20px !important;
+        font-size: calc(20px * var(--litefin-text-scale, 1)) !important;
         font-weight: 700 !important;
         margin: 2px 0 !important;
         border-radius: 10px !important;
@@ -1374,78 +1169,171 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     html[data-litefin-scaled] .hero-carousel-container.immersive .hero-indicators,
-    html[data-litefin-portrait] .hero-carousel-container.immersive .hero-indicators {
+    html[data-litefin-scaled] .hero-carousel-container.immersive-performance .hero-indicators,
+    html[data-litefin-portrait] .hero-carousel-container.immersive .hero-indicators,
+    html[data-litefin-portrait] .hero-carousel-container.immersive-performance .hero-indicators {
         /* Position carousel indicators cleanly below description and above rows */
         bottom: 944px !important;
     }
 
     html[data-litefin-scaled] #home-hero-placeholder.style-immersive + .home-rows,
-    html[data-litefin-portrait] #home-hero-placeholder.style-immersive + .home-rows {
+    html[data-litefin-scaled] #home-hero-placeholder.style-immersive-performance + .home-rows,
+    html[data-litefin-portrait] #home-hero-placeholder.style-immersive + .home-rows,
+    html[data-litefin-portrait] #home-hero-placeholder.style-immersive-performance + .home-rows {
         /* Overlap media rows right below the 1.2x extended carousel */
         margin-top: -956px !important;
     }
 
     /*
      * ========================================================================
-     * Home Carousel Background Sizing (Recalibrated for 1.2x Carousel)
+     * Home Carousel Background Sizing & Gradient Architecture (Mobile Portrait)
      * ========================================================================
-     * Scales the background backdrop image and its gradient blend layers to
-     * proportionally match the 20% taller carousel (60% portrait height),
-     * ensuring artwork blankets the slide before fading smoothly into rows.
+     * Recalibrates the carousel backdrop image, text contrast vignette, and
+     * bottom blend layers to seamlessly integrate with mobile portrait proportions.
+     * Prevents abrupt horizontal cutoff lines and guarantees crystal-clear legibility.
      * ========================================================================
      */
-    html[data-litefin-scaled] .hero-carousel-container .hero-backdrop,
-    html[data-litefin-portrait] .hero-carousel-container .hero-backdrop {
-        /* Restrict backdrop artwork height to cover the 1.2x carousel */
-        height: calc(var(--litefin-app-h, 100vh) * 0.60) !important;
-        max-height: 60vh !important;
+
+    /*
+     * Universal Unmasked Typography Container (.hero-item):
+     * Removes full-canvas clipping masks from .hero-item so that overview text,
+     * badges, action controls, and indicators remain 100% visible and unclipped.
+     * All gradient blends and alpha dissolves are scoped directly to the artwork layers.
+     */
+    html[data-litefin-scaled] .hero-carousel-container .hero-item,
+    html[data-litefin-portrait] .hero-carousel-container .hero-item {
+        -webkit-mask-image: none !important;
+        mask-image: none !important;
     }
 
     /*
-     * Redundant Text Shadow Vignette Layer (::before):
-     * The radial/horizontal text shadow vignette is unnecessary on mobile builds
-     * because the text container already provides dedicated contrast backing.
-     * Removing this overlay reveals clean, unoccluded backdrop artwork.
+     * Backdrop Artwork Boundary & Seamless Bottom Alpha Dissolve:
+     * Restricts backdrop artwork height to 60% of portrait height, giving ideal
+     * presence while applying a non-linear vertical alpha fade that smoothly
+     * dissolves the artwork texture into the solid canvas background.
+     */
+    html[data-litefin-scaled] .hero-carousel-container .hero-backdrop,
+    html[data-litefin-portrait] .hero-carousel-container .hero-backdrop {
+        width: 100% !important;
+        left: 0 !important;
+        right: 0 !important;
+        height: calc(var(--litefin-app-h, 100vh) * 0.60) !important;
+        max-height: 60vh !important;
+        -webkit-mask-image: linear-gradient(
+            to bottom,
+            black 0%,
+            black 35%,
+            rgba(0, 0, 0, 0.95) 50%,
+            rgba(0, 0, 0, 0.70) 68%,
+            rgba(0, 0, 0, 0.32) 84%,
+            rgba(0, 0, 0, 0.08) 94%,
+            transparent 100%
+        ) !important;
+        mask-image: linear-gradient(
+            to bottom,
+            black 0%,
+            black 35%,
+            rgba(0, 0, 0, 0.95) 50%,
+            rgba(0, 0, 0, 0.70) 68%,
+            rgba(0, 0, 0, 0.32) 84%,
+            rgba(0, 0, 0, 0.08) 94%,
+            transparent 100%
+        ) !important;
+    }
+
+    /*
+     * Mobile Hero Typography Contrast Vignette (::before):
+     * Restores directional contrast backing behind titles, metadata badges, and
+     * synopsis descriptions. Prevents white typography from washing out against
+     * bright background artwork while leaving the main visual focal point clean.
      */
     html[data-litefin-scaled] .hero-carousel-container .hero-item::before,
     html[data-litefin-portrait] .hero-carousel-container .hero-item::before,
+    html[data-litefin-scaled] .hero-carousel-container.immersive-performance .hero-item::before,
+    html[data-litefin-portrait] .hero-carousel-container.immersive-performance .hero-item::before,
     [data-platform="android"] .hero-carousel-container .hero-item::before {
-        display: none !important;
-        background: none !important;
-    }
-
-    html[data-litefin-scaled] .hero-carousel-container .hero-item::after,
-    html[data-litefin-portrait] .hero-carousel-container .hero-item::after {
-        /* Match bottom gradient blend precisely to the 60% boundary */
+        content: '' !important;
+        display: block !important;
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 100% !important;
         height: calc(var(--litefin-app-h, 100vh) * 0.60) !important;
         max-height: 60vh !important;
-        /* Smooth, seamless fade from transparent artwork into solid background */
+        pointer-events: none !important;
+        z-index: 1 !important;
+        background: linear-gradient(
+            to right,
+            rgba(0, 0, 0, 0.75) 0%,
+            rgba(0, 0, 0, 0.50) 45%,
+            rgba(0, 0, 0, 0.15) 75%,
+            transparent 100%
+        ) !important;
+    }
+
+    /* Mirrored horizontal text contrast vignette for RTL reading direction */
+    [dir="rtl"] html[data-litefin-scaled] .hero-carousel-container .hero-item::before,
+    [dir="rtl"] html[data-litefin-portrait] .hero-carousel-container .hero-item::before,
+    [dir="rtl"] html[data-litefin-scaled] .hero-carousel-container.immersive-performance .hero-item::before,
+    [dir="rtl"] html[data-litefin-portrait] .hero-carousel-container.immersive-performance .hero-item::before,
+    [dir="rtl"][data-platform="android"] .hero-carousel-container .hero-item::before {
+        left: auto !important;
+        right: 0 !important;
+        background: linear-gradient(
+            to left,
+            rgba(0, 0, 0, 0.75) 0%,
+            rgba(0, 0, 0, 0.50) 45%,
+            rgba(0, 0, 0, 0.15) 75%,
+            transparent 100%
+        ) !important;
+    }
+
+    /*
+     * Dual-Direction Atmospheric Gradient & Theme Canvas Blending (::after):
+     * 1. Top subtle darkening (0%-15%) shields the status bar, clock, and header controls.
+     * 2. Center aperture (20%-35%) keeps artwork vibrant and punchy.
+     * 3. Bottom progressive fade (40%-100%) merges smoothly into the solid page background,
+     *    ensuring zero harsh boundaries before the media rows commence.
+     */
+    html[data-litefin-scaled] .hero-carousel-container .hero-item::after,
+    html[data-litefin-portrait] .hero-carousel-container .hero-item::after,
+    html[data-litefin-scaled] .hero-carousel-container.immersive-performance .hero-item::after,
+    html[data-litefin-portrait] .hero-carousel-container.immersive-performance .hero-item::after,
+    html[data-litefin-scaled] .hero-carousel-container.immersive .hero-item::after,
+    html[data-litefin-portrait] .hero-carousel-container.immersive .hero-item::after {
+        content: '' !important;
+        display: block !important;
+        position: absolute !important;
+        top: 0 !important;
+        bottom: auto !important;
+        left: 0 !important;
+        right: 0 !important;
+        width: 100% !important;
+        height: calc(var(--litefin-app-h, 100vh) * 0.60) !important;
+        max-height: 60vh !important;
+        pointer-events: none !important;
+        z-index: 2 !important;
         background: linear-gradient(
             to bottom,
-            transparent 0%,
+            rgba(0, 0, 0, 0.50) 0%,
+            rgba(0, 0, 0, 0.22) 12%,
+            transparent 22%,
             transparent 35%,
-            rgba(0, 0, 0, 0.40) 65%,
-            rgba(0, 0, 0, 0.85) 85%,
+            rgba(0, 0, 0, 0.38) 60%,
+            rgba(0, 0, 0, 0.82) 84%,
+            var(--jf-background, #000000) 98%,
             var(--jf-background, #000000) 100%
         ) !important;
     }
 
     /*
-     * ========================================================================
-     * Ambient Glow Theme Mask Treatment (Recalibrated for 1.2x Carousel)
-     * ========================================================================
-     * In Ambient Glow mode, hero backdrop fade uses CSS alpha masking on .hero-item
-     * so the colorful ambient background mesh on <body> bleeds through seamlessly.
-     * Transition into complete transparency at 60% portrait height.
-     * ========================================================================
+     * BlurHash Fill Container Constraint for Mobile:
+     * Bounds the ambient BlurHash canvas to the exact 60% portrait artwork frame.
      */
-    html[data-litefin-scaled][data-theme-mode="ambient"] .hero-carousel-container .hero-item,
-    html[data-litefin-portrait][data-theme-mode="ambient"] .hero-carousel-container .hero-item,
-    [data-theme-mode="ambient"] html[data-litefin-scaled] .hero-carousel-container .hero-item,
-    [data-theme-mode="ambient"] html[data-litefin-portrait] .hero-carousel-container .hero-item {
-        /* Alpha mask transition to pure transparent at 60% portrait height */
-        -webkit-mask-image: linear-gradient(to bottom, black 25%, transparent 60%) !important;
-        mask-image: linear-gradient(to bottom, black 25%, transparent 60%) !important;
+    html[data-litefin-scaled] .hero-carousel-container .hero-blurhash-fill-wrap,
+    html[data-litefin-portrait] .hero-carousel-container .hero-blurhash-fill-wrap {
+        height: calc(var(--litefin-app-h, 100vh) * 0.60) !important;
+        max-height: 60vh !important;
     }
 
     html[data-litefin-scaled] .livetv-page .ltv-tab-header {
@@ -2713,6 +2601,8 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         margin-bottom: 20px !important;
     }
 
+}
+
     /*
      * ========================================================================
      * Mobile Portrait Modern Login Page Overrides
@@ -2725,7 +2615,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
      * - Symmetrically balances user profile circles and secondary action rows.
      * ========================================================================
      */
-    html[data-litefin-scaled] .login-page,
     html[data-litefin-portrait] .login-page {
         /* Full viewport height takeover */
         width: 100% !important;
@@ -2742,7 +2631,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         background: var(--jf-background, #000000) !important;
     }
 
-    html[data-litefin-scaled] .login-page .login-container,
     html[data-litefin-portrait] .login-page .login-container {
         /* Vertically centered layout container with phone safe-area clearance */
         width: 100% !important;
@@ -2760,7 +2648,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         overflow-y: auto !important;
     }
 
-    html[data-litefin-scaled] .login-page .login-header,
     html[data-litefin-portrait] .login-page .login-header {
         /* Branding header floats with auto-margin for balanced vertical centering */
         flex: none !important;
@@ -2778,7 +2665,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         border: none !important;
     }
 
-    html[data-litefin-scaled] .login-page .login-logo-container,
     html[data-litefin-portrait] .login-page .login-logo-container {
         /* Horizontal brand logo row with balanced proportional spacing */
         display: flex !important;
@@ -2789,8 +2675,8 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         margin-bottom: 8px !important;
     }
 
-    html[data-litefin-scaled] .login-page .login-logo-svg,
-    html[data-litefin-scaled] .login-page .login-logo-img,
+    html[data-litefin-portrait] .login-page .login-logo-svg,
+    html[data-litefin-portrait] .login-page .login-logo-img,
     html[data-litefin-portrait] .login-page .login-logo-svg,
     html[data-litefin-portrait] .login-page .login-logo-img {
         /* Crisp vector logo icon enlarged for prominent mobile brand presence */
@@ -2800,7 +2686,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         object-fit: contain !important;
     }
 
-    html[data-litefin-scaled] .login-page .login-logo,
     html[data-litefin-portrait] .login-page .login-logo {
         /* Bold header wordmark slightly enlarged for visual weight */
         font-size: 4.2rem !important;
@@ -2810,7 +2695,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         margin: 0 !important;
     }
 
-    html[data-litefin-scaled] .login-page .login-tagline,
     html[data-litefin-portrait] .login-page .login-tagline {
         /* Clear secondary app descriptor */
         font-size: 1.25rem !important;
@@ -2822,7 +2706,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         line-height: 1.35 !important;
     }
 
-    html[data-litefin-scaled] .login-page .login-section,
     html[data-litefin-portrait] .login-page .login-section {
         /* Interactive section shell with bottom auto-margin for vertical centering */
         flex: none !important;
@@ -2834,7 +2717,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         box-sizing: border-box !important;
     }
 
-    html[data-litefin-scaled] .login-page .section-title,
     html[data-litefin-portrait] .login-page .section-title {
         /* Clean solid typography matching the modern desktop layout */
         font-size: 2.8rem !important;
@@ -2851,7 +2733,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Modern subtitle typography under section title with crisp, readable contrast */
-    html[data-litefin-scaled] .server-section .section-title::after,
     html[data-litefin-portrait] .server-section .section-title::after {
         content: 'Enter the URL or IP address of your Jellyfin server.' !important;
         display: block !important;
@@ -2865,12 +2746,10 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Suppress duplicate label in server connection panel */
-    html[data-litefin-scaled] .server-section .input-label,
     html[data-litefin-portrait] .server-section .input-label {
         display: none !important;
     }
 
-    html[data-litefin-scaled] .login-page .server-input-container,
     html[data-litefin-portrait] .login-page .server-input-container {
         /* Clean vertical stack matching the modern landscape layout */
         display: flex !important;
@@ -2886,11 +2765,8 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         box-sizing: border-box !important;
     }
 
-    html[data-litefin-scaled] .login-page .server-url-input,
     html[data-litefin-portrait] .login-page .server-url-input,
-    html[data-litefin-scaled] .server-section .server-url-input,
     html[data-litefin-portrait] .server-section .server-url-input,
-    html[data-litefin-scaled] .login-page .server-url-input.text-input.tv-input,
     html[data-litefin-portrait] .login-page .server-url-input.text-input.tv-input {
         /* Generously sized squircle input bar with ergonomic touch height */
         background: var(--jf-surface, #121212) !important;
@@ -2909,18 +2785,14 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         transition: border-color 0.2s ease, background-color 0.2s ease !important;
     }
 
-    html[data-litefin-scaled] .login-page .server-url-input:focus,
     html[data-litefin-portrait] .login-page .server-url-input:focus,
-    html[data-litefin-scaled] .server-section .server-url-input:focus,
     html[data-litefin-portrait] .server-section .server-url-input:focus {
         border-color: var(--jf-accent, #7c4dff) !important;
         background: var(--jf-card-bg-hover, #181818) !important;
     }
 
     /* Anchor URL icon cleanly in the exact center of the 80px input bar */
-    html[data-litefin-scaled] .login-page .server-input-container::before,
     html[data-litefin-portrait] .login-page .server-input-container::before,
-    html[data-litefin-scaled] .server-section .server-input-container::before,
     html[data-litefin-portrait] .server-section .server-input-container::before {
         content: '' !important;
         position: absolute !important;
@@ -2936,9 +2808,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         z-index: 5 !important;
     }
 
-    html[data-litefin-scaled] .login-page .connect-btn,
     html[data-litefin-portrait] .login-page .connect-btn,
-    html[data-litefin-scaled] .server-section .connect-btn,
     html[data-litefin-portrait] .server-section .connect-btn {
         /* Prominent full-width call-to-action button matching input height */
         width: 100% !important;
@@ -2959,14 +2829,12 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         transition: transform 0.2s ease, opacity 0.2s ease !important;
     }
 
-    html[data-litefin-scaled] .login-page .connect-btn:active,
     html[data-litefin-portrait] .login-page .connect-btn:active {
         transform: scale(0.97) !important;
         opacity: 0.9 !important;
     }
 
     /* Connect button leading icon */
-    html[data-litefin-scaled] .login-page .connect-btn span::before,
     html[data-litefin-portrait] .login-page .connect-btn span::before {
         content: '' !important;
         display: inline-block !important;
@@ -2980,7 +2848,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Discovered and saved servers section */
-    html[data-litefin-scaled] .login-page .discovered-servers,
     html[data-litefin-portrait] .login-page .discovered-servers {
         border-top: 1px solid rgba(255, 255, 255, 0.08) !important;
         padding-top: 24px !important;
@@ -2994,7 +2861,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         border-bottom: none !important;
     }
 
-    html[data-litefin-scaled] .login-page .discovered-header,
     html[data-litefin-portrait] .login-page .discovered-header {
         display: flex !important;
         align-items: center !important;
@@ -3003,7 +2869,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         width: 100% !important;
     }
 
-    html[data-litefin-scaled] .login-page .discovered-header h3,
     html[data-litefin-portrait] .login-page .discovered-header h3 {
         /* Subtle uppercase tracking for discovered header */
         font-size: 1.05rem !important;
@@ -3017,14 +2882,13 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Remove decorative dashed line pseudo-elements */
-    html[data-litefin-scaled] .login-page .discovered-header h3::before,
-    html[data-litefin-scaled] .login-page .discovered-header h3::after,
+    html[data-litefin-portrait] .login-page .discovered-header h3::before,
+    html[data-litefin-portrait] .login-page .discovered-header h3::after,
     html[data-litefin-portrait] .login-page .discovered-header h3::before,
     html[data-litefin-portrait] .login-page .discovered-header h3::after {
         display: none !important;
     }
 
-    html[data-litefin-scaled] .login-page .refresh-btn,
     html[data-litefin-portrait] .login-page .refresh-btn {
         color: rgba(255, 255, 255, 0.65) !important;
         min-width: 44px !important;
@@ -3037,13 +2901,11 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         cursor: pointer !important;
     }
 
-    html[data-litefin-scaled] .login-page .refresh-btn svg,
     html[data-litefin-portrait] .login-page .refresh-btn svg {
         width: 22px !important;
         height: 22px !important;
     }
 
-    html[data-litefin-scaled] .login-page .server-list,
     html[data-litefin-portrait] .login-page .server-list {
         display: flex !important;
         flex-direction: column !important;
@@ -3053,7 +2915,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         list-style: none !important;
     }
 
-    html[data-litefin-scaled] .login-page .server-item,
     html[data-litefin-portrait] .login-page .server-item {
         /* Modern server tile layout */
         width: 100% !important;
@@ -3071,42 +2932,33 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease !important;
     }
 
-    html[data-litefin-scaled] .login-page .server-item:active,
     html[data-litefin-portrait] .login-page .server-item:active {
         transform: scale(0.98) !important;
         border-color: var(--jf-accent, #7c4dff) !important;
     }
 
     /* Enforce strict hidden rules so image and fallback never clash on login */
-    html[data-litefin-scaled] .login-page .user-avatar-placeholder.hidden,
     html[data-litefin-portrait] .login-page .user-avatar-placeholder.hidden,
     html[data-litefin-touch] .login-page .user-avatar-placeholder.hidden,
-    html[data-litefin-scaled] .login-page .login-user-avatar.hidden,
     html[data-litefin-portrait] .login-page .login-user-avatar.hidden,
     html[data-litefin-touch] .login-page .login-user-avatar.hidden,
-    html[data-litefin-scaled] .login-page .user-avatar.hidden,
     html[data-litefin-portrait] .login-page .user-avatar.hidden,
     html[data-litefin-touch] .login-page .user-avatar.hidden,
-    html[data-litefin-scaled] .password-section .selected-user .user-avatar-placeholder.hidden,
     html[data-litefin-portrait] .password-section .selected-user .user-avatar-placeholder.hidden,
     html[data-litefin-touch] .password-section .selected-user .user-avatar-placeholder.hidden,
-    html[data-litefin-scaled] .password-section .selected-user .login-user-avatar.hidden,
     html[data-litefin-portrait] .password-section .selected-user .login-user-avatar.hidden,
     html[data-litefin-touch] .password-section .selected-user .login-user-avatar.hidden,
-    html[data-litefin-scaled] .password-section .selected-user .user-avatar.hidden,
     html[data-litefin-portrait] .password-section .selected-user .user-avatar.hidden,
     html[data-litefin-touch] .password-section .selected-user .user-avatar.hidden {
         display: none !important;
     }
 
     /* User Selection Panel */
-    html[data-litefin-scaled] .login-page .users-section,
     html[data-litefin-portrait] .login-page .users-section {
         text-align: center !important;
         width: 100% !important;
     }
 
-    html[data-litefin-scaled] .login-page .users-grid,
     html[data-litefin-portrait] .login-page .users-grid {
         /* Symmetrically centered user avatar layout */
         display: flex !important;
@@ -3121,7 +2973,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         overflow: visible !important;
     }
 
-    html[data-litefin-scaled] .login-page .user-item,
     html[data-litefin-portrait] .login-page .user-item {
         /* Individual user column */
         display: flex !important;
@@ -3131,7 +2982,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         margin: 0 !important;
     }
 
-    html[data-litefin-scaled] .login-page .login-user-card,
     html[data-litefin-portrait] .login-page .login-user-card {
         /* Circular avatar shape matching desktop modern theme */
         position: relative !important;
@@ -3151,24 +3001,17 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.2s ease !important;
     }
 
-    html[data-litefin-scaled] .login-page .login-user-card:active,
     html[data-litefin-portrait] .login-page .login-user-card:active {
         transform: scale(0.96) !important;
         border-color: var(--jf-accent, #7c4dff) !important;
     }
 
     /* Position avatar and fallback placeholder absolutely so they never stack side-by-side */
-    html[data-litefin-scaled] .login-page .login-user-card .login-user-avatar,
     html[data-litefin-portrait] .login-page .login-user-card .login-user-avatar,
-    html[data-litefin-scaled] .login-page .login-user-card .user-avatar,
     html[data-litefin-portrait] .login-page .login-user-card .user-avatar,
-    html[data-litefin-scaled] .login-page .login-user-card .user-avatar-placeholder,
     html[data-litefin-portrait] .login-page .login-user-card .user-avatar-placeholder,
-    html[data-litefin-scaled] .login-page .user-card .login-user-avatar,
     html[data-litefin-portrait] .login-page .user-card .login-user-avatar,
-    html[data-litefin-scaled] .login-page .user-card .user-avatar,
     html[data-litefin-portrait] .login-page .user-card .user-avatar,
-    html[data-litefin-scaled] .login-page .user-card .user-avatar-placeholder,
     html[data-litefin-portrait] .login-page .user-card .user-avatar-placeholder {
         position: absolute !important;
         top: 0 !important;
@@ -3178,15 +3021,12 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         border-radius: 50% !important;
     }
 
-    html[data-litefin-scaled] .login-page .login-user-avatar,
     html[data-litefin-portrait] .login-page .login-user-avatar,
-    html[data-litefin-scaled] .login-page .user-avatar,
     html[data-litefin-portrait] .login-page .user-avatar {
         object-fit: cover !important;
         display: block !important;
     }
 
-    html[data-litefin-scaled] .login-page .user-avatar-placeholder:not(.hidden),
     html[data-litefin-portrait] .login-page .user-avatar-placeholder:not(.hidden) {
         display: flex !important;
         align-items: center !important;
@@ -3197,9 +3037,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         background: var(--jf-surface, #121212) !important;
     }
 
-    html[data-litefin-scaled] .login-page .user-name,
     html[data-litefin-portrait] .login-page .user-name,
-    html[data-litefin-scaled] .login-page .login-user-name,
     html[data-litefin-portrait] .login-page .login-user-name {
         margin-top: 12px !important;
         font-size: 1.25rem !important;
@@ -3213,8 +3051,8 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Action Buttons Row */
-    html[data-litefin-scaled] .login-page .login-actions,
-    html[data-litefin-scaled] .login-page .modern-button-row,
+    html[data-litefin-portrait] .login-page .login-actions,
+    html[data-litefin-portrait] .login-page .modern-button-row,
     html[data-litefin-portrait] .login-page .login-actions,
     html[data-litefin-portrait] .login-page .modern-button-row {
         display: flex !important;
@@ -3226,29 +3064,25 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Full-width primary CTA in user picker */
-    html[data-litefin-scaled] .users-section .modern-button-row .quick-connect-btn,
     html[data-litefin-portrait] .users-section .modern-button-row .quick-connect-btn {
         width: 100% !important;
         flex: 1 1 100% !important;
     }
 
     /* Symmetrically split secondary actions */
-    html[data-litefin-scaled] .users-section .modern-button-row .manual-login-btn,
-    html[data-litefin-scaled] .users-section .modern-button-row .change-server-btn,
+    html[data-litefin-portrait] .users-section .modern-button-row .manual-login-btn,
+    html[data-litefin-portrait] .users-section .modern-button-row .change-server-btn,
     html[data-litefin-portrait] .users-section .modern-button-row .manual-login-btn,
     html[data-litefin-portrait] .users-section .modern-button-row .change-server-btn {
         flex: 1 1 calc(50% - 7px) !important;
     }
 
     /* Respect JavaScript visibility toggles on action buttons */
-    html[data-litefin-scaled] .login-page .btn[style*="display: none"],
     html[data-litefin-portrait] .login-page .btn[style*="display: none"],
-    html[data-litefin-scaled] .login-page .btn.hidden,
     html[data-litefin-portrait] .login-page .btn.hidden {
         display: none !important;
     }
 
-    html[data-litefin-scaled] .login-page .btn,
     html[data-litefin-portrait] .login-page .btn {
         /* Standardized modern action button styling */
         height: 64px !important;
@@ -3272,33 +3106,27 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Equal split for active two-button rows in manual & password views */
-    html[data-litefin-scaled] .manual-section .modern-button-row .btn:not([style*="display: none"]),
     html[data-litefin-portrait] .manual-section .modern-button-row .btn:not([style*="display: none"]),
-    html[data-litefin-scaled] .password-section .modern-button-row .btn,
     html[data-litefin-portrait] .password-section .modern-button-row .btn {
         flex: 1 1 calc(50% - 7px) !important;
     }
 
-    html[data-litefin-scaled] .login-page .btn-primary,
     html[data-litefin-portrait] .login-page .btn-primary {
         background: var(--jf-accent, #7c4dff) !important;
         color: var(--jf-primary-btn-color, #ffffff) !important;
     }
 
-    html[data-litefin-scaled] .login-page .btn-secondary,
     html[data-litefin-portrait] .login-page .btn-secondary {
         background: rgba(255, 255, 255, 0.08) !important;
         border: 1.5px solid rgba(255, 255, 255, 0.12) !important;
         color: var(--jf-text-primary, #ffffff) !important;
     }
 
-    html[data-litefin-scaled] .login-page .btn:active,
     html[data-litefin-portrait] .login-page .btn:active {
         transform: scale(0.97) !important;
     }
 
     /* Manual Login and Input Forms */
-    html[data-litefin-scaled] .login-page .manual-form-container,
     html[data-litefin-portrait] .login-page .manual-form-container {
         display: flex !important;
         flex-direction: column !important;
@@ -3308,7 +3136,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         padding: 0 !important;
     }
 
-    html[data-litefin-scaled] .login-page .input-group,
     html[data-litefin-portrait] .login-page .input-group {
         display: flex !important;
         flex-direction: column !important;
@@ -3317,7 +3144,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         padding: 0 !important;
     }
 
-    html[data-litefin-scaled] .login-page .manual-section .input-label,
     html[data-litefin-portrait] .login-page .manual-section .input-label {
         font-size: 1.25rem !important;
         font-weight: 500 !important;
@@ -3327,18 +3153,14 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         text-align: left !important;
     }
 
-    html[data-litefin-scaled] .login-page .input-container,
     html[data-litefin-portrait] .login-page .input-container {
         position: relative !important;
         width: 100% !important;
         padding: 0 !important;
     }
 
-    html[data-litefin-scaled] .login-page .text-input.tv-input:not(.server-url-input),
     html[data-litefin-portrait] .login-page .text-input.tv-input:not(.server-url-input),
-    html[data-litefin-scaled] .manual-section .text-input,
     html[data-litefin-portrait] .manual-section .text-input,
-    html[data-litefin-scaled] .password-section .text-input,
     html[data-litefin-portrait] .password-section .text-input {
         background: var(--jf-surface, #121212) !important;
         border: 2px solid rgba(255, 255, 255, 0.12) !important;
@@ -3353,18 +3175,14 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         transition: border-color 0.2s ease, background-color 0.2s ease !important;
     }
 
-    html[data-litefin-scaled] .login-page .text-input.tv-input:not(.server-url-input):focus,
     html[data-litefin-portrait] .login-page .text-input.tv-input:not(.server-url-input):focus,
-    html[data-litefin-scaled] .manual-section .text-input:focus,
     html[data-litefin-portrait] .manual-section .text-input:focus,
-    html[data-litefin-scaled] .password-section .text-input:focus,
     html[data-litefin-portrait] .password-section .text-input:focus {
         border-color: var(--jf-accent, #7c4dff) !important;
         background: var(--jf-card-bg-hover, #181818) !important;
     }
 
     /* Icon in manual username input */
-    html[data-litefin-scaled] .login-page .user-input-container::before,
     html[data-litefin-portrait] .login-page .user-input-container::before {
         content: '' !important;
         position: absolute !important;
@@ -3381,7 +3199,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Icon in manual password input */
-    html[data-litefin-scaled] .login-page .pass-input-container::before,
     html[data-litefin-portrait] .login-page .pass-input-container::before {
         content: '' !important;
         position: absolute !important;
@@ -3398,7 +3215,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Password Section Profile Badge */
-    html[data-litefin-scaled] .password-section .selected-user,
     html[data-litefin-portrait] .password-section .selected-user {
         display: flex !important;
         flex-direction: column !important;
@@ -3406,9 +3222,9 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         margin: 20px auto 28px auto !important;
     }
 
-    html[data-litefin-scaled] .password-section .selected-user .login-user-avatar,
-    html[data-litefin-scaled] .password-section .selected-user .user-avatar,
-    html[data-litefin-scaled] .password-section .selected-user .user-avatar-placeholder,
+    html[data-litefin-portrait] .password-section .selected-user .login-user-avatar,
+    html[data-litefin-portrait] .password-section .selected-user .user-avatar,
+    html[data-litefin-portrait] .password-section .selected-user .user-avatar-placeholder,
     html[data-litefin-portrait] .password-section .selected-user .login-user-avatar,
     html[data-litefin-portrait] .password-section .selected-user .user-avatar,
     html[data-litefin-portrait] .password-section .selected-user .user-avatar-placeholder {
@@ -3421,7 +3237,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* When placeholder is active in password section, format letter initial */
-    html[data-litefin-scaled] .password-section .selected-user .user-avatar-placeholder:not(.hidden),
     html[data-litefin-portrait] .password-section .selected-user .user-avatar-placeholder:not(.hidden) {
         display: flex !important;
         align-items: center !important;
@@ -3432,9 +3247,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         background: var(--jf-surface, #121212) !important;
     }
 
-    html[data-litefin-scaled] .password-section .selected-user .login-user-name,
     html[data-litefin-portrait] .password-section .selected-user .login-user-name,
-    html[data-litefin-scaled] .password-section .selected-user .user-name,
     html[data-litefin-portrait] .password-section .selected-user .user-name {
         margin-top: 12px !important;
         font-size: 1.4rem !important;
@@ -3444,12 +3257,10 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Quick Connect Section */
-    html[data-litefin-scaled] .quick-connect-section,
     html[data-litefin-portrait] .quick-connect-section {
         text-align: center !important;
     }
 
-    html[data-litefin-scaled] .quick-connect-section .quick-connect-instructions,
     html[data-litefin-portrait] .quick-connect-section .quick-connect-instructions {
         font-size: 1.15rem !important;
         line-height: 1.5 !important;
@@ -3459,7 +3270,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         max-width: 480px !important;
     }
 
-    html[data-litefin-scaled] .quick-connect-section .quick-connect-code,
     html[data-litefin-portrait] .quick-connect-section .quick-connect-code {
         font-size: 4.8rem !important;
         font-weight: 700 !important;
@@ -3469,7 +3279,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         text-align: center !important;
     }
 
-    html[data-litefin-scaled] .quick-connect-section .quick-connect-status,
     html[data-litefin-portrait] .quick-connect-section .quick-connect-status {
         font-size: 1.1rem !important;
         opacity: 0.5 !important;
@@ -3489,7 +3298,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
      * - Suppresses persistent remote-focus outlines on mobile touch devices.
      * ========================================================================
      */
-    html[data-litefin-scaled] .profiles-page,
     html[data-litefin-portrait] .profiles-page {
         /* Full-height viewport container with safe-area spacing */
         width: 100% !important;
@@ -3508,7 +3316,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         background: radial-gradient(circle at 50% 45%, rgba(var(--jf-accent-rgb, 0, 164, 220), 0.14) 0%, rgba(255, 255, 255, 0.02) 48%, transparent 72%), #000000 !important;
     }
 
-    html[data-litefin-scaled] .profiles-header,
     html[data-litefin-portrait] .profiles-header {
         /* Distributes vertical space above header to achieve true vertical centering */
         margin-top: auto !important;
@@ -3517,10 +3324,9 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         width: 100% !important;
     }
 
-    html[data-litefin-scaled] .profiles-title,
     html[data-litefin-portrait] .profiles-title {
         /* Crisp, prominent title typography */
-        font-size: 44px !important;
+        font-size: calc(44px * var(--litefin-text-scale, 1)) !important;
         font-weight: 800 !important;
         letter-spacing: -0.6px !important;
         color: #ffffff !important;
@@ -3530,7 +3336,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Flexible wrapping container for profile cards */
-    html[data-litefin-scaled] .profiles-grid,
     html[data-litefin-portrait] .profiles-grid {
         display: flex !important;
         flex-wrap: wrap !important;
@@ -3545,12 +3350,10 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Balanced 2x2 arrangement when exactly four items exist */
-    html[data-litefin-scaled] .profiles-grid:has(> .profiles-profile-item:nth-child(4):last-child),
     html[data-litefin-portrait] .profiles-grid:has(> .profiles-profile-item:nth-child(4):last-child) {
         max-width: 390px !important;
     }
 
-    html[data-litefin-scaled] .profiles-profile-item,
     html[data-litefin-portrait] .profiles-profile-item {
         /* Individual card and label wrapper */
         margin: 0 !important;
@@ -3560,7 +3363,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         width: auto !important;
     }
 
-    html[data-litefin-scaled] .profiles-card,
     html[data-litefin-portrait] .profiles-card {
         /* Generous squircle touch target sized for mobile phone widths */
         position: relative !important;
@@ -3590,7 +3392,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         outline: none !important;
     }
 
-    html[data-litefin-scaled] .profiles-card:active,
     html[data-litefin-portrait] .profiles-card:active,
     html[data-litefin-touch] .profiles-card:active {
         /* Subtle tactile compression when pressed */
@@ -3599,7 +3400,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         box-shadow: 0 6px 20px rgba(var(--jf-accent-rgb, 0, 164, 220), 0.35) !important;
     }
 
-    html[data-litefin-scaled] .profiles-card-avatar,
     html[data-litefin-portrait] .profiles-card-avatar {
         /* Full-bleed avatar photo anchored within the card */
         position: absolute !important;
@@ -3613,13 +3413,11 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Enforce strict hiding of fallback elements when flagged */
-    html[data-litefin-scaled] .profiles-card-avatar.hidden,
     html[data-litefin-portrait] .profiles-card-avatar.hidden,
     html[data-litefin-touch] .profiles-card-avatar.hidden {
         display: none !important;
     }
 
-    html[data-litefin-scaled] .profiles-card-initial,
     html[data-litefin-portrait] .profiles-card-initial {
         /* Initial letter fallback badge positioned absolutely to prevent side-by-side leaking */
         position: absolute !important;
@@ -3638,20 +3436,17 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Explicitly hide the fallback letter badge when an avatar image is loaded */
-    html[data-litefin-scaled] .profiles-card-initial.hidden,
     html[data-litefin-portrait] .profiles-card-initial.hidden,
     html[data-litefin-touch] .profiles-card-initial.hidden {
         display: none !important;
     }
 
-    html[data-litefin-scaled] .profiles-add-card,
     html[data-litefin-portrait] .profiles-add-card {
         /* Dashed secondary styling for add-profile action */
         background: rgba(255, 255, 255, 0.03) !important;
         border: 2px dashed rgba(255, 255, 255, 0.22) !important;
     }
 
-    html[data-litefin-scaled] .profiles-add-icon,
     html[data-litefin-portrait] .profiles-add-icon {
         /* Plus glyph typography */
         font-size: 4.6rem !important;
@@ -3660,11 +3455,10 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         line-height: 1 !important;
     }
 
-    html[data-litefin-scaled] .profiles-card-name,
     html[data-litefin-portrait] .profiles-card-name {
         /* Clean typography for profile username label */
         margin-top: 14px !important;
-        font-size: 22px !important;
+        font-size: calc(22px * var(--litefin-text-scale, 1)) !important;
         font-weight: 600 !important;
         color: var(--jf-text-primary, #ffffff) !important;
         letter-spacing: -0.2px !important;
@@ -3676,7 +3470,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
     }
 
     /* Bottom action buttons in portrait mode */
-    html[data-litefin-scaled] .profiles-bottom,
     html[data-litefin-portrait] .profiles-bottom {
         /* Distributes vertical space below buttons to center the entire group */
         margin-top: 48px !important;
@@ -3692,14 +3485,12 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         box-sizing: border-box !important;
     }
 
-    html[data-litefin-scaled] .profiles-sign-out-btn,
     html[data-litefin-portrait] .profiles-sign-out-btn,
-    html[data-litefin-scaled] .profiles-switch-server-btn,
     html[data-litefin-portrait] .profiles-switch-server-btn {
         /* Ergonomic pill-shaped action buttons */
         min-height: 54px !important;
         padding: 12px 28px !important;
-        font-size: 21px !important;
+        font-size: calc(21px * var(--litefin-text-scale, 1)) !important;
         font-weight: 600 !important;
         border-radius: 27px !important;
         background: rgba(255, 255, 255, 0.08) !important;
@@ -3721,9 +3512,7 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         outline: none !important;
     }
 
-    html[data-litefin-scaled] .profiles-sign-out-btn:active,
     html[data-litefin-portrait] .profiles-sign-out-btn:active,
-    html[data-litefin-scaled] .profiles-switch-server-btn:active,
     html[data-litefin-portrait] .profiles-switch-server-btn:active,
     html[data-litefin-touch] .profiles-sign-out-btn:active,
     html[data-litefin-touch] .profiles-switch-server-btn:active {
@@ -3732,7 +3521,6 @@ html[data-litefin-touch] .sidebar:not(#nonexistent) .sidebar-item.focused:not(#s
         background: rgba(255, 255, 255, 0.15) !important;
         border-color: rgba(255, 255, 255, 0.3) !important;
     }
-}
 
 /* ============================================================================
  * Mobile Loading Indicator Sizing

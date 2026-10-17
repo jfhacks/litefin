@@ -188,27 +188,84 @@ test('forced codec modes: advertise exclusively the requested codec', () => {
 });
 
 // ============================================================================
-// Test Suite: Tizen Remux EAC3 Audio Preservation
+// Test Suite: Tizen Remux EAC3 Audio Handling & Force Override
 // ============================================================================
-test('tizen remux: advertises EAC3 in transcoding profiles during remux mode when supported', () => {
-    // Reset transcode audio codec setting to auto
+test('tizen remux: excludes EAC3 on Tizen < 6 by default to avoid silent audio', () => {
+    // Reset transcode audio codec setting and enableEac3 setting to auto
     PlayerSettings.set('transcodeAudioCodec', 'auto');
     PlayerSettings.set('enableEac3', 'auto');
 
-    // In remux mode on Tizen, EAC3 should be present in transcoding profiles
-    // to allow lossless stream-copy without server transcoding to AC3
+    // On Tizen < 6 AVPlay (default mock is Tizen 4), EAC3 in HLS MPEG-TS produces
+    // silent audio (no sound). Therefore, in remux mode on Tizen < 6, EAC3 must be
+    // excluded by default so the server safely transcodes to AC3.
     const remuxProfile = TizenProfile.buildJellyfinProfile({ playbackMode: 'remux', backend: 'avplay' });
     const remuxCodecs = getVideoTranscodeAudioCodecs(remuxProfile);
 
-    assert.ok(
+    // Verify EAC3 is excluded to prevent silent playback on legacy Tizen AVPlay
+    assert.strictEqual(
         remuxCodecs.includes('eac3'),
-        'Tizen remux mode must include EAC3 in transcoding profiles so server can stream-copy EAC3 audio'
+        false,
+        'Tizen remux mode on Tizen < 6 must exclude EAC3 by default to avoid silent audio'
+    );
+
+    // Verify AC3 is present so the server transcodes audio to playable AC3
+    assert.ok(
+        remuxCodecs.includes('ac3'),
+        'Tizen remux mode on Tizen < 6 must provide AC3 as the target transcode codec'
     );
 });
 
-test('tizen auto: honors enableEac3=enable override even on Tizen < 6', () => {
-    // When the user explicitly sets enableEac3 to enable, honor it in auto mode
+test('tizen remux: honors enableEac3=enable override to force EAC3 even on Tizen < 6', () => {
+    // When the user explicitly sets enableEac3 to enable, honor it during remux
     PlayerSettings.set('transcodeAudioCodec', 'auto');
+    PlayerSettings.set('enableEac3', 'enable');
+
+    const remuxProfile = TizenProfile.buildJellyfinProfile({ playbackMode: 'remux', backend: 'avplay' });
+    const remuxCodecs = getVideoTranscodeAudioCodecs(remuxProfile);
+
+    // EAC3 must now be present in transcoding profiles due to explicit user force
+    assert.ok(
+        remuxCodecs.includes('eac3'),
+        'Tizen remux mode must allow EAC3 when enableEac3 is explicitly set to enable'
+    );
+
+    // Clean up
+    PlayerSettings.set('enableEac3', 'auto');
+});
+
+test('tizen remux: honors transcodeAudioCodec=force_eac3 override on Tizen < 6', () => {
+    // When the user explicitly forces E-AC3 via transcode target codec
+    PlayerSettings.set('transcodeAudioCodec', 'force_eac3');
+    PlayerSettings.set('enableEac3', 'auto');
+
+    const remuxProfile = TizenProfile.buildJellyfinProfile({ playbackMode: 'remux', backend: 'avplay' });
+    const remuxCodecs = getVideoTranscodeAudioCodecs(remuxProfile);
+
+    // EAC3 must be present when transcodeAudioCodec is force_eac3
+    assert.ok(
+        remuxCodecs.includes('eac3'),
+        'Tizen remux mode must allow EAC3 when transcodeAudioCodec is set to force_eac3'
+    );
+
+    // Clean up
+    PlayerSettings.set('transcodeAudioCodec', 'auto');
+});
+
+test('tizen auto: excludes EAC3 below Tizen 6 by default, but honors enableEac3=enable override', () => {
+    // Default auto state on Tizen < 6 should not have EAC3 in HLS
+    PlayerSettings.set('transcodeAudioCodec', 'auto');
+    PlayerSettings.set('enableEac3', 'auto');
+
+    const defaultProfile = TizenProfile.buildJellyfinProfile({ playbackMode: 'auto', backend: 'avplay' });
+    const defaultCodecs = getVideoTranscodeAudioCodecs(defaultProfile);
+
+    assert.strictEqual(
+        defaultCodecs.includes('eac3'),
+        false,
+        'Tizen auto mode on Tizen < 6 must exclude EAC3 by default to avoid silent audio'
+    );
+
+    // When the user explicitly sets enableEac3 to enable, honor it
     PlayerSettings.set('enableEac3', 'enable');
 
     const profile = TizenProfile.buildJellyfinProfile({ playbackMode: 'auto', backend: 'avplay' });

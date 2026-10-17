@@ -353,44 +353,7 @@ export class TizenAVPlayer {
             }
 
             // ================================================================
-            // Mode 2: Math-Calculated Zoom (Cover / Crop)
-            // ================================================================
-            // Scales the video plane by the maximum factor to fill the viewport and symmetrically crop bars
-            if (mode === 'zoom') {
-                const { width: vw, height: vh } = this._getVideoDimensions();
-
-                if (vw > 0 && vh > 0) {
-                    // Calculate uniform scale required to cover both width and height
-                    const scale = Math.max(cw / vw, ch / vh);
-                    const w = Math.round(vw * scale);
-                    const h = Math.round(vh * scale);
-
-                    // Symmetrically center the cropped area with negative coordinate offsets
-                    const left = Math.round(cLeft + (cw - w) / 2);
-                    const top = Math.round(cTop + (ch - h) / 2);
-
-                    // Push oversized coordinates to hardware video plane to clip outer overflow.
-                    // We use PLAYER_DISPLAY_MODE_LETTER_BOX so the underlying hardware rasterizer
-                    // preserves the native DAR / PAR without stretching the video picture.
-                    this._avplay.setDisplayRect(left, top, w, h);
-                    this._avplay.setDisplayMethod('PLAYER_DISPLAY_MODE_LETTER_BOX');
-                    log.info('Applied display geometry (zoom):', { left, top, width: w, height: h, vw, vh, scale });
-                    return;
-                }
-
-                // If stream metadata is still pending, temporarily default to full screen letterbox
-                this._avplay.setDisplayRect(
-                    Math.round(cLeft),
-                    Math.round(cTop),
-                    Math.round(cw),
-                    Math.round(ch)
-                );
-                this._avplay.setDisplayMethod('PLAYER_DISPLAY_MODE_LETTER_BOX');
-                return;
-            }
-
-            // ================================================================
-            // Mode 3: Hardware Video Aspect Ratio (Container Metadata DAR/PAR)
+            // Mode 2: Hardware Video Aspect Ratio (Container Metadata DAR/PAR)
             // ================================================================
             if (mode === 'video_aspect_ratio' || mode === 'video' || mode === 'auto_aspect_ratio') {
                 this._avplay.setDisplayRect(
@@ -405,9 +368,12 @@ export class TizenAVPlayer {
             }
 
             // ================================================================
-            // Mode 4: Auto (Letterbox / Contain)
+            // Mode 3: Auto (Letterbox / Contain) & Fallback
             // ================================================================
-            // Default letterbox display mode preserving intrinsic DAR with standard black bars
+            // Samsung Tizen AVPlay renders on a fixed hardware overlay plane that
+            // strictly enforces unsigned long coordinates [0, 0, 1920, 1080].
+            // Off-screen cropping via negative offsets is rejected by the TV hardware.
+            // Standard letterbox mode preserves intrinsic stream geometry cleanly.
             this._avplay.setDisplayRect(
                 Math.round(cLeft),
                 Math.round(cTop),
@@ -432,35 +398,23 @@ export class TizenAVPlayer {
 
     /**
      * Set aspect ratio mode on Samsung Tizen AVPlay.
-     * Applies geometric layout coordinates or hardware display methods.
+     * Maps user-selected mode to hardware-supported display method constants.
      *
-     * @param {string} mode - 'auto' | 'zoom' | 'stretch' | 'video_aspect_ratio'
+     * In addition to letterbox ('auto') and fullscreen stretch ('stretch'), AVPlay natively
+     * supports automatic aspect ratio adjustments based on stream container DAR/PAR metadata
+     * via 'PLAYER_DISPLAY_MODE_AUTO_ASPECT_RATIO'.
+     *
+     * @param {string} mode - 'auto' | 'stretch' | 'video_aspect_ratio'
      */
     setAspectRatio(mode) {
-        const targetMode = mode || 'auto';
-
-        // --------------------------------------------------------------------
-        // Reset Aspect Ratio Before Applying Zoom
-        // --------------------------------------------------------------------
-        // If previous aspect ratio was 'stretch' (or any non-default mode),
-        // AVPlay's hardware scaler retains the FULL_SCREEN stretch transform.
-        // We reset the display method and rect to 'auto' (LETTER_BOX) first,
-        // ensuring the hardware pipeline clears the stretch deformation
-        // before our calculated zoom boundaries are applied.
-        if (targetMode === 'zoom') {
-            log.info('TizenAVPlayer: Resetting aspect ratio to auto prior to applying zoom');
-            this._aspectRatio = 'auto';
-            this._applyDisplayGeometry();
-        }
-
-        // Track and commit the target aspect ratio mode
-        this._aspectRatio = targetMode;
+        // Track the current aspect ratio mode locally for OSD sync
+        this._aspectRatio = mode || 'auto';
         this._applyDisplayGeometry();
     }
 
     /**
      * Get current aspect ratio mode
-     * @returns {string} 'auto' | 'zoom' | 'stretch' | 'video_aspect_ratio'
+     * @returns {string} 'auto' | 'stretch' | 'video_aspect_ratio'
      */
     getAspectRatio() {
         return this._aspectRatio || 'auto';
@@ -750,7 +704,17 @@ export class TizenAVPlayer {
                     this._pendingSubtitleIndex = options.subtitleStreamIndex;
                     this._delayedSubtitleIndex = options.subtitleStreamIndex; // Used for Tizen 5.0 re-apply
                 }
-            } else if (isDirectPlay && options.subtitleStreamIndex === -1) {
+            } else if (isDirectPlay) {
+                // ---------------------------------------------------------------------
+                // Subtitle Silencing for DirectPlay
+                // ---------------------------------------------------------------------
+                // If subtitles are turned off (index === -1) or no subtitle stream was
+                // explicitly requested (null/undefined), AVPlay's hardware demuxer will
+                // automatically display internal subtitles flagged as 'default' unless
+                // explicitly instructed to remain silent via setSilentSubtitle(true).
+                //
+                // By marking _pendingSubtitleIndex as -1, we guarantee that the native
+                // AVPlay demuxer is instructed to silence subtitles during initial playback.
                 this._pendingSubtitleIndex = -1;
                 this._delayedSubtitleIndex = -1;
             } else {
@@ -844,8 +808,14 @@ export class TizenAVPlayer {
             // Metadata is now loaded, display is ready, and seek position is set.
             // If awaitTracksBeforePlayback is enabled, we set up a 2-second safety timeout
             // to bypass the track selection gate in case header parsing deadlocks the player.
+            // ---------------------------------------------------------------------
+            // Track Readiness Evaluation
+            // ---------------------------------------------------------------------
+            // If awaitTracksBeforePlayback is enabled, check if we are still waiting for audio/subtitle tracks to resolve.
+            // If they are pending and the safety timeout has not yet bypassed, we hold playback.
+            // Note: If subtitles are disabled (-1), track parsing is not required before playback starts.
             const awaitTracks = PlayerSettings.get('awaitTracksBeforePlayback');
-            const hasPending = this._pendingAudioIndex !== null || this._pendingSubtitleIndex !== null;
+            const hasPending = this._pendingAudioIndex !== null || (this._pendingSubtitleIndex !== null && this._pendingSubtitleIndex !== -1);
 
             if (awaitTracks && hasPending) {
                 log.info('Await tracks before playback is enabled. Setting 2s safety timeout.');
@@ -1081,15 +1051,6 @@ export class TizenAVPlayer {
                                 });
                             }
                         });
-                    }
-
-                    // ----------------------------------------------------------------
-                    // Zoom Geometry Refresh On First Rendered Frame
-                    // ----------------------------------------------------------------
-                    // If zoom mode is active, refresh display geometry now that the hardware
-                    // video plane is actively decoding and stream dimensions are definitively known.
-                    if (this._aspectRatio === 'zoom') {
-                        this._applyDisplayGeometry();
                     }
                 }
 
@@ -1651,10 +1612,14 @@ export class TizenAVPlayer {
         }
 
         if (this._isPlaying && this._isPrepared && this._bufferingComplete && !this._isTizenPlaying) {
+            // -----------------------------------------------------------------
+            // Gate Native Play on Active Track Readiness
+            // -----------------------------------------------------------------
             // If awaitTracksBeforePlayback is enabled, check if we are still waiting for audio/subtitle tracks to resolve.
             // If they are pending and the safety timeout has not yet bypassed, we hold playback.
+            // Note: If subtitles are disabled (-1), track parsing is not required before playback starts.
             const awaitTracks = PlayerSettings.get('awaitTracksBeforePlayback');
-            const hasPending = this._pendingAudioIndex !== null || this._pendingSubtitleIndex !== null;
+            const hasPending = this._pendingAudioIndex !== null || (this._pendingSubtitleIndex !== null && this._pendingSubtitleIndex !== -1);
 
             if (awaitTracks && hasPending && !this._forceTizenPlayPassed) {
                 log.info('_checkNativePlay(): deferring play() because tracks are pending');

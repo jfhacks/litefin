@@ -25,7 +25,7 @@ globalThis.document = {
     }
 };
 
-test('AspectRatioMenu: Offers Zoom option on Tizen along with Auto, Video Aspect Ratio, and Stretch', async () => {
+test('AspectRatioMenu: Omits Zoom option on Tizen and offers Auto, Video Aspect Ratio, and Stretch', async () => {
     // 1. Test Tizen platform detection
     globalThis.window.tizen = {};
     const { platformInfo } = await import('../src/utils/PlatformInfo.js');
@@ -50,8 +50,8 @@ test('AspectRatioMenu: Offers Zoom option on Tizen along with Auto, Video Aspect
 
     assert.deepStrictEqual(
         optionsOnTizen,
-        ['auto', 'zoom', 'video_aspect_ratio', 'stretch'],
-        'On Tizen AVPlay, AspectRatioMenu must offer Auto, Zoom, Video Aspect Ratio, and Stretch'
+        ['auto', 'video_aspect_ratio', 'stretch'],
+        'On Tizen AVPlay, AspectRatioMenu must offer Auto, Video Aspect Ratio, and Stretch (Zoom must be hidden)'
     );
 });
 
@@ -244,26 +244,81 @@ test('TizenAVPlayer: Computes explicit display rect geometry for auto, zoom, str
     assert.strictEqual(lastMethod, 'PLAYER_DISPLAY_MODE_AUTO_ASPECT_RATIO');
 
     // ------------------------------------------------------------------------
-    // Case 4: Zoom (Crop / Cover) Mode
+    // Case 4: Zoom Fallback (Letterbox Mode)
     // ------------------------------------------------------------------------
-    // Scale = max(1920/1920, 1080/800) = 1.35
-    // Width = round(1920 * 1.35) = 2592px, Height = round(800 * 1.35) = 1080px
-    // Left = round((1920 - 2592) / 2) = -336px, Top = 0px
+    // AVPlay does not support negative coordinates or off-screen hardware cropping.
+    // Setting 'zoom' safely falls back to standard letterbox bounds [0, 0, 1920, 1080].
     player.setAspectRatio('zoom');
-    assert.strictEqual(player.getAspectRatio(), 'zoom');
-    assert.deepStrictEqual(lastRect, { x: -336, y: 0, width: 2592, height: 1080 });
+    assert.deepStrictEqual(lastRect, { x: 0, y: 0, width: 1920, height: 1080 });
     assert.strictEqual(lastMethod, 'PLAYER_DISPLAY_MODE_LETTER_BOX');
+});
 
+test('WebOSPlayer: Resolves fallback dimensions when video element dimensions are 0 (webOS 5 native HLS)', async () => {
     // ------------------------------------------------------------------------
-    // Case 5: Transition from Stretch directly to Zoom
+    // webOS 5 Dimension Resolution Verification
     // ------------------------------------------------------------------------
-    // When previous mode was 'stretch', setting 'zoom' resets to 'auto' first
-    // (clearing FULL_SCREEN stretch deformation) before applying the zoom crop.
-    player.setAspectRatio('stretch');
-    methodCalls.length = 0;
+    // On webOS 5, native HLS demuxers frequently report 0x0 for videoWidth/videoHeight.
+    // WebOSPlayer must query Jellyfin mediaSource / stream metadata to compute geometry.
+    // ------------------------------------------------------------------------
+
+    const { WebOSPlayer } = await import('../src/player/core/WebOSPlayer.js');
+
+    const mockStyle = {};
+    const mockVideo = {
+        videoWidth: 0,
+        videoHeight: 0,
+        style: mockStyle
+    };
+
+    const mockContainer = {
+        clientWidth: 1920,
+        clientHeight: 1080,
+        appendChild: () => {}
+    };
+
+    // Instantiate player and attach simulated play options with stream metadata
+    const player = new WebOSPlayer({ container: mockContainer });
+    player._videoElement = mockVideo;
+    player._currentPlayOptions = {
+        mediaSource: {
+            MediaStreams: [
+                {
+                    Type: 'Video',
+                    Width: 1920,
+                    Height: 800,
+                    AspectRatio: '2.40:1'
+                }
+            ]
+        }
+    };
+
+    // 1. Auto mode with 0x0 DOM dimensions: should resolve to 1920x800 centered
+    player.setAspectRatio('auto');
+    assert.strictEqual(mockStyle.width, '1920px');
+    assert.strictEqual(mockStyle.height, '800px');
+    assert.strictEqual(mockStyle.left, '0px');
+    assert.strictEqual(mockStyle.top, '140px');
+
+    // 2. Zoom mode with 0x0 DOM dimensions: should resolve to 2592x1080 cropped
     player.setAspectRatio('zoom');
-    assert.strictEqual(player.getAspectRatio(), 'zoom');
-    assert.deepStrictEqual(methodCalls, ['PLAYER_DISPLAY_MODE_LETTER_BOX', 'PLAYER_DISPLAY_MODE_LETTER_BOX']);
-    assert.deepStrictEqual(lastRect, { x: -336, y: 0, width: 2592, height: 1080 });
-    assert.strictEqual(lastMethod, 'PLAYER_DISPLAY_MODE_LETTER_BOX');
+    assert.strictEqual(mockStyle.width, '2592px');
+    assert.strictEqual(mockStyle.height, '1080px');
+    assert.strictEqual(mockStyle.left, '-336px');
+    assert.strictEqual(mockStyle.top, '0px');
+    assert.strictEqual(mockStyle.objectFit, 'cover');
+
+    // 3. Zoom mode with 1920x1080 container holding baked 2.40:1 letterbox
+    // DOM reports 1920x1080, but AspectRatio metadata indicates 2.40:1 active frame
+    mockVideo.videoWidth = 1920;
+    mockVideo.videoHeight = 1080;
+    player.setAspectRatio('zoom');
+
+    // Expected scale = 1080 / 800 = 1.35
+    // Width = 1920 * 1.35 = 2592px, Height = 1080 * 1.35 = 1458px
+    // Left = (1920 - 2592) / 2 = -336px, Top = (1080 - 1458) / 2 = -189px
+    assert.strictEqual(mockStyle.width, '2592px');
+    assert.strictEqual(mockStyle.height, '1458px');
+    assert.strictEqual(mockStyle.left, '-336px');
+    assert.strictEqual(mockStyle.top, '-189px');
+    assert.strictEqual(mockStyle.objectFit, 'cover');
 });

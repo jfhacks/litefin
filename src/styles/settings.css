@@ -23,8 +23,11 @@
 }
 
 /* Sidebar */
+/* Sidebar Navigation Column */
 .settings-sidebar {
-    width: 350px;
+    /* Elevated width for comfortable category text breathing room */
+    width: 380px;
+    min-width: 380px;
     background: var(--sidebar-bg, var(--jf-background-alt, #101010));
     background-color: var(--sidebar-bg, var(--jf-background-alt, #101010));
     border-right: 1px solid var(--jf-divider, rgba(255, 255, 255, 0.1));
@@ -33,10 +36,16 @@
     display: flex;
     flex-direction: column;
     overflow-y: auto;
+    /* Prevent flex parent compression */
+    flex-shrink: 0;
+    -webkit-flex-shrink: 0;
+    box-sizing: border-box;
+    -webkit-box-sizing: border-box;
 }
 
 .settings-sidebar-header {
-    padding: 0 40px;
+    /* Proportional horizontal padding aligned with menu items */
+    padding: 0 32px;
     margin-bottom: 20px;
     margin-top: 10px;
 }
@@ -82,18 +91,24 @@
 
 .settings-menu-btn {
     display: flex;
+    display: -webkit-flex;
     align-items: center;
-    width: calc(100% - 40px);
+    -webkit-align-items: center;
+    /* Balanced horizontal margins giving ample item click/focus hit surface */
+    width: calc(100% - 32px);
     box-sizing: border-box;
-    padding: 16px 24px;
+    -webkit-box-sizing: border-box;
+    /* Ergonomic vertical padding preventing crowded lists */
+    padding: 13px 20px;
     background: transparent;
     border: none;
     color: var(--jf-text-secondary);
-    font-size: 1.3rem;
+    /* Refined legible typography */
+    font-size: 1.18rem;
     font-weight: 500;
     cursor: pointer;
     text-align: left;
-    margin: 4px 20px;
+    margin: 3px 16px;
     border-radius: var(--jf-border-radius);
     -webkit-border-radius: var(--jf-border-radius);
     overflow: hidden;
@@ -104,19 +119,37 @@
     /* will-change on :focus only — ~8 sidebar buttons */
 }
 
+/* Category item title label with strict single-line restraint */
+.settings-menu-btn .menu-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
+}
+
 .settings-menu-btn .menu-icon {
-    margin-right: 16px;
-    width: 28px;
-    height: 28px;
+    margin-right: 14px;
+    width: 26px;
+    height: 26px;
+    min-width: 26px;
+    min-height: 26px;
+    flex-shrink: 0;
+    -webkit-flex-shrink: 0;
     display: flex;
+    display: -webkit-flex;
     align-items: center;
     justify-content: center;
+    -webkit-align-items: center;
+    -webkit-justify-content: center;
 }
 
 .settings-menu-btn .menu-icon svg {
     width: 100%;
     height: 100%;
     stroke-width: 2px;
+    display: block;
+    flex-shrink: 0;
+    -webkit-flex-shrink: 0;
 }
 
 /*
@@ -236,9 +269,24 @@ html[data-layout-tier="ultra-legacy"] .settings-menu-btn .menu-icon {
     border: 1px solid transparent;
 }
 
-.setting-item:focus-within,
+/*
+ * Setting row focus background highlight.
+ * Note: :focus-within is strictly separated from .focused-row selector.
+ * In Chromium versions prior to 63 (legacy and ultra-legacy webviews), grouping an
+ * unsupported pseudo-class like :focus-within in a comma-separated selector causes
+ * the browser's CSS parser to drop the entire rule, preventing .focused-row from applying.
+ */
+.setting-item:focus-within {
+    background-color: rgba(var(--jf-accent-rgb, 0, 164, 220), 0.15);
+}
+
+/*
+ * Explicit class-based row highlight applied by FocusManager during spatial navigation.
+ * Includes a solid static translucent fallback before CSS variable evaluation for older runtimes.
+ */
 .setting-item.focused-row {
-    background-color: rgba(var(--jf-accent-rgb), 0.15);
+    background-color: rgba(255, 255, 255, 0.08);
+    background-color: rgba(var(--jf-accent-rgb, 0, 164, 220), 0.15);
 }
 
 .setting-label {
@@ -725,46 +773,85 @@ html[data-layout-tier="ultra-legacy"] .identity-grid .identity-item:nth-child(ev
 
 /* Container for the 2-column interactive resource cards */
 .about-actions-grid {
+    /* Modern CSS Grid with strict 2 equal-width columns */
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    /* Use minmax(0, 1fr) to prevent content blowout and ensure rigid two columns */
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    /* Uniform gutter between grid items */
     gap: 18px;
     margin-top: 16px;
     margin-bottom: 48px;
+    width: 100%;
+    /* Strict border-box model to prevent outer margin/padding blowout */
+    box-sizing: border-box;
+    -webkit-box-sizing: border-box;
 }
 
 /* Fallback for legacy Tizen / webOS browsers where CSS Grid is unsupported */
 html[data-layout-tier="legacy"] .about-actions-grid,
 html[data-layout-tier="ultra-legacy"] .about-actions-grid {
-    display: flex;
-    flex-wrap: wrap;
+    /* Legacy flex container setup with prefix support */
+    display: flex !important;
+    display: -webkit-flex !important;
+    flex-direction: row !important;
+    -webkit-flex-direction: row !important;
+    flex-wrap: wrap !important;
+    -webkit-flex-wrap: wrap !important;
+    /* Reset gap to avoid compounding spacing in engines supporting flex gap */
+    gap: 0 !important;
+    /* Distribute two items across row edges */
+    justify-content: space-between !important;
+    -webkit-justify-content: space-between !important;
+    box-sizing: border-box !important;
+    -webkit-box-sizing: border-box !important;
 }
 
+/* Precise 50% split minus half-gutter to guarantee side-by-side display without wrapping */
 html[data-layout-tier="legacy"] .about-actions-grid .about-action-card,
 html[data-layout-tier="ultra-legacy"] .about-actions-grid .about-action-card {
-    width: calc(50% - 10px);
-    margin-right: 20px;
-    margin-bottom: 18px;
+    /* Explicit width calculation accounting for 18px gap (9px each) */
+    width: calc(50% - 9px) !important;
+    max-width: calc(50% - 9px) !important;
+    flex: 0 0 calc(50% - 9px) !important;
+    -webkit-flex: 0 0 calc(50% - 9px) !important;
+    margin-right: 0 !important;
+    margin-bottom: 18px !important;
+    box-sizing: border-box !important;
+    -webkit-box-sizing: border-box !important;
 }
 
 html[data-layout-tier="legacy"] .about-actions-grid .about-action-card:nth-child(even),
 html[data-layout-tier="ultra-legacy"] .about-actions-grid .about-action-card:nth-child(even) {
-    margin-right: 0;
+    margin-right: 0 !important;
 }
 
 /* Individual interactive resource action card */
 .about-action-card {
+    /* Horizontal item arrangement */
     display: flex;
+    display: -webkit-flex;
     align-items: center;
+    -webkit-align-items: center;
+    /* Physical margin on children replaces gap for older engines lacking flex gap */
     gap: 18px;
     padding: 20px 22px;
+    /* Minimum physical height to ensure uniform grid item cards */
+    min-height: 92px;
+    /* Prevent card from expanding past its allocated grid/flex width */
+    min-width: 0;
+    box-sizing: border-box;
+    -webkit-box-sizing: border-box;
+    /* Translucent frosted container */
     background: rgba(255, 255, 255, 0.04);
     border: 1.5px solid rgba(255, 255, 255, 0.08);
     border-radius: var(--jf-border-radius-lg, 16px);
+    -webkit-border-radius: var(--jf-border-radius-lg, 16px);
     cursor: pointer;
     text-align: left;
     position: relative;
     overflow: hidden;
     outline: none;
+    /* Spring-like transition physics for smooth remote control interaction */
     transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.22s ease;
     -webkit-transition: -webkit-transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.22s ease;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
@@ -784,17 +871,48 @@ html[data-layout-tier="ultra-legacy"] .about-actions-grid .about-action-card:nth
 
 /* Icon bubble on the left of each card */
 .about-card-icon-wrap {
-    width: 48px;
-    height: 48px;
-    flex-shrink: 0;
+    /* Rigid 1:1 square dimensions preventing flex compression */
+    width: 48px !important;
+    height: 48px !important;
+    min-width: 48px !important;
+    min-height: 48px !important;
+    max-width: 48px !important;
+    max-height: 48px !important;
+    /* Zero flex basis variance across WebKit engines */
+    flex: 0 0 48px !important;
+    -webkit-flex: 0 0 48px !important;
+    flex-shrink: 0 !important;
+    -webkit-flex-shrink: 0 !important;
+    /* Fallback spacing for TV web engines without flex-gap support */
+    margin-right: 18px;
     border-radius: 12px;
+    -webkit-border-radius: 12px;
     background: rgba(255, 255, 255, 0.07);
     color: var(--jf-accent, #00a4dc);
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    /* Strict centered alignment for internal glyphs */
+    display: flex !important;
+    display: -webkit-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    -webkit-align-items: center !important;
+    -webkit-justify-content: center !important;
+    box-sizing: border-box !important;
+    -webkit-box-sizing: border-box !important;
     transition: background-color 0.2s ease, color 0.2s ease, transform 0.22s ease;
     -webkit-transition: background-color 0.2s ease, color 0.2s ease, -webkit-transform 0.22s ease;
+}
+
+/* Hardened SVG glyph constraints preventing vertical squishing on smart TV web engines */
+.about-card-icon-wrap svg {
+    width: 24px !important;
+    height: 24px !important;
+    min-width: 24px !important;
+    min-height: 24px !important;
+    max-width: 24px !important;
+    max-height: 24px !important;
+    display: block !important;
+    flex-shrink: 0 !important;
+    -webkit-flex-shrink: 0 !important;
 }
 
 .about-action-card:focus .about-card-icon-wrap,
@@ -809,9 +927,13 @@ html[data-layout-tier="ultra-legacy"] .about-actions-grid .about-action-card:nth
 /* Card typography structure */
 .about-card-info {
     display: flex;
+    display: -webkit-flex;
     flex-direction: column;
-    flex: 1;
+    -webkit-flex-direction: column;
+    flex: 1 1 auto;
+    -webkit-flex: 1 1 auto;
     min-width: 0;
+    margin-right: 12px;
 }
 
 .about-card-title {
@@ -833,10 +955,38 @@ html[data-layout-tier="ultra-legacy"] .about-actions-grid .about-action-card:nth
 
 /* Chevron indicator on the card right edge */
 .about-card-chevron {
-    flex-shrink: 0;
+    width: 20px !important;
+    height: 20px !important;
+    min-width: 20px !important;
+    min-height: 20px !important;
+    max-width: 20px !important;
+    max-height: 20px !important;
+    flex: 0 0 20px !important;
+    -webkit-flex: 0 0 20px !important;
+    flex-shrink: 0 !important;
+    -webkit-flex-shrink: 0 !important;
+    display: flex !important;
+    display: -webkit-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    -webkit-align-items: center !important;
+    -webkit-justify-content: center !important;
+    margin-left: auto !important;
     color: var(--jf-text-tertiary, rgba(255, 255, 255, 0.4));
     transition: transform 0.2s ease, color 0.2s ease;
     -webkit-transition: -webkit-transform 0.2s ease, color 0.2s ease;
+}
+
+.about-card-chevron svg {
+    width: 20px !important;
+    height: 20px !important;
+    min-width: 20px !important;
+    min-height: 20px !important;
+    max-width: 20px !important;
+    max-height: 20px !important;
+    display: block !important;
+    flex-shrink: 0 !important;
+    -webkit-flex-shrink: 0 !important;
 }
 
 .about-action-card:focus .about-card-chevron,
@@ -1162,29 +1312,51 @@ html[data-layout-tier="ultra-legacy"] .about-device-specs-grid .about-device-til
     z-index: 5 !important;
 }
 
-/* Responsive adjustments for mobile and narrow viewports */
-@media (max-width: 768px) {
+/* ==========================================================================
+   Responsive Adaptations - Handheld Portrait & Mobile Isolation
+   Landscape displays (TVs, scaled monitors, 720p/1080p framebuffers) preserve
+   the rigid two-column grid and two-column dialog layouts unconditionally.
+   Single-column collapse is strictly isolated to mobile portrait viewports.
+   ========================================================================== */
+
+/* Single-column grid collapse strictly for portrait mobile environments */
+html[data-litefin-portrait] .about-actions-grid,
+@media (max-width: 768px) and (orientation: portrait) {
     .about-actions-grid {
-        grid-template-columns: 1fr;
+        /* Collapse to single vertical stack on narrow portrait phone screens */
+        grid-template-columns: 1fr !important;
     }
     
+    /* Dialog QR codes stack vertically on portrait phone screens */
     .about-qr-grid {
-        flex-direction: column;
-        align-items: center;
+        flex-direction: column !important;
+        align-items: center !important;
     }
     
+    /* Full-width QR card on portrait phone screens */
     .about-qr-card {
-        width: 100%;
-        max-width: 100%;
+        width: 100% !important;
+        max-width: 100% !important;
     }
     
+    /* Hardware specifications grid single-column collapse */
     .about-device-specs-grid {
-        grid-template-columns: 1fr;
+        grid-template-columns: 1fr !important;
     }
     
     .about-device-tile.span-2 {
-        grid-column: span 1;
+        grid-column: span 1 !important;
     }
+}
+
+/* Legacy engine single-column fallback strictly in portrait mode */
+html[data-litefin-portrait][data-layout-tier="legacy"] .about-actions-grid .about-action-card,
+html[data-litefin-portrait][data-layout-tier="ultra-legacy"] .about-actions-grid .about-action-card {
+    width: 100% !important;
+    max-width: 100% !important;
+    flex: 0 0 100% !important;
+    -webkit-flex: 0 0 100% !important;
+    margin-right: 0 !important;
 }
 
 /* Toggle Switch */
@@ -1371,7 +1543,8 @@ html[data-layout-tier="ultra-legacy"] .toggle-switch.active::after {
     background: var(--jf-accent-content-color, #fff) !important; /* Contrast when focused */
 }
 
-/* Ensure track remains visible when item is focused */
+/* Ensure slider track remains visible when item row is focused via FocusManager */
+.setting-item.focused-row .slider-track,
 .setting-item.focused .slider-track {
     background: rgba(var(--jf-accent-content-color-rgb, 255, 255, 255), 0.2);
 }

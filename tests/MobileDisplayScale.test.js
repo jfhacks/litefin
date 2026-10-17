@@ -60,6 +60,8 @@ globalThis.window = {
 };
 
 const { layoutManager } = await import('../src/ui/LayoutManager.js');
+const { storage } = await import('../src/utils/StorageService.js');
+const { platformInfo } = await import('../src/utils/PlatformInfo.js');
 
 /**
  * ============================================================================
@@ -129,3 +131,122 @@ test('Mobile Scaling: Display Scale option scales landscape mobile UI proportion
     const zoom120 = parseFloat(styles['zoom']);
     assert.ok(Math.abs(zoom120 - 0.6) < 0.01, `Landscape zoom must scale to 0.5 * 1.2 = 0.6 (actual: ${zoom120})`);
 });
+
+/**
+ * ============================================================================
+ * Text Scaling Engine & Custom Property Propagation Tests
+ * ============================================================================
+ * Confirms that setting text scale multiplier:
+ *   1. Updates LayoutManager internal tracker.
+ *   2. Sets the --litefin-text-scale CSS custom property on the document root,
+ *      allowing all calc() expressions across mobile stylesheets to adapt.
+ *   3. Sets the base root font-size with priority so that relative rem units
+ *      scale proportionately across all layout components.
+ *   4. Accurately persists the user's preference to local storage when saved.
+ * ============================================================================
+ */
+
+test('Text Scaling: setTextScale updates text scale, sets --litefin-text-scale variable, and scales root font-size', () => {
+    // Test scale up to 125% (1.25 multiplier)
+    layoutManager.setTextScale(1.25, true);
+
+    // Verify getter returns updated numerical scale factor
+    assert.strictEqual(layoutManager.getTextScale(), 1.25, 'Text scale getter must return 1.25');
+
+    // Verify --litefin-text-scale CSS variable is propagated to document root
+    assert.strictEqual(styles['--litefin-text-scale'], '1.25', '--litefin-text-scale property must be set on document root');
+
+    // Standard base 16px * 1.25 = 20px
+    assert.strictEqual(styles['font-size'], '20px', 'Root font-size must be scaled to 20px for 125%');
+
+    // Verify storage persistence key
+    assert.strictEqual(storage.getItem('litefin:textScale'), '1.25', 'Must persist text scale to storage');
+
+    // Test scaling down to 80% (0.8 multiplier)
+    layoutManager.setTextScale(0.8, false);
+
+    // Verify getter returns 0.8
+    assert.strictEqual(layoutManager.getTextScale(), 0.8, 'Text scale getter must return 0.8');
+
+    // Verify property propagation
+    assert.strictEqual(styles['--litefin-text-scale'], '0.8', '--litefin-text-scale property must update to 0.8');
+
+    // Standard base 16px * 0.8 = 12.8px
+    assert.strictEqual(styles['font-size'], '12.8px', 'Root font-size must be scaled to 12.8px for 80%');
+
+    // Preference was not saved when save=false, so storage remains previous value
+    assert.strictEqual(storage.getItem('litefin:textScale'), '1.25', 'Storage must not be overwritten when save=false');
+
+    // Reset back to baseline 1.0 (100%)
+    layoutManager.setTextScale(1.0, true);
+    assert.strictEqual(layoutManager.getTextScale(), 1.0, 'Reset to 1.0');
+    assert.strictEqual(styles['--litefin-text-scale'], '1', '--litefin-text-scale must be 1');
+    assert.strictEqual(styles['font-size'], '16px', 'Root font size must be 16px');
+    assert.strictEqual(storage.getItem('litefin:textScale'), '1', 'Storage updated to 1');
+});
+
+/**
+ * ============================================================================
+ * Android TV & Landscape Login Layout Isolation Tests
+ * ============================================================================
+ * Confirms that:
+ *   1. Android TV environments (recognized via platformInfo.isTv) never receive
+ *      mobile responsive markers (data-litefin-scaled, data-litefin-portrait,
+ *      data-litefin-touch) and run at 1:1 framebuffer scale.
+ *   2. The mobile stylesheet (android-mobile.css) contains no rules forcing
+ *      the login page into mobile/scaled layouts in landscape mode, allowing
+ *      Android TV and wide displays to use the normal full-canvas login page.
+ * ============================================================================
+ */
+
+test('TV Scaling: Android TV bypasses mobile markers and preserves normal login layout in landscape', () => {
+    // Save previous platform getters
+    const originalIsTv = platformInfo.isTv;
+    const originalIsAndroid = platformInfo.isAndroid;
+    const originalIsAndroidTv = platformInfo.isAndroidTv;
+
+    try {
+        // Mock Android TV platform flags
+        Object.defineProperty(platformInfo, 'isTv', { value: true, configurable: true });
+        Object.defineProperty(platformInfo, 'isAndroid', { value: true, configurable: true });
+        Object.defineProperty(platformInfo, 'isAndroidTv', { value: true, configurable: true });
+
+        // Simulate 1080p landscape TV display (1920x1080)
+        globalThis.window.innerWidth = 1920;
+        globalThis.window.innerHeight = 1080;
+
+        // Apply display scale calculation
+        layoutManager.setDisplayScale('auto', false);
+
+        // Verify that mobile attributes are stripped on Android TV
+        assert.strictEqual(attributes['data-litefin-portrait'], undefined, 'Must not stamp data-litefin-portrait on Android TV');
+        assert.strictEqual(attributes['data-litefin-scaled'], undefined, 'Must not stamp data-litefin-scaled on Android TV');
+        assert.strictEqual(attributes['data-litefin-touch'], undefined, 'Must not stamp data-litefin-touch on Android TV');
+
+        // Verify 1:1 TV scale
+        assert.strictEqual(styles['zoom'], undefined, 'Zoom should be removed at 1:1 on TV');
+    } finally {
+        // Restore platform getters
+        Object.defineProperty(platformInfo, 'isTv', { value: originalIsTv, configurable: true });
+        Object.defineProperty(platformInfo, 'isAndroid', { value: originalIsAndroid, configurable: true });
+        Object.defineProperty(platformInfo, 'isAndroidTv', { value: originalIsAndroidTv, configurable: true });
+    }
+});
+
+test('Login Layout: android-mobile.css contains no mobile login overrides for landscape or scaled mode', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+
+    // Read active mobile stylesheet
+    const cssPath = path.resolve(process.cwd(), 'src/styles/android-mobile.css');
+    const cssContent = fs.readFileSync(cssPath, 'utf8');
+
+    // Verify no mobile landscape login overrides targeting data-litefin-scaled exist
+    const hasScaledLogin = /html\[data-litefin-scaled\]\s+\.login-page/.test(cssContent);
+    assert.strictEqual(hasScaledLogin, false, 'android-mobile.css must not contain html[data-litefin-scaled] .login-page selectors');
+
+    // Verify all mobile login layout overrides are strictly scoped to portrait mode
+    const portraitLoginMatches = cssContent.match(/html\[data-litefin-portrait\]\s+\.login-page/g);
+    assert.ok(portraitLoginMatches && portraitLoginMatches.length > 0, 'Mobile login overrides must be conditioned on data-litefin-portrait');
+});
+

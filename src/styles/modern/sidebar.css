@@ -13,10 +13,18 @@ html[data-layout-sidebar="floating-island"] .sidebar {
     border-right: none !important;
 }
 
-/* Subtle linear gradient fade from left to right on transparent collapsed rail */
+/* 
+ * True Transparent Collapsed Rail:
+ * Completely clears any legacy artificial dark gradients so the underlying
+ * canvas background (whether Classic Dark, Classic Light, Tinted, or Ambient)
+ * bleeds through naturally and cleanly behind the navigation rail.
+ */
 .sidebar.transparent-collapsed:not(.expanded):not(:hover) {
-    background: -webkit-linear-gradient(left, rgba(0, 0, 0, 0.65) 0%, rgba(0, 0, 0, 0.25) 60%, rgba(0, 0, 0, 0) 100%) !important;
-    background: linear-gradient(to right, rgba(0, 0, 0, 0.65) 0%, rgba(0, 0, 0, 0.25) 60%, rgba(0, 0, 0, 0) 100%) !important;
+    /* Enforce pure transparency across all rendering engines */
+    background: transparent !important;
+    background-color: transparent !important;
+    background-image: none !important;
+    /* Strip lingering shadows or border dividers */
     box-shadow: none !important;
     border-right-color: transparent !important;
 }
@@ -420,9 +428,17 @@ html[data-layout-sidebar^="modern"] .sidebar-footer {
     border-left: none !important;
 }
 
+/* 
+ * True Transparent Collapsed Rail for RTL Layouts:
+ * Mirrors LTR transparency logic to prevent hardcoded dark gradient bleed
+ * on right-to-left layout configurations across all active themes.
+ */
 [dir="rtl"] html[data-layout-sidebar^="modern"] .sidebar.transparent-collapsed:not(.expanded):not(:hover) {
-    background: -webkit-linear-gradient(right, rgba(0, 0, 0, 0.65) 0%, rgba(0, 0, 0, 0.25) 60%, rgba(0, 0, 0, 0) 100%) !important;
-    background: linear-gradient(to left, rgba(0, 0, 0, 0.65) 0%, rgba(0, 0, 0, 0.25) 60%, rgba(0, 0, 0, 0) 100%) !important;
+    /* Pure transparency for RTL rails */
+    background: transparent !important;
+    background-color: transparent !important;
+    background-image: none !important;
+    /* Remove border divider tint */
     border-left-color: transparent !important;
 }
 
@@ -449,23 +465,18 @@ html[data-layout-sidebar="floating-island"] .sidebar-item {
 /* ----------------------------------------------------------------------------
  * COLLAPSED RAIL SCROLLING & POPOVER ISOLATION ARCHITECTURE
  * ----------------------------------------------------------------------------
- * In normal mode, .sidebar-content MUST remain 'overflow: visible' so that the
- * floating #sidebar-sub-libraries popover menu can render completely separate
- * from the sidebar rail without being clipped or causing the sidebar to scroll.
+ * .sidebar-content accommodates vertical scrolling whenever items exceed the
+ * available viewport height. By giving .sidebar-content a width of 700px with
+ * pointer-events: none (and re-enabling pointer-events: auto on interactive
+ * children), the floating #sidebar-sub-libraries popover anchored at left: 342px
+ * renders cleanly without being horizontally clipped by overflow-x: hidden.
  *
- * When the user enables 'Show Collapsed Library Icons', the rail contains all
- * individual library buttons, so we activate vertical scrolling specifically
- * on .show-lib-icons-collapsed while keeping horizontal tooltips visible.
+ * Vertical overflow is enabled across all states so spatial navigation on TV
+ * hardware can scroll rail items into view seamlessly.
  * ---------------------------------------------------------------------------- */
-html[data-layout-sidebar="modern-collapsed"] .sidebar:not(.show-lib-icons-collapsed) .sidebar-content,
-html[data-layout-sidebar="floating-buttons"] .sidebar:not(.show-lib-icons-collapsed) .sidebar-content,
-html[data-layout-sidebar="floating-island"] .sidebar:not(.show-lib-icons-collapsed) .sidebar-content {
-    overflow: visible !important;
-}
-
-html[data-layout-sidebar="modern-collapsed"] .sidebar.show-lib-icons-collapsed .sidebar-content,
-html[data-layout-sidebar="floating-buttons"] .sidebar.show-lib-icons-collapsed .sidebar-content,
-html[data-layout-sidebar="floating-island"] .sidebar.show-lib-icons-collapsed .sidebar-content {
+html[data-layout-sidebar="modern-collapsed"] .sidebar-content,
+html[data-layout-sidebar="floating-buttons"] .sidebar-content,
+html[data-layout-sidebar="floating-island"] .sidebar-content {
     width: 700px !important;
     overflow-y: auto !important;
     overflow-x: hidden !important;
@@ -928,20 +939,26 @@ html[data-layout-sidebar="modern"][data-theme-mode="ambient"] body:not(.sidebar-
     border-right-color: transparent !important;
 }
 
-/* Maintain transparent collapsed background gradient on hover for non-ambient themes in normal mode */
+/* 
+ * Pure Transparent Collapsed Sidebar:
+ * Eliminates hardcoded black linear gradient, allowing the active theme background
+ * (Classic Dark, Classic Light, Tinted, Tinted Light) to show through naturally.
+ */
 html[data-layout-sidebar="modern-collapsed"] body:not(.sidebar-mode-hidden) .sidebar.transparent-collapsed,
 html[data-layout-sidebar="modern-collapsed"] body:not(.sidebar-mode-hidden) .sidebar.transparent-collapsed:hover,
 html[data-layout-sidebar="modern-collapsed"] body:not(.sidebar-mode-hidden) .sidebar.transparent-collapsed.expanded {
-    background: -webkit-linear-gradient(left, rgba(0, 0, 0, 0.65) 0%, rgba(0, 0, 0, 0.25) 60%, rgba(0, 0, 0, 0) 100%) !important;
-    background: linear-gradient(to right, rgba(0, 0, 0, 0.65) 0%, rgba(0, 0, 0, 0.25) 60%, rgba(0, 0, 0, 0) 100%) !important;
+    background: transparent !important;
+    background-color: transparent !important;
+    background-image: none !important;
     box-shadow: none !important;
     border-right-color: transparent !important;
 }
 [dir="rtl"] html[data-layout-sidebar="modern-collapsed"] body:not(.sidebar-mode-hidden) .sidebar.transparent-collapsed,
 [dir="rtl"] html[data-layout-sidebar="modern-collapsed"] body:not(.sidebar-mode-hidden) .sidebar.transparent-collapsed:hover,
 [dir="rtl"] html[data-layout-sidebar="modern-collapsed"] body:not(.sidebar-mode-hidden) .sidebar.transparent-collapsed.expanded {
-    background: -webkit-linear-gradient(right, rgba(0, 0, 0, 0.65) 0%, rgba(0, 0, 0, 0.25) 60%, rgba(0, 0, 0, 0) 100%) !important;
-    background: linear-gradient(to left, rgba(0, 0, 0, 0.65) 0%, rgba(0, 0, 0, 0.25) 60%, rgba(0, 0, 0, 0) 100%) !important;
+    background: transparent !important;
+    background-color: transparent !important;
+    background-image: none !important;
     border-left-color: transparent !important;
 }
 
@@ -1328,17 +1345,27 @@ html[data-layout-sidebar="floating-buttons"] .sidebar.expanded {
 
 /*
  * ============================================================================
- * FLOATING BUTTONS - SETTINGS OVERRIDE
+ * NAVIGATION SIDEBAR - SETTINGS SPLIT VIEW THEME ALIGNMENT
  * ============================================================================
- * When inside the Settings view, override the transparent container to follow
- * the solid theme sidebar background, aligning seamlessly with the split view.
+ * When navigating into the Settings view, override the navigation sidebar to
+ * adopt the active theme's solid background, creating seamless visual continuity
+ * with the adjacent settings split-view category rail.
+ * 
+ * Transparent collapsed/expanded preferences are specifically converted into
+ * the theme background in Settings, resolving the issue where transparent rails
+ * collapsed onto an unpainted or black backdrop.
+ * 
+ * User-selected explicit color styles (Black, Semi-transparent, Tinted Semi)
+ * continue to take full precedence without interference.
  * ============================================================================
  */
-html[data-layout-sidebar="floating-buttons"] .sidebar.in-settings:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.transparent-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded):not(.transparent-expanded),
-html[data-layout-sidebar="floating-buttons"] .sidebar.in-settings:hover:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.transparent-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded):not(.transparent-expanded),
-html[data-layout-sidebar="floating-buttons"] .sidebar.in-settings.expanded:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.transparent-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded):not(.transparent-expanded) {
-    background: var(--sidebar-bg, var(--jf-background-alt, #101010)) !important;
-    background-color: var(--sidebar-bg, var(--jf-background-alt, #101010)) !important;
+html:not([data-theme-mode="ambient"]) .sidebar.in-settings:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded),
+html:not([data-theme-mode="ambient"]) .sidebar.in-settings:hover:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded),
+html:not([data-theme-mode="ambient"]) .sidebar.in-settings.expanded:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded) {
+    /* Seamless background matching the settings sidebar column */
+    background: var(--sidebar-bg, var(--jf-background-alt, #151515)) !important;
+    background-color: var(--sidebar-bg, var(--jf-background-alt, #151515)) !important;
+    background-image: none !important;
     border-right: 1px solid var(--jf-divider, rgba(255, 255, 255, 0.1)) !important;
 }
 
@@ -1442,28 +1469,18 @@ html[data-layout-sidebar="floating-island"] .sidebar.expanded {
 }
 
 /*
- * ============================================================================
- * FLOATING ISLAND - SETTINGS OVERRIDE
- * ============================================================================
- * When inside the Settings view, override the transparent container to follow
- * the solid theme sidebar background, aligning seamlessly with the split view.
- * ============================================================================
- */
-html[data-layout-sidebar="floating-island"] .sidebar.in-settings:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.transparent-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded):not(.transparent-expanded),
-html[data-layout-sidebar="floating-island"] .sidebar.in-settings:hover:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.transparent-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded):not(.transparent-expanded),
-html[data-layout-sidebar="floating-island"] .sidebar.in-settings.expanded:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.transparent-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded):not(.transparent-expanded) {
-    background: var(--sidebar-bg, var(--jf-background-alt, #101010)) !important;
-    background-color: var(--sidebar-bg, var(--jf-background-alt, #101010)) !important;
-    border-right: 1px solid var(--jf-divider, rgba(255, 255, 255, 0.1)) !important;
-}
-
 /* 
- * Ambient Glow Theme Settings Override:
- * Keeps navigation sidebar transparent alongside the transparent settings split view.
+ * ============================================================================
+ * AMBIENT GLOW THEME - SETTINGS SIDEBAR OVERRIDE
+ * ============================================================================
+ * In Ambient Glow mode, the entire canvas relies on an ultra-dark background with
+ * dynamic light spots. Both navigation rail and settings split-view remain transparent.
+ * Explicit custom color overrides (Black, Semi, Tinted Semi) remain respected.
+ * ============================================================================
  */
-html[data-theme-mode="ambient"] .sidebar.in-settings:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.transparent-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded):not(.transparent-expanded),
-html[data-theme-mode="ambient"] .sidebar.in-settings:hover:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.transparent-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded):not(.transparent-expanded),
-html[data-theme-mode="ambient"] .sidebar.in-settings.expanded:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.transparent-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded):not(.transparent-expanded) {
+html[data-theme-mode="ambient"] .sidebar.in-settings:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded),
+html[data-theme-mode="ambient"] .sidebar.in-settings:hover:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded),
+html[data-theme-mode="ambient"] .sidebar.in-settings.expanded:not(.black-collapsed):not(.semi-transparent-collapsed):not(.tinted-semi-collapsed):not(.black-expanded):not(.semi-transparent-expanded):not(.tinted-semi-expanded) {
     background: transparent !important;
     background-color: transparent !important;
     background-image: none !important;

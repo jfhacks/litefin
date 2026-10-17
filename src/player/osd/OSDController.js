@@ -6,6 +6,9 @@ import { i18n } from '../../utils/i18n.js';
 import { api } from '../../api/index.js';
 import { osdIcons } from '../../utils/Icons.js';
 import { TrickplayManager } from './TrickplayManager.js';
+import { platformInfo } from '../../utils/PlatformInfo.js';
+import { desktopAdapter } from '../../desktop/DesktopAdapter.js';
+import { webAdapter } from '../../web/WebAdapter.js';
 
 import TrackMenu from './TrackMenu.js';
 import SettingsMenu from './SettingsMenu.js';
@@ -589,6 +592,10 @@ export default class OSDController extends Component {
                             <button class="osd-btn" data-action="description" id="osdInfoBtn" tabindex="0" aria-label="Description">${osdIcons.info}</button>
                             <button class="osd-btn" id="osdFavoriteBtn" data-action="favorite" tabindex="0">${osdIcons.favorite}</button>
                             <button class="osd-btn" data-action="settings" tabindex="0">${osdIcons.settings}</button>
+                            ${(platformInfo.isDesktop || platformInfo.isWeb) ? `
+                            <!-- Fullscreen presentation toggle button for desktop window manager and web browsers -->
+                            <button class="osd-btn" id="osdFullscreenBtn" data-action="toggleFullscreen" tabindex="0" aria-label="${i18n.t('FullScreen') || 'Full Screen'}" title="${(i18n.t('FullScreen') || 'Full Screen') + ' (F)'}">${osdIcons.fullscreen}</button>
+                            ` : ''}
                         </div>
                     </div>
 
@@ -658,6 +665,40 @@ export default class OSDController extends Component {
         /* Cache trickplay tooltip sub-elements to avoid repeated queries during seek */
         this._cachedThumbEl = this._osdEl.querySelector('#osdTrickplayThumb');
         this._cachedTooltipTextEl = this._osdEl.querySelector('#osdSeekTooltipText');
+
+        /* Cache fullscreen toggle button on supported desktop and web environments */
+        this._osdFullscreenBtnEl = this._osdEl.querySelector('#osdFullscreenBtn');
+
+        /*
+         * ====================================================================
+         * FULLSCREEN PRESENTATION EVENT SYNCHRONIZATION
+         * ====================================================================
+         * Subscribes to window fullscreen change events dispatched from
+         * DesktopAdapter (native Tauri window IPC) and WebAdapter (HTML5 API).
+         * Listens to standard browser fullscreenchange events as well,
+         * ensuring the OSD button icon and tooltip always stay in sync.
+         * ====================================================================
+         */
+        if (platformInfo.isDesktop || platformInfo.isWeb) {
+            // Listen for global adapter broadcast events
+            this.on('window:fullscreen', (isFs) => this._updateFullscreenButton(isFs));
+
+            // Listen for native DOM fullscreen changes (e.g., F11 key, Esc key, browser controls)
+            if (typeof document !== 'undefined') {
+                const handleFsChange = () => this._updateFullscreenButton();
+                document.addEventListener('fullscreenchange', handleFsChange);
+                document.addEventListener('webkitfullscreenchange', handleFsChange);
+
+                // Ensure listeners are cleaned up when the component is destroyed
+                this._subscriptions.push(() => {
+                    document.removeEventListener('fullscreenchange', handleFsChange);
+                    document.removeEventListener('webkitfullscreenchange', handleFsChange);
+                });
+            }
+
+            // Synchronize the button's initial visual presentation
+            this._updateFullscreenButton();
+        }
 
         // Bind slider
         this._osdPositionSliderEl.addEventListener('input', (e) => this._handlePositionSliderInput(e));
@@ -1376,6 +1417,11 @@ export default class OSDController extends Component {
 
         this.resetAutoHide();
         this._updateNavigationButtons();
+
+        // Refresh fullscreen button icon and tooltip state
+        if (platformInfo.isDesktop || platformInfo.isWeb) {
+            this._updateFullscreenButton();
+        }
     }
 
     /**
@@ -2070,6 +2116,26 @@ export default class OSDController extends Component {
         if (this._player.getCurrentSecondarySubtitleStreamIndex) {
             const idx = this._player.getCurrentSecondarySubtitleStreamIndex();
             if (idx !== undefined && idx !== null) this._currentSecondarySubtitleIndex = idx;
+        }
+
+        /*
+         * ====================================================================
+         * Subtitle Dodging Hygiene on Track Synchronization
+         * ====================================================================
+         * Whenever tracks are synchronized (e.g. on playback start or track switch),
+         * verify if OSD controls are hidden. If hidden, ensure 'osd-active' is
+         * removed to prevent text subtitles from rendering at an elevated offset.
+         * ====================================================================
+         */
+        if (!this._isOsdVisible) {
+            const pageEl = this._playerPage?.el || document.querySelector('.player-page');
+            if (pageEl) {
+                pageEl.classList.remove('osd-active');
+            }
+            const playerContainer = document.getElementById('player-container');
+            if (playerContainer) {
+                playerContainer.classList.remove('osd-active');
+            }
         }
     }
 
@@ -3406,6 +3472,10 @@ export default class OSDController extends Component {
                     menu.open();
                 }).catch(err => log.error('Failed to open SyncPlayGroupMenu:', err));
                 break;
+            case 'toggleFullscreen':
+                // Toggle between standard viewport and OS-level fullscreen mode
+                this._toggleFullscreen();
+                break;
         }
     }
 
@@ -3430,6 +3500,108 @@ export default class OSDController extends Component {
         } catch (e) {
             log.error('Fav toggle failed. API:', !!this._api, 'Item:', !!this._currentItem, 'Error:', e);
         }
+    }
+
+    /**
+     * ========================================================================
+     * Presentation Mode Fullscreen Inspection
+     * ========================================================================
+     * Checks if the active application display is currently running in
+     * fullscreen mode across desktop window manager and browser runtimes.
+     * ========================================================================
+     * @private
+     * @returns {boolean} True if currently fullscreen.
+     */
+    _isFullscreen() {
+        // Query active document fullscreen elements across browser engines
+        if (typeof document !== 'undefined' && (document.fullscreenElement || document.webkitFullscreenElement)) {
+            return true;
+        }
+
+        // Delegate to desktop runtime adapter when running inside Tauri/packaged shell
+        if (platformInfo.isDesktop && typeof desktopAdapter !== 'undefined') {
+            return desktopAdapter.isFullscreen();
+        }
+
+        // Delegate to web runtime adapter when running in browser viewport
+        if (platformInfo.isWeb && typeof webAdapter !== 'undefined') {
+            return webAdapter.isFullscreen();
+        }
+
+        // Fall back to player instance backend query if present
+        if (this._player && typeof this._player.isFullscreen === 'function') {
+            return this._player.isFullscreen();
+        }
+
+        return false;
+    }
+
+    /**
+     * ========================================================================
+     * Fullscreen Mode Toggle
+     * ========================================================================
+     * Toggles the display between windowed and fullscreen presentation mode.
+     * Routes through platform adapters (DesktopAdapter, WebAdapter, or Player).
+     * ========================================================================
+     * @private
+     */
+    async _toggleFullscreen() {
+        try {
+            // Handle native desktop shell toggling via desktopAdapter
+            if (platformInfo.isDesktop && typeof desktopAdapter !== 'undefined') {
+                const newState = await desktopAdapter.toggleFullscreen();
+                this._updateFullscreenButton(newState);
+                return;
+            }
+
+            // Handle browser HTML5 fullscreen toggling via webAdapter
+            if (platformInfo.isWeb && typeof webAdapter !== 'undefined') {
+                const newState = await webAdapter.toggleFullscreen();
+                this._updateFullscreenButton(newState);
+                return;
+            }
+
+            // Fallback: invoke player backend fullscreen toggle
+            if (this._player && typeof this._player.toggleFullscreen === 'function') {
+                this._player.toggleFullscreen();
+                this._updateFullscreenButton(this._isFullscreen());
+            }
+        } catch (err) {
+            log.error('Failed to toggle fullscreen mode:', err);
+        }
+    }
+
+    /**
+     * ========================================================================
+     * Fullscreen Button Visual State Synchronization
+     * ========================================================================
+     * Updates the OSD fullscreen button icon, accessibility label, and tooltip
+     * reflecting whether the application is currently windowed or fullscreen.
+     * ========================================================================
+     * @param {boolean} [isFullscreen] - Optional explicit fullscreen state.
+     * @private
+     */
+    _updateFullscreenButton(isFullscreen) {
+        // Find button element in DOM
+        const btn = this._osdFullscreenBtnEl || this._osdEl?.querySelector('#osdFullscreenBtn');
+        if (!btn) return;
+
+        // Determine current presentation mode
+        const isFs = typeof isFullscreen === 'boolean'
+            ? isFullscreen
+            : this._isFullscreen();
+
+        // Localized label and keyboard shortcut tooltip indicator
+        const label = isFs
+            ? (i18n.t('ExitFullScreen') || 'Exit Full Screen')
+            : (i18n.t('FullScreen') || 'Full Screen');
+
+        // Apply updated accessibility labels and browser native tooltip
+        btn.title = `${label} (F)`;
+        btn.setAttribute('aria-label', label);
+
+        // Swap between enter fullscreen and exit fullscreen SVG icons
+        btn.innerHTML = isFs ? osdIcons.fullscreenExit : osdIcons.fullscreen;
     }
 
     _seekTimeline(direction, e) {

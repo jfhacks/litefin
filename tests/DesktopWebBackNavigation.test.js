@@ -202,14 +202,38 @@ test('Sidebar._updateBackButtonState: activates back button and has-back-button 
 
     // Test on desktop environment
     const platformDesktop = { isWeb: false, isDesktop: true };
+    const platformTv = { isWeb: false, isDesktop: false };
     const routerCanBack = { canGoBack: () => true };
     const routerNoBack = { canGoBack: () => false };
 
-    // Function matching _updateBackButtonState logic
-    function updateBackButtonState(el, platform, router) {
+    // Mock storage registry
+    let mockStoragePref = 'auto';
+    const mockStorage = {
+        getItem(k) {
+            if (k === 'pref:sidebarBackButton') return mockStoragePref;
+            return null;
+        }
+    };
+
+    // Function matching updated _updateBackButtonState logic in Sidebar.js
+    function updateBackButtonState(el, platform, router, storageService) {
         if (!el) return;
-        const isDesktopOrWeb = platform.isWeb || platform.isDesktop;
-        const canBack = isDesktopOrWeb && router.canGoBack();
+
+        // Retrieve user setting for back button targeting
+        const pref = storageService.getItem('pref:sidebarBackButton') || 'auto';
+        let isPlatformAllowed = false;
+
+        // Evaluate platform eligibility
+        if (pref === 'all' || pref === 'true') {
+            isPlatformAllowed = true;
+        } else if (pref === 'disabled' || pref === 'never' || pref === 'false') {
+            isPlatformAllowed = false;
+        } else {
+            isPlatformAllowed = platform.isWeb || platform.isDesktop;
+        }
+
+        // Determine if back button should be shown
+        const canBack = isPlatformAllowed && router.canGoBack();
         el.classList.toggle('has-back-button', canBack);
         const btn = el.querySelector('#sidebar-back-btn');
         if (btn) {
@@ -219,22 +243,58 @@ test('Sidebar._updateBackButtonState: activates back button and has-back-button 
         mockFocusManager.invalidateCache('sidebar');
     }
 
-    // 1. On desktop when canGoBack is true -> button is surfaced and class added
-    updateBackButtonState(mockSidebarEl, platformDesktop, routerCanBack);
-    assert.equal(mockSidebarEl.classList.contains('has-back-button'), true, 'Should add has-back-button class');
-    assert.equal(backBtn.style.display, 'flex', 'Back button should be visible');
-    assert.equal(backBtn.tabIndex, 0, 'Back button should be focusable');
-    assert.equal(cacheInvalidated, true, 'FocusManager cache should be invalidated');
+    // 1. Default 'auto': Desktop with canGoBack=true -> button visible
+    mockStoragePref = 'auto';
+    updateBackButtonState(mockSidebarEl, platformDesktop, routerCanBack, mockStorage);
+    assert.equal(mockSidebarEl.classList.contains('has-back-button'), true, 'Should add has-back-button class on desktop');
+    assert.equal(backBtn.style.display, 'flex', 'Back button should be visible on desktop');
+    assert.equal(backBtn.tabIndex, 0, 'Back button should be focusable on desktop');
 
-    // 2. On desktop when canGoBack is false -> button is hidden and class removed
-    updateBackButtonState(mockSidebarEl, platformDesktop, routerNoBack);
-    assert.equal(mockSidebarEl.classList.contains('has-back-button'), false, 'Should remove has-back-button class');
-    assert.equal(backBtn.style.display, 'none', 'Back button should be hidden');
-    assert.equal(backBtn.tabIndex, -1, 'Back button should not be focusable');
+    // 2. Default 'auto': Desktop with canGoBack=false -> button hidden
+    updateBackButtonState(mockSidebarEl, platformDesktop, routerNoBack, mockStorage);
+    assert.equal(mockSidebarEl.classList.contains('has-back-button'), false, 'Should remove has-back-button class when at home');
+    assert.equal(backBtn.style.display, 'none', 'Back button should be hidden when at home');
+    assert.equal(backBtn.tabIndex, -1, 'Back button should not be focusable when at home');
 
-    // 3. On TV platform (isWeb=false, isDesktop=false) -> always hidden
-    const platformTv = { isWeb: false, isDesktop: false };
-    updateBackButtonState(mockSidebarEl, platformTv, routerCanBack);
-    assert.equal(mockSidebarEl.classList.contains('has-back-button'), false, 'TV should not show has-back-button');
-    assert.equal(backBtn.style.display, 'none', 'TV back button should remain hidden');
+    // 3. Default 'auto': TV platform -> always hidden even if canGoBack=true
+    updateBackButtonState(mockSidebarEl, platformTv, routerCanBack, mockStorage);
+    assert.equal(mockSidebarEl.classList.contains('has-back-button'), false, 'TV should not show has-back-button in auto mode');
+    assert.equal(backBtn.style.display, 'none', 'TV back button should remain hidden in auto mode');
+
+    // 4. Setting 'all': TV platform -> button IS shown when canGoBack=true
+    mockStoragePref = 'all';
+    updateBackButtonState(mockSidebarEl, platformTv, routerCanBack, mockStorage);
+    assert.equal(mockSidebarEl.classList.contains('has-back-button'), true, 'TV SHOULD show has-back-button when pref is "all"');
+    assert.equal(backBtn.style.display, 'flex', 'TV back button should be visible when pref is "all"');
+    assert.equal(backBtn.tabIndex, 0, 'TV back button should be focusable when pref is "all"');
+
+    // 5. Setting 'all': TV platform with canGoBack=false -> hidden
+    updateBackButtonState(mockSidebarEl, platformTv, routerNoBack, mockStorage);
+    assert.equal(mockSidebarEl.classList.contains('has-back-button'), false, 'TV should hide back button when canGoBack is false even if "all"');
+    assert.equal(backBtn.style.display, 'none', 'TV back button should be hidden at root route');
+
+    // 6. Setting 'disabled': Desktop platform -> hidden even if canGoBack=true
+    mockStoragePref = 'disabled';
+    updateBackButtonState(mockSidebarEl, platformDesktop, routerCanBack, mockStorage);
+    assert.equal(mockSidebarEl.classList.contains('has-back-button'), false, 'Desktop should hide back button when disabled');
+    assert.equal(backBtn.style.display, 'none', 'Back button should be hidden when disabled');
+    assert.equal(backBtn.tabIndex, -1, 'Back button tabIndex should be -1 when disabled');
 });
+
+test('SettingsPage: sidebar-back-button-select is properly registered and wired in settingsMap', () => {
+    // Read source code of SettingsPage.js
+    const settingsSource = readFileSync('./src/pages/SettingsPage.js', 'utf8');
+
+    // Verify dropdown control is rendered in template
+    assert.ok(
+        settingsSource.includes("'sidebar-back-button-select'"),
+        'SettingsPage must render dropdown with id sidebar-back-button-select'
+    );
+
+    // Verify settingsMap entry with key and triggerEvent
+    assert.ok(
+        settingsSource.includes("'sidebar-back-button-select': { key: 'pref:sidebarBackButton', type: 'local', triggerEvent: true }"),
+        'settingsMap must register sidebar-back-button-select with triggerEvent: true'
+    );
+});
+

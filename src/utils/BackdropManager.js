@@ -27,13 +27,27 @@ class BackdropManager {
     static getBackdropUrl(item, options = null) {
         if (!item) return null;
 
-        // Default options from ImageService if not provided
+        // ====================================================================
+        // Image Optimization Options Resolution
+        // ====================================================================
+        // Resolve default dimensions and compression quality from ImageService.
+        // If the caller provides partial options (such as only maxWidth), ensure
+        // missing attributes (like quality) are safely backfilled from the active
+        // quality preset rather than omitting them and causing server re-encode issues.
+        // ====================================================================
         if (!options) {
             const params = imageService.getParams('backdrop');
             options = { maxWidth: params.maxWidth, quality: params.quality };
         } else {
             // Clone options object so we do not mutate the caller's parameter
             options = { ...options };
+            const params = imageService.getParams('backdrop');
+            if (options.quality === undefined) {
+                options.quality = params.quality;
+            }
+            if (options.maxWidth === undefined) {
+                options.maxWidth = params.maxWidth;
+            }
         }
 
         // Extract primary backdrop tag for cache busting on image updates
@@ -71,13 +85,24 @@ class BackdropManager {
      * @returns {string|null} The backdrop URL
      */
     static getPersonBackdropUrl(person, works = [], options = null) {
-        // Default options from ImageService if not provided
+        // ====================================================================
+        // Person Backdrop Parameter Resolution
+        // ====================================================================
+        // Ensure imageService parameters are fully populated for person backdrops.
+        // ====================================================================
         if (!options) {
             const params = imageService.getParams('backdrop');
             options = { maxWidth: params.maxWidth, quality: params.quality };
         } else {
             // Clone options object to prevent external mutation
             options = { ...options };
+            const params = imageService.getParams('backdrop');
+            if (options.quality === undefined) {
+                options.quality = params.quality;
+            }
+            if (options.maxWidth === undefined) {
+                options.maxWidth = params.maxWidth;
+            }
         }
 
         // 1. Try Person's own backdrop

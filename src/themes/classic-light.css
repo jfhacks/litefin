@@ -6,7 +6,13 @@
 
 [data-theme-mode="classic-light"] {
     --jf-background: #fdfdfd;
+    --jf-background-rgb: 253, 253, 253;
     --jf-background-alt: #f5f5f5;
+    /*
+     * Sidebar and Settings split-view navigation surface background.
+     * Matches the soft light secondary background tone of Classic Light mode.
+     */
+    --sidebar-bg: var(--jf-background-alt, #f5f5f5);
     --jf-card-bg: #ffffff;
     --jf-card-bg-hover: #fcfcfc;
     --jf-overlay-bg: rgba(255, 255, 255, 0.9);

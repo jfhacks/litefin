@@ -205,6 +205,15 @@ class Sidebar extends Component {
         this._onSidebarItemsAlignChanged = () => this._updateSidebarItemsAlign();
         eventBus.on('pref:sidebarItemsAlign', this._onSidebarItemsAlignChanged);
 
+        // ---------------------------------------------------------------------
+        // SIDEBAR BACK BUTTON PREFERENCE LISTENER
+        // ---------------------------------------------------------------------
+        // Re-evaluates back button visibility dynamically when user modifies the
+        // back button platform preference in Settings.
+        // ---------------------------------------------------------------------
+        this._onBackButtonPrefChanged = () => this._updateBackButtonState();
+        eventBus.on('pref:sidebarBackButton', this._onBackButtonPrefChanged);
+
         this._updateAnimationMode();
         this._onAnimationModeChanged = () => this._updateAnimationMode();
         eventBus.on('prefChanged:disableSidebarAnimation', this._onAnimationModeChanged);
@@ -478,6 +487,11 @@ class Sidebar extends Component {
             eventBus.off('pref:sidebarItemsAlign', this._onSidebarItemsAlignChanged);
         }
 
+        // Clean up sidebar back button preference listener
+        if (this._onBackButtonPrefChanged) {
+            eventBus.off('pref:sidebarBackButton', this._onBackButtonPrefChanged);
+        }
+
         // Clean up floating island resize listener
         if (this._onResizeGeometry) {
             window.removeEventListener('resize', this._onResizeGeometry);
@@ -700,35 +714,20 @@ class Sidebar extends Component {
                 const hasFocus = !!focusedItem;
 
                 // ---------------------------------------------------------------------
-                // RAIL SCROLLING & SUB-LIBRARIES ISOLATION
+                // SIDEBAR CONTENT SCROLL ANCHORING & OVERFLOW HANDLING
                 // ---------------------------------------------------------------------
-                // Only allow scrolling the sidebar container when 'showCollapsedLibraryIcons'
-                // is active and focus is directly on a rail item. In normal mode, or when
-                // navigating within #sidebar-sub-libraries (accordion or floating popover),
-                // the sidebar container must NEVER scroll or push upward.
+                // When sidebar content fits comfortably within the visible viewport height
+                // without overflowing, ensure scrollTop remains strictly anchored to 0.
+                // When content overflows (e.g. extensive library lists or compact displays),
+                // ScrollController manages smooth focus-driven scrolling across D-pad
+                // navigation events on TV hardware without manual scrollTop clobbering.
                 // ---------------------------------------------------------------------
-                const showLibIcons = storage.getItem('pref:showCollapsedLibraryIcons') === 'true' ||
-                    this.el.classList.contains('show-lib-icons-collapsed');
                 const scrollContainer = this.el.querySelector('.sidebar-content');
 
-                if (scrollContainer && !showLibIcons) {
-                    // In normal mode, guarantee sidebar content stays anchored to top
+                if (scrollContainer && scrollContainer.scrollHeight <= scrollContainer.clientHeight) {
+                    // Container does not overflow viewport; keep safely anchored to top
                     if (scrollContainer.scrollTop !== 0) {
                         scrollContainer.scrollTop = 0;
-                    }
-                } else if (focusedItem && showLibIcons && !focusedItem.closest('#sidebar-sub-libraries')) {
-                    // Ensure the focused item inside the collapsed rail is visible
-                    if (scrollContainer && scrollContainer.contains(focusedItem)) {
-                        const containerHeight = scrollContainer.clientHeight;
-                        const itemTop = focusedItem.offsetTop;
-                        const itemHeight = focusedItem.offsetHeight || 72;
-                        const currentScroll = scrollContainer.scrollTop;
-
-                        if (itemTop < currentScroll) {
-                            scrollContainer.scrollTop = itemTop;
-                        } else if (itemTop + itemHeight > currentScroll + containerHeight) {
-                            scrollContainer.scrollTop = itemTop + itemHeight - containerHeight;
-                        }
                     }
                 }
 
@@ -1200,9 +1199,10 @@ class Sidebar extends Component {
             subLibs.removeAttribute('hidden');
             subLibs.style.display = 'flex';
 
-            // Guarantee sidebar-content is never scrolled in normal mode
+            // Guarantee sidebar-content remains anchored to top only when not overflowing
             const scrollContainer = this.el.querySelector('.sidebar-content');
-            if (scrollContainer && scrollContainer.scrollTop !== 0) {
+            if (scrollContainer && scrollContainer.scrollHeight <= scrollContainer.clientHeight && scrollContainer.scrollTop !== 0) {
+                // Content fits within viewport, reset any accidental offset
                 scrollContainer.scrollTop = 0;
             }
 
@@ -1886,22 +1886,40 @@ class Sidebar extends Component {
 
     /**
      * =========================================================================
-     * Desktop & Web Back Button State Synchronizer
+     * Sidebar Back Button State Synchronizer
      * =========================================================================
-     * Evaluates route depth and navigation history on Desktop and Web platforms.
-     * When there is an ancestor page in the stack (router.canGoBack() is true),
-     * dynamically surfaces the sleek back button and pushes the
-     * Litefin brand logo downward with fluid spring physics.
+     * Evaluates route depth and navigation history across target platforms.
+     * Respects user preference `pref:sidebarBackButton`:
+     *   - 'all' / 'true': Available across all platforms (including TV environments)
+     *   - 'disabled' / 'never' / 'false': Explicitly hidden
+     *   - 'auto' (default): Automatically enabled for pointer-focused Desktop and Web
+     * When an ancestor route is present in navigation history (router.canGoBack()),
+     * dynamically surfaces the sleek capsule back button and repositions the
+     * Litefin brand logo downward with smooth spring transitions.
      * =========================================================================
      * @private
      */
     _updateBackButtonState() {
         if (!this.el) return;
 
-        // Dedicated mouse/pointer back control is only surfaced on Desktop and Web.
-        // TV platforms (Tizen, webOS, Android TV) use remote control Back hardware keys.
-        const isDesktopOrWeb = platformInfo.isWeb || platformInfo.isDesktop;
-        const canBack = isDesktopOrWeb && router.canGoBack();
+        // Fetch user setting for sidebar back button targeting (defaults to 'auto')
+        const pref = storage.getItem('pref:sidebarBackButton') || 'auto';
+        let isPlatformAllowed = false;
+
+        // Resolve whether the current runtime environment is eligible
+        if (pref === 'all' || pref === 'true') {
+            // Unconditionally allow on all platforms including TV systems
+            isPlatformAllowed = true;
+        } else if (pref === 'disabled' || pref === 'never' || pref === 'false') {
+            // Explicitly disabled by user
+            isPlatformAllowed = false;
+        } else {
+            // Default auto mode: pointer-driven Desktop and Web environments
+            isPlatformAllowed = platformInfo.isWeb || platformInfo.isDesktop;
+        }
+
+        // Determine if back navigation is valid for the current route stack
+        const canBack = isPlatformAllowed && router.canGoBack();
 
         // Toggle state class on parent container to trigger CSS spring transition pushing logo down
         this.el.classList.toggle('has-back-button', canBack);

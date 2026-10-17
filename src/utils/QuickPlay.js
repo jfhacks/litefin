@@ -20,6 +20,8 @@
 import { api } from '../api/index.js';
 import { eventBus } from '../core/EventBus.js';
 import { logger } from './Logger.js';
+import BackdropManager from './BackdropManager.js';
+import { imageService } from './ImageService.js';
 
 const log = logger.create('QuickPlay');
 
@@ -96,7 +98,21 @@ export async function quickPlayItem(itemOrId) {
     // fromBrowse tells App.js to PUSH the player (not replace the browse page) so
     // that stopping playback returns to the page we launched from — not a Details
     // page the user never opened.
-    eventBus.emit('player:play', { item: itemToPlay, resume, fromBrowse: true });
+    //
+    // =========================================================================
+    // Quick Play Backdrop Pre-Resolution
+    // =========================================================================
+    // Resolve backdrop URL using imageService details-backdrop parameters so the
+    // player loading screen can display the backdrop instantly upon page entry
+    // without suffering an unstyled black flash or defaulting to low resolution.
+    // =========================================================================
+    const backdropParams = imageService.getParams('details-backdrop');
+    const backdropUrl = BackdropManager.getBackdropUrl(itemToPlay, {
+        maxWidth: backdropParams.maxWidth,
+        quality: backdropParams.quality
+    });
+
+    eventBus.emit('player:play', { item: itemToPlay, resume, fromBrowse: true, backdropUrl });
     return true;
 }
 

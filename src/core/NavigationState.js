@@ -344,7 +344,19 @@ class NavigationState {
 
         // Strategy 1: Try to find element by selector (most reliable)
         if (state.focusElementSelector) {
-            const el = document.querySelector(state.focusElementSelector);
+            let el = document.querySelector(state.focusElementSelector);
+            if (!el && state.focusSectionName) {
+                // If element is not in DOM (e.g. virtualized media row), resolve via virtualRow
+                const config = focusManager._sections.get(state.focusSectionName);
+                const track = config && config.container ? config.container.querySelector('.row-items-track') : null;
+                if (track && track.__virtualRow) {
+                    const match = state.focusElementSelector.match(/data-(?:item-)?id="([^"]+)"/);
+                    const targetId = match ? match[1] : null;
+                    if (targetId) {
+                        el = track.__virtualRow.ensureItemRendered(targetId);
+                    }
+                }
+            }
             if (el) {
                 if (this._debug) {
                     log.debug('Focus restored by selector:', state.focusElementSelector);

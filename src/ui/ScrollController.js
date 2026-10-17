@@ -357,14 +357,18 @@ class ScrollController {
         // ----------------------------------------------------------------
         // Standard row-to-row transitions (~250px) utilize the base 200ms duration.
         // For large vertical transitions (e.g. hero carousel ↔ first content row
-        // at 450-700px), scale duration gently (up to 260ms max). This keeps motion
-        // brisk and responsive for TV D-pad navigation while giving the compositor
-        // adequate budget to glide with natural weight without dropping frames.
+        // at 350-700px), scale duration smoothly (300ms to 340ms). This prevents
+        // high-velocity frame-1 jerks on TV compositors, allowing the camera
+        // to glide with organic weight in one unified movement.
         // ----------------------------------------------------------------
         if (isVertical && durationToUse > 0) {
+            // Measure the absolute travel distance across the vertical axis
             const distance = Math.abs(targetScroll - currentScroll);
-            if (distance > 400) {
-                durationToUse = Math.min(260, Math.round(durationToUse * (1 + (distance - 400) / 800)));
+
+            // Transitions between hero and row (or deep row jumps) exceed 320px
+            if (distance > 320) {
+                // Scale smoothly with distance while guaranteeing a steady 300ms floor
+                durationToUse = Math.min(340, Math.max(300, Math.round(durationToUse * (1 + (distance - 320) / 400))));
             }
         }
 
@@ -463,7 +467,7 @@ class ScrollController {
                 // a fluid minimum duration floor to prevent premature fast-scroll rush.
                 const remainingDistance = Math.abs(targetScroll - currentScroll);
                 const originalDistance = Math.abs(targetScroll - this[stateKey].startScroll) || 1;
-                const scaledDuration = Math.round(duration * Math.min(remainingDistance / originalDistance, 1));
+                const scaledDuration = Math.round(durationToUse * Math.min(remainingDistance / originalDistance, 1));
 
                 // ------------------------------------------------------------
                 // MOMENTUM CONTINUITY FLOOR
@@ -473,16 +477,23 @@ class ScrollController {
                 // like an uncontrollable fast-scroll hair-trigger).
                 // Clamping the minimum retarget duration to 75% of base duration
                 // (~150ms for 200ms vertical scrolls) guarantees that deliberate
+                // multi-taps preserve fluid visual momentum.
                 // ------------------------------------------------------------
-                const minDurationFloor = Math.round(duration * 0.75);
+                const minDurationFloor = Math.round(durationToUse * 0.75);
 
+                // Update runtime tracking state to retarget from current position
                 this[stateKey].startScroll = currentScroll;
                 this[stateKey].target = targetScroll;
                 this[stateKey].startTime = null; // Will reset on next RAF
                 this[stateKey].duration = Math.max(minDurationFloor, scaledDuration);
+                this[stateKey].isLargeScroll = isVertical && Math.abs(targetScroll - currentScroll) > 320;
                 return;
             }
         }
+
+        // Flag transitions that cover substantial vertical distance (e.g. hero ↔ row)
+        // to use an S-curve easing profile rather than pure deceleration
+        const isLargeScroll = isVertical && Math.abs(targetScroll - currentScroll) > 320;
 
         // Create new animation state
         this[stateKey] = {
@@ -491,11 +502,17 @@ class ScrollController {
             startScroll: currentScroll,
             target: targetScroll,
             startTime: null, // Initialized in first RAF frame
-            duration: durationToUse
+            duration: durationToUse,
+            isLargeScroll
         };
 
-        // easeOutQuad: fast start, smooth deceleration (t * (2 - t))
+        // Standard easeOutQuad: fast start, smooth deceleration (t * (2 - t))
         const easeOutQuad = (t) => t * (2 - t);
+
+        // Smoothstep S-curve for large vertical transitions (e.g. hero carousel ↔ first content row):
+        // Starts with a gentle acceleration ramp (zero initial jerk) so frame 1 doesn't spike
+        // on TV compositors, cruises smoothly, and decelerates into landing without frame drops.
+        const easeSmoothStep = (t) => t * t * (3 - 2 * t);
 
         // SMOOTH ARRIVAL BLEND: For the last 15% of animation time, rescale
         // easeOutQuad over the remaining distance. This maintains velocity
@@ -520,11 +537,12 @@ class ScrollController {
             const elapsed = time - state.startTime;
             const progress = Math.min(elapsed / state.duration, 1);
 
-            // Unified deceleration curve: initiates instantly on frame 1 for snappy
-            // D-pad tactile response, cruises with continuous momentum, and smoothly
-            // settles to velocity = 0 at the arrival point.
-            const eased =
-                progress < EASE_BLEND
+            // For large vertical transitions (e.g. hero carousel ↔ first row), use the gentle
+            // smoothstep curve to keep initial velocity safe for TV compositing. For standard
+            // row-to-row navigation, use blended easeOutQuad for maximum responsiveness.
+            const eased = state.isLargeScroll
+                ? easeSmoothStep(progress)
+                : progress < EASE_BLEND
                     ? easeOutQuad(progress)
                     : blendAt + blendRemaining * easeOutQuad((progress - EASE_BLEND) / blendDuration);
 
@@ -649,32 +667,32 @@ class ScrollController {
         }
 
         // ---------------------------------------------------------------------
-        // 2. COLLAPSED SIDEBAR RAIL WITH LIBRARY ICONS
+        // 2. SIDEBAR CONTENT SCROLL CONTAINER
         // ---------------------------------------------------------------------
-        // When the user has enabled 'pref:showCollapsedLibraryIcons', all individual
-        // libraries are promoted to direct rail shortcuts. Because the collapsed rail
-        // may exceed screen height, we enable vertical smooth scrolling on the rail.
-        // In normal mode (without this pref), the sidebar rail items fit on screen
-        // and .sidebar-content must never scroll.
+        // On Smart TV platforms like Tizen, native browser scrolling during focus
+        // changes is disabled to prevent layout jitter. When the sidebar items
+        // overflow the screen viewport height (e.g. many custom libraries, plugin
+        // shortcuts, or low display heights), ScrollController must manage vertical
+        // scrolling directly. Returning .sidebar-content ensures focus-driven smooth
+        // scrolling works reliably across all sidebar layout configurations.
+        // Elements within #sidebar-sub-libraries were already intercepted above.
         // ---------------------------------------------------------------------
-        const sidebar = element.closest('.sidebar');
-        const showCollapsedLibIcons = storage.getItem('pref:showCollapsedLibraryIcons') === 'true' ||
-            (sidebar && sidebar.classList.contains('show-lib-icons-collapsed'));
-
-        if (showCollapsedLibIcons) {
-            const sidebarContent = element.closest('.sidebar-content');
-            if (sidebarContent) {
-                return sidebarContent;
-            }
+        const sidebarContent = element.closest('.sidebar-content');
+        if (sidebarContent) {
+            // Deliver the sidebar container reference so scroll calculations execute
+            return sidebarContent;
         }
 
         // ---------------------------------------------------------------------
         // 3. GENERIC SCROLLABLE CONTAINERS
         // ---------------------------------------------------------------------
-        // Check for specific scrollable containers used in modals/filters/login grid
+        // Inspect known scrollable container structures used in modals, filter
+        // dialogs, settings, user grids, and media info overlays.
+        // Including .filter-sidebar ensures vertical category navigation in the
+        // library filter modal scrolls smoothly on TV platforms and keyboard nav.
         // ---------------------------------------------------------------------
         const container = element.closest(
-            '.users-grid, .modal-options, .modal-body, .filter-main, .page-content, .settings-sidebar, .sidebar-libraries-wrapper, .media-info-scrollable, .identify-results-list'
+            '.users-grid, .modal-options, .modal-body, .filter-main, .filter-sidebar, .page-content, .settings-sidebar, .sidebar-libraries-wrapper, .media-info-scrollable, .identify-results-list'
         );
 
         return container;
@@ -1273,11 +1291,17 @@ class ScrollController {
                     }
                 }
 
-                // Comfort margins for top and bottom visibility.
-                // For the sidebar rail, 24px top and 32px bottom margin provides optimal viewing room
-                // and prevents items from colliding with rounded capsule curves on TV displays.
-                // For the floating sub-libraries popover, 12px padding keeps items comfortably within the popup.
-                const isSidebar = activePageContent.classList.contains('sidebar-content');
+                // -------------------------------------------------------------
+                // VIEWPORT COMFORT MARGINS
+                // -------------------------------------------------------------
+                // For navigation sidebars (.sidebar-content, .filter-sidebar),
+                // 24px top and 32px bottom margins provide optimal breathing room
+                // and keep focused buttons comfortably visible away from container edges.
+                // For the floating sub-libraries popover, 12px padding keeps items
+                // within the popup window bounds. Generic containers use 100px.
+                // -------------------------------------------------------------
+                const isSidebar = activePageContent.classList.contains('sidebar-content') ||
+                    activePageContent.classList.contains('filter-sidebar');
                 const isSubLibs = activePageContent.id === 'sidebar-sub-libraries';
                 const topMargin = isSidebar ? 24 : (isSubLibs ? 12 : GENERIC_SCROLL_MARGIN);
                 let bottomMargin = isSidebar ? 32 : (isSubLibs ? 12 : GENERIC_SCROLL_MARGIN);

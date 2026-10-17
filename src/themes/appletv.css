@@ -11,6 +11,7 @@
        Base Colors - Near black with subtle warmth
        ======================================================================== */
     --jf-background: #000000;
+    --jf-background-rgb: 0, 0, 0;
     --jf-background-alt: #1c1c1e;
     --jf-surface: #2c2c2e;
     --jf-card-bg: #3a3a3c;

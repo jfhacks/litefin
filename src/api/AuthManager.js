@@ -550,13 +550,25 @@ class AuthManager {
      * @returns {string|null} Server URL or null
      */
     getSavedServerUrl() {
-        // First check explicitly persisted server URL
+        // ====================================================================
+        // 1. Explicitly Persisted Server Configuration
+        // ====================================================================
+        // First check if the user has manually connected to and persisted a
+        // Jellyfin server URL in persistent storage.
         const saved = storage.getItem(STORAGE_KEYS.SERVER_URL);
         if (saved) {
             return saved;
         }
 
-        // In standard browser environments, infer the hosting server origin
+        // ====================================================================
+        // 2. Embedded Jellyfin Server Plugin Auto-Detection
+        // ====================================================================
+        // In browser environments, infer the parent Jellyfin server origin
+        // ONLY when running embedded inside the Jellyfin Server Plugin.
+        // The server plugin strictly routes Litefin web assets under /litefin.
+        // Standalone web builds and local dev servers (e.g., webpack serve
+        // at localhost:8080/ or localhost:8081/) are not Jellyfin instances
+        // and must fall through to show the server connection prompt.
         if (
             typeof window !== 'undefined' &&
             window.location &&
@@ -564,19 +576,23 @@ class AuthManager {
             typeof window.location.protocol === 'string' &&
             window.location.protocol.startsWith('http')
         ) {
-            // Check if the application is running under a reverse proxy or sub-path prefix
-            // (e.g., http://example.com/jellyfin/litefin)
+            // Check if the application is running under the /litefin plugin route
+            // (e.g., http://jellyfin:8096/litefin or http://example.com/prefix/litefin)
             const pathname = window.location.pathname || '';
             const litefinIdx = pathname.toLowerCase().indexOf('/litefin');
 
-            // Strip the /litefin routing segment while preserving any upstream reverse proxy path
-            const subpath = litefinIdx > 0 ? pathname.substring(0, litefinIdx) : '';
-            const detected = `${window.location.origin}${subpath}`.replace(/\/+$/, '');
+            // Only auto-resolve the server origin if running within the plugin route
+            if (litefinIdx !== -1) {
+                // Strip the /litefin routing segment while preserving any upstream reverse proxy path
+                const subpath = litefinIdx > 0 ? pathname.substring(0, litefinIdx) : '';
+                const detected = `${window.location.origin}${subpath}`.replace(/\/+$/, '');
 
-            log.info(`Auto-detected server URL from browser location: ${detected}`);
-            return detected;
+                log.info(`Auto-detected server URL from Jellyfin plugin route: ${detected}`);
+                return detected;
+            }
         }
 
+        // No server saved and not running under a Jellyfin plugin route
         return null;
     }
 
@@ -586,10 +602,20 @@ class AuthManager {
 
     /**
      * Get list of public users from the server.
+     * Ensures an Array is always returned to prevent rendering errors.
+     *
      * @returns {Promise<Array>} Public users array
      */
     async getPublicUsers() {
-        return api.getPublicUsers();
+        // =====================================================================
+        // Public User Retrieval
+        // =====================================================================
+        // Query the ApiClient for publicly displayed users. If the server
+        // returns an invalid or non-array payload, return an empty array to
+        // keep profile selection and login screens from crashing.
+        // =====================================================================
+        const users = await api.getPublicUsers();
+        return Array.isArray(users) ? users : [];
     }
 
     /**

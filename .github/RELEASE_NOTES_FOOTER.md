@@ -58,8 +58,22 @@ Native desktop builds powered by Tauri v2 with low resource usage and hardware-a
 | OS          | Available Formats                   | Notes                                                                                    |
 | :---------- | :---------------------------------- | :--------------------------------------------------------------------------------------- |
 | **Windows** | `*.exe`, `*_x64-setup.exe`, `*.msi` | Standalone executable, setup wizard, or MSI enterprise installer (Windows 10/11 64-bit). |
-| **Linux**   | `*.AppImage`, `*.deb`               | Universal standalone executable (AppImage) or native Debian/Ubuntu package (.deb).       |
+| **Linux**   | `*.AppImage`, `*.deb`, `*.rpm`      | Universal standalone (AppImage), Debian/Ubuntu (.deb), or Fedora/RHEL/openSUSE (.rpm).   |
 | **macOS**   | `*.dmg`                             | Drag-and-drop disk image installer.                                                      |
+
+#### ⌨️ Keyboard Controls (Desktop & Web)
+
+| Key / Shortcut | Action |
+| :------------- | :----- |
+| **`Space`** / **`K`** | Play / Pause toggle |
+| **`J`** / **`L`** | Seek backward / forward 10 seconds |
+| **`←`** / **`→`** | Navigate UI items or seek timeline during playback |
+| **`↑`** / **`↓`** | Navigate UI items, menus, and OSD controls |
+| **`Enter`** | Select / Activate focused item or reveal OSD |
+| **`Esc`** / **`Backspace`** | Go back / Close modal / Exit player |
+| **`F`** / **`F11`** | Toggle Fullscreen |
+| **`M`** | Mute / Unmute audio |
+| **Media Keys** | Hardware Play, Pause, Next, Previous, Stop |
 
 ---
 

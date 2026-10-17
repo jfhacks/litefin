@@ -277,29 +277,7 @@ export class VirtualCardRow {
                 }
             };
 
-            // Listen for global focus changes from FocusManager (native focus is disabled on Tizen)
-            // Ensures our spatial navigator correctly updates states in sync.
-            //
-            // PERFORMANCE: Gate the callback with track.contains() FIRST so that
-            // only the row that actually owns the focused element does any DOM
-            // traversal or CSS property writes.
-            this._focusUnsubscribe = eventBus.on('focus:changed', (element) => {
-                if (this.track.contains(element)) {
-                    handleFocus(element);
-                } else {
-                    // Focus left this row — reset expansion state, but only if
-                    // it was active (avoid redundant CSS property write + recalc)
-                    if (this.track.style.getPropertyValue('--focused-index') !== '-1') {
-                        this.track.style.setProperty('--focused-index', -1);
-                    }
-                }
-            });
-
-            // Native focus/mouse listeners.
-            this.track.addEventListener('focusin', (e) => handleFocus(e.target));
-            this.track.addEventListener('mousedown', (e) => handleFocus(e.target));
-
-            // Mouseover hover listener:
+            // Mouseover hover listener for expanding posters
             this.track.addEventListener('mouseover', (e) => {
                 const card = e.target.closest('.media-card');
                 if (card && this.track.contains(card)) {
@@ -307,12 +285,77 @@ export class VirtualCardRow {
                 }
             });
 
-            // Focusout listener to reset sibling translation shifts.
+            // Focusout listener to reset sibling translation shifts
             this.track.addEventListener('focusout', (e) => {
                 if (!e.relatedTarget || !this.track.contains(e.relatedTarget)) {
                     if (this.track.style.getPropertyValue('--focused-index') !== '-1') {
                         this.track.style.setProperty('--focused-index', -1);
                     }
+                }
+            });
+        }
+
+        // =========================================================================
+        // GLOBAL FOCUS LISTENER FOR VIRTUAL CARD ROW WINDOW SYNC
+        // =========================================================================
+        // Listens for global focus changes from FocusManager (native focus disabled on Tizen).
+        // When any card within this row track receives focus (via remote D-pad,
+        // pointer activation, or back-navigation focus restoration), we ensure
+        // internal index tracking is aligned and the sliding window renders
+        // the target card plus a healthy forward buffer of subsequent items.
+        // =========================================================================
+        this._focusUnsubscribe = eventBus.on('focus:changed', (element) => {
+            // Guard: Automatically clean up subscription if this track is no longer attached to DOM
+            if (!document.contains(this.track)) {
+                if (typeof this._focusUnsubscribe === 'function') {
+                    this._focusUnsubscribe();
+                    this._focusUnsubscribe = null;
+                }
+                return;
+            }
+
+            // Verify the focused element belongs strictly to this row track
+            if (this.track.contains(element)) {
+                const card = element.closest('.media-card');
+                if (card) {
+                    const index = parseInt(card.getAttribute('data-virtual-index') || card.dataset.virtualIndex, 10);
+                    if (!isNaN(index)) {
+                        this.currentIndex = index;
+                        this._updateWindow(this.currentIndex);
+                    }
+                }
+
+                // If running expanding poster layout, trigger expansion styling and asset loading
+                if (isExpanding && typeof handleFocus === 'function') {
+                    handleFocus(element);
+                }
+            } else if (isExpanding) {
+                // Focus left this row — reset expansion state, but only if
+                // it was active (avoid redundant CSS property write + recalc)
+                if (this.track.style.getPropertyValue('--focused-index') !== '-1') {
+                    this.track.style.setProperty('--focused-index', -1);
+                }
+            }
+        });
+
+        // Native focusin listener for mouse or direct browser focus events
+        this.track.addEventListener('focusin', (e) => {
+            const card = e.target.closest('.media-card');
+            if (card && this.track.contains(card)) {
+                const index = parseInt(card.getAttribute('data-virtual-index') || card.dataset.virtualIndex, 10);
+                if (!isNaN(index)) {
+                    this.currentIndex = index;
+                    this._updateWindow(this.currentIndex);
+                }
+                if (isExpanding && typeof handleFocus === 'function') {
+                    handleFocus(e.target);
+                }
+            }
+        });
+        if (isExpanding) {
+            this.track.addEventListener('mousedown', (e) => {
+                if (typeof handleFocus === 'function') {
+                    handleFocus(e.target);
                 }
             });
         }
@@ -483,17 +526,19 @@ export class VirtualCardRow {
         // ---------------------------------------------------------------------
         // Interactive Scroll Navigation Arrows
         // ---------------------------------------------------------------------
-        // Render left/right scroll arrow controls for mouse/pointer driven
-        // environments (Web browsers, Desktop Tauri app, and WebOS Magic Remote)
+        // Render left/right scroll arrow controls across all platforms
         // whenever the row contains more cards than fit within the initial view.
+        // These arrow buttons are styled with opacity: 0 and tabindex="-1" so they
+        // remain completely unobtrusive for remote D-pad navigation, but smoothly
+        // reveal whenever a user moves or hovers a mouse/pointer over the row.
         // ---------------------------------------------------------------------
-        if ((platformInfo.isWeb || platformInfo.isDesktop || platformInfo.isWebOS) && this.totalItems > 4) {
+        if (this.totalItems > 4) {
             this._injectScrollArrows();
         }
     }
 
     /**
-     * Injects left/right navigation arrows for web users.
+     * Injects left/right navigation arrows for pointer and mouse interaction.
      */
     _injectScrollArrows() {
         const sectionEl = this.track.parentElement?.parentElement;
@@ -662,10 +707,14 @@ export class VirtualCardRow {
             start = 0;
             end = this.totalItems - 1;
         } else {
+            // Compute sliding window boundaries
+            // We maintain a backward buffer behind centerIndex to avoid eviction flicker
+            // when navigating left, and a full visibleCount forward buffer ahead of centerIndex
+            // so the entire viewport to the right of the focused card is populated and eager-loaded.
             start = Math.max(0, centerIndex - this.bufferZone);
-            end = Math.min(this.totalItems - 1, centerIndex + this.bufferZone);
+            end = Math.min(this.totalItems - 1, centerIndex + this.visibleCount);
 
-            // Ensure we always render exactly visibleCount items if possible.
+            // Ensure we always render at least visibleCount items if totalItems allows it.
             // Symmetrically expand it to the right (if bounded left) or left (if bounded right).
             const currentSize = end - start + 1;
             if (currentSize < this.visibleCount) {
@@ -861,14 +910,58 @@ export class VirtualCardRow {
     }
 
     /**
-     * Resets internal index tracking back to an existing DOM node.
-     * Needed when focus jumps to this row from another vertical section.
+     * Resets internal index tracking back to an existing DOM node and updates window.
+     * Needed when focus jumps to this row from another vertical section or focus restoration.
      * @param {HTMLElement} targetNode
      */
     syncIndexFromNode(targetNode) {
         if (targetNode && targetNode.dataset && targetNode.dataset.virtualIndex !== undefined) {
-            this.currentIndex = parseInt(targetNode.dataset.virtualIndex, 10);
+            const index = parseInt(targetNode.dataset.virtualIndex, 10);
+            if (!isNaN(index)) {
+                this.currentIndex = index;
+                this._updateWindow(this.currentIndex);
+            }
         }
+    }
+
+    /**
+     * =========================================================================
+     * ENSURE ITEM AND FORWARD BUFFER ARE RENDERED
+     * =========================================================================
+     * Guarantees that the specified card (by ID or index) and a full forward buffer
+     * of subsequent items are rendered into the DOM with eager image loading.
+     *
+     * Without rendering the forward buffer, focus restoration lands on a card at
+     * the end of the initial boot window, leaving the rest of the row to the right
+     * completely blank and unpopulated until subsequent navigation occurs.
+     *
+     * @param {string|number} target - Item ID or numeric index to locate
+     * @returns {HTMLElement|null} The resolved card element in the DOM
+     * =========================================================================
+     */
+    ensureItemRendered(target) {
+        if (target === undefined || target === null) return null;
+
+        let index = -1;
+        if (typeof target === 'number') {
+            index = target;
+        } else {
+            const targetStr = String(target).replace(/-/g, '').toLowerCase();
+            index = this.items.findIndex((item) => {
+                const id = String(item.Id || item.id || '').replace(/-/g, '').toLowerCase();
+                return id === targetStr;
+            });
+        }
+
+        // Return null if item cannot be resolved within this row collection
+        if (index < 0 || index >= this.totalItems) {
+            return null;
+        }
+
+        // Synchronize index and render target card plus forward buffer ahead
+        this.currentIndex = index;
+        this._updateWindow(this.currentIndex);
+        return this.domNodes.get(this.currentIndex) || null;
     }
 
     /**

@@ -10,6 +10,7 @@
 import { logger } from '../../utils/Logger.js';
 import { PlayerSettings } from '../../utils/PlayerSettings.js';
 import { BaseProfile } from './BaseProfile.js';
+import { webCodecsProbe } from '../../utils/WebCodecsProbe.js';
 
 const log = logger.create('WebProfile');
 
@@ -256,12 +257,18 @@ export function buildJellyfinProfile(options = {}) {
             ? false
             : (isMovi ? true : caps.hevc);
 
+    // Movi decodes AV1 through WebCodecs, which some engines advertise but cannot decode (WebKitGTK/WPE
+    // up to 2.54.0, see WebCodecsProbe). When the startup probe shows that, Movi leaves AV1 out, while
+    // the HTML5 backend still offers it through the media element's own decoders. Needed only until
+    // WebKitGTK/WPE releases with the AV1 fixes ship (bugs 327481 and 327483, suggested for 2.54); on
+    // those releases the probe passes and Movi plays AV1 again.
+    const av1Decodes = webCodecsProbe.av1Decodes !== false;
     const av1Setting = PlayerSettings.get('enableAV1');
     const enableAV1 = av1Setting === 'enable'
         ? true
         : av1Setting === 'disable'
             ? false
-            : (isMovi ? true : caps.av1);
+            : (isMovi ? av1Decodes : caps.av1);
 
     const vp9Setting = PlayerSettings.get('enableVP9');
     const enableVP9 = vp9Setting === 'enable'
@@ -547,8 +554,10 @@ export function buildJellyfinProfile(options = {}) {
     const forceFmp4Hls = enableFmp4Hls && PlayerSettings.get('forceFmp4HlsContainer');
     const primaryHlsContainer = forceFmp4Hls ? 'mp4' : 'ts';
 
+    const transAudioProfileCodecs = BaseProfile.getTranscodeAudioCodecs(transAudioCodecsArr);
+
     // 1. Primary HLS video transcoding profile (one for each codec in transAudioCodecsArr)
-    for (const audioCodec of transAudioCodecsArr) {
+    for (const audioCodec of transAudioProfileCodecs) {
         transcodingProfiles.push({
             Container: primaryHlsContainer,
             Type: 'Video',
@@ -572,7 +581,7 @@ export function buildJellyfinProfile(options = {}) {
     // If primary was TS, push fMP4 (mp4) secondary so modern web codecs (AV1, VP9)
     // can still be played via HLS direct stream when requested.
     if (!forceFmp4Hls) {
-        for (const audioCodec of transAudioCodecsArr) {
+        for (const audioCodec of transAudioProfileCodecs) {
             transcodingProfiles.push({
                 Container: 'mp4',
                 Type: 'Video',
@@ -589,7 +598,7 @@ export function buildJellyfinProfile(options = {}) {
         }
     } else {
         // If fMP4 was primary, keep MPEG-TS as secondary fallback
-        for (const audioCodec of transAudioCodecsArr) {
+        for (const audioCodec of transAudioProfileCodecs) {
             transcodingProfiles.push({
                 Container: 'ts',
                 Type: 'Video',

@@ -114,6 +114,26 @@ test('ApiClient._handleError suppresses api:unauthorized for authentication endp
     });
     assert.equal(emittedEvents.length, 1, 'Must emit api:unauthorized for genuine authenticated session expiry');
     assert.equal(emittedEvents[0].name, 'api:unauthorized');
+
+    // Scenario 6: Inaccessible collection or restricted container query with ParentId
+    // When a collection/library is restricted to a user, Jellyfin returns 401 for that resource.
+    // This represents a resource access denial, NOT an expired session.
+    await runHandleError({
+        status: 401,
+        endpoint: '/Items',
+        options: { params: { ParentId: 'restricted-collection-uuid-123' } },
+        accessToken: 'active-session-token-abc'
+    });
+    assert.equal(emittedEvents.length, 0, 'Must not emit api:unauthorized for ParentId container permission denial');
+
+    // Scenario 7: Inaccessible playlist query
+    await runHandleError({
+        status: 401,
+        endpoint: '/Playlists/restricted-playlist-uuid-456/Items',
+        options: {},
+        accessToken: 'active-session-token-abc'
+    });
+    assert.equal(emittedEvents.length, 0, 'Must not emit api:unauthorized for Playlists resource permission denial');
 });
 
 test('AuthManager._onUnauthorized preserves active session during login attempts and probes', () => {

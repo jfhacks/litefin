@@ -511,12 +511,28 @@ export function buildJellyfinProfile(options = {}) {
     // Therefore, when the user explicitly requests 'prefer_aac' or 'prefer_ac3',
     // conflicting higher-priority codecs must NOT be advertised in TranscodingProfiles.
     // =========================================================================
+    // =========================================================================
+    // EAC3 Support & Force Overrides
+    // =========================================================================
+    // Samsung TVs below Tizen 6 (Tizen 2.4 - 5.5) fail to decode EAC3 within HLS/TS
+    // streams on native AVPlay, resulting in silent playback (no audio).
+    // The HTML5 backend handles it fine, and Tizen 6+ AVPlay decodes it natively.
+    // Therefore, EAC3 is excluded from HLS transcoding/remuxing on Tizen < 6 by default,
+    // allowing the server to safely transcode to AC3.
+    //
+    // If the user explicitly forces EAC3 on (via enableEac3 === 'enable' or
+    // transcodeAudioCodec === 'force_eac3'), we honor the override even on Tizen < 6.
+    // =========================================================================
+    const eac3Setting = PlayerSettings.get('enableEac3');
+    const forceEac3 = eac3Setting === 'enable' || preferredTranscodeCodec === 'force_eac3';
+    const disableEac3 = eac3Setting === 'disable';
+    const allowEac3 = caps.eac3 && !disableEac3 && (isHtml5 || caps.tizenVersion >= 6 || forceEac3);
+
     if (preferredTranscodeCodec === 'auto') {
-        // Auto (Prefer E-AC3): EAC3 in HLS/TS produces no audio on Tizen < 6 AVPlay (silent playback).
-        // The HTML5 backend handles it fine, and Tizen 6+ AVPlay decodes it natively.
-        // If the user explicitly forced EAC3 on via enableEac3 setting, honor it.
-        const forceEac3 = PlayerSettings.get('enableEac3') === 'enable';
-        if (caps.eac3 && (isHtml5 || caps.tizenVersion >= 6 || forceEac3)) transAudioCodecsArr.push('eac3');
+        // Auto (Prefer E-AC3 on Tizen 6+ or HTML5):
+        // EAC3 in HLS/TS produces no audio on Tizen < 6 AVPlay (silent playback).
+        // Only include eac3 if allowed (Tizen 6+, HTML5, or explicitly forced by user).
+        if (allowEac3) transAudioCodecsArr.push('eac3');
         if (caps.ac3) transAudioCodecsArr.push('ac3');
         if (supportsMp2) transAudioCodecsArr.push('mp2');
         transAudioCodecsArr.push('aac', 'mp3');
@@ -650,18 +666,22 @@ export function buildJellyfinProfile(options = {}) {
         // EAC3 Stream-Copy Preservation during Remux
         // =====================================================================
         // In remux mode (e.g. recovering from a DirectPlay seek failure or container change),
-        // FFmpeg is in stream-copy mode. If the hardware supports EAC3, we must advertise
-        // eac3 in TranscodingProfiles so Jellyfin server can pass the audio track through
-        // losslessly (-c:a copy). Excluding it causes the server StreamBuilder to raise
-        // TranscodeReasons=AudioCodecNotSupported and re-encode to AC3.
-        // We only add EAC3 if the user has not explicitly configured a strict transcode codec.
+        // FFmpeg is in stream-copy mode. On Tizen 6+ (or HTML5), AVPlay can decode EAC3
+        // inside HLS, so we advertise eac3 in TranscodingProfiles to allow lossless
+        // stream-copy (-c:a copy).
+        //
+        // On Tizen < 6, AVPlay produces silent playback with EAC3 in HLS/TS. Therefore,
+        // EAC3 is strictly excluded below Tizen 6 by default, allowing the server to
+        // safely transcode the audio to AC3.
+        // However, if the user explicitly forced EAC3 via 'enableEac3' or 'force_eac3',
+        // we honor the override and allow EAC3 through anyway.
         // =====================================================================
         const userStrictTranscode = preferredTranscodeCodec === 'prefer_ac3' ||
             preferredTranscodeCodec === 'prefer_aac' ||
             preferredTranscodeCodec === 'force_ac3' ||
             preferredTranscodeCodec === 'force_aac' ||
             preferredTranscodeCodec === 'force_mp3';
-        if (caps.eac3 && !userStrictTranscode && !transAudioCodecsArr.includes('eac3')) {
+        if (allowEac3 && !userStrictTranscode && !transAudioCodecsArr.includes('eac3')) {
             transAudioCodecsArr.unshift('eac3');
         }
     } else if (playbackMode === 'transcodeAudio') {
@@ -716,8 +736,10 @@ export function buildJellyfinProfile(options = {}) {
             ? PlayerSettings.get('html5SegmentLength') || 2
             : PlayerSettings.get('tizenSegmentLength') || 6);
 
+    const transAudioProfileCodecs = BaseProfile.getTranscodeAudioCodecs(transAudioCodecsArr);
+
     // 1. Primary HLS video transcoding profile (one for each codec in transAudioCodecsArr)
-    for (const audioCodec of transAudioCodecsArr) {
+    for (const audioCodec of transAudioProfileCodecs) {
         transcodingProfiles.push({
             /*
              * Primary HLS video transcoding profile.
@@ -815,7 +837,7 @@ export function buildJellyfinProfile(options = {}) {
     // If forceFmp4Hls is true, the primary profile above is already mp4, so
     // there is nothing extra to push here — avoid a duplicate.
     if (supportsFmp4Hls && !forceFmp4Hls) {
-        for (const audioCodec of transAudioCodecsArr) {
+        for (const audioCodec of transAudioProfileCodecs) {
             transcodingProfiles.push({
                 Container: 'mp4',
                 Type: 'Video',

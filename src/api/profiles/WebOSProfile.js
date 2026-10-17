@@ -742,8 +742,10 @@ export function buildJellyfinProfile(options = {}) {
             ? PlayerSettings.get('html5SegmentLength') || 2
             : PlayerSettings.get('webosSegmentLength') || 6);
 
+    const transAudioProfileCodecs = BaseProfile.getTranscodeAudioCodecs(transAudioCodecsArr);
+
     // Primary HLS video transcoding profile (one for each codec in transAudioCodecsArr)
-    for (const audioCodec of transAudioCodecsArr) {
+    for (const audioCodec of transAudioProfileCodecs) {
         transcodingProfiles.push({
             /*
              * Primary HLS video transcoding profile.
@@ -838,7 +840,7 @@ export function buildJellyfinProfile(options = {}) {
     // fMP4 is not already the primary container (no duplicate).
     // DOVI content no longer mandates fMP4 — it routes fine via TS.
     if (supportsFmp4Hls && primaryHlsContainer !== 'mp4') {
-        for (const audioCodec of transAudioCodecsArr) {
+        for (const audioCodec of transAudioProfileCodecs) {
             transcodingProfiles.push({
                 Container: 'mp4',
                 Type: 'Video',

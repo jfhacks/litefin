@@ -49,12 +49,18 @@
     backface-visibility: hidden;
 }
 
-/* Transparent collapsed sidebar with subtle left-to-right linear gradient fade */
+/* 
+ * Transparent Collapsed Sidebar:
+ * Provides true transparent background across all theme modes (Classic Dark,
+ * Classic Light, Tinted, Ambient, etc.). Eliminates the hardcoded black gradient
+ * that caused an artificial dark bar on non-ambient pages such as the library.
+ */
 .sidebar.transparent-collapsed:not(.expanded):not(:hover),
 body.sidebar-mode-collapsed .sidebar.transparent-collapsed,
 body.sidebar-mode-hidden .sidebar.transparent-collapsed {
-    background: -webkit-linear-gradient(left, rgba(0, 0, 0, 0.65) 0%, rgba(0, 0, 0, 0.15) 75%, rgba(0, 0, 0, 0) 100%) !important;
-    background: linear-gradient(90deg, rgba(0, 0, 0, 0.65) 0, rgba(0, 0, 0, 0.15) 75%, transparent) !important;
+    background: transparent !important;
+    background-color: transparent !important;
+    background-image: none !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
     box-shadow: none !important;

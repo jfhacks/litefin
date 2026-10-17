@@ -6,6 +6,7 @@
  */
 
 import { PlayerSettings } from './PlayerSettings.js';
+import { getFallbackFontFamily, getFallbackFontName } from './FallbackFonts.js';
 
 /**
  * Convert HEX color to RGBA
@@ -232,6 +233,10 @@ export function getTextStyles(isHdr = false) {
     // Options: default, typewriter, print, console, cursive, casual, smallcaps
     // ========================================================================
     const font = PlayerSettings.get('subtitleFont') || '';
+    styles.push({
+        name: 'fontFamily',
+        value: getFallbackFontName(font) ? `"${getFallbackFontFamily(font)}", sans-serif` : ''
+    });
 
     switch (font) {
         case 'typewriter':
@@ -442,11 +447,20 @@ export function getSecondaryWindowStyles() {
     const styles = [];
     const posSetting = PlayerSettings.get('secondarySubtitleVerticalPosition') || 'custom';
 
+    /*
+     * ========================================================================
+     * Secondary Subtitle Positioning Logic
+     * ========================================================================
+     * Secondary subtitles default to custom absolute top percentage positioning.
+     * Setting 'bottom: auto' explicitly neutralizes any primary subtitle bottom
+     * anchor inherited from the base .subtitle-overlay class.
+     * ========================================================================
+     */
     if (posSetting === 'custom') {
         // Custom: absolute % from top of screen (Standard for secondary)
         const customPos = PlayerSettings.get('secondarySubtitleVerticalPositionCustom') ?? 10;
         styles.push({ name: 'top', value: `${customPos}%` });
-        styles.push({ name: 'bottom', value: '' });
+        styles.push({ name: 'bottom', value: 'auto' });
     } else {
         let pos = parseFloat(posSetting);
         // Fallback or legacy preset handling
@@ -455,10 +469,10 @@ export function getSecondaryWindowStyles() {
         if (pos >= 0) {
             // Top-anchored position
             styles.push({ name: 'top', value: _getResponsiveHeight(0.02) });
-            styles.push({ name: 'bottom', value: '' });
+            styles.push({ name: 'bottom', value: 'auto' });
         } else {
             // Bottom-anchored position
-            styles.push({ name: 'top', value: '' });
+            styles.push({ name: 'top', value: 'auto' });
             styles.push({ name: 'bottom', value: _getResponsiveHeight(0.02) });
         }
     }
@@ -597,6 +611,8 @@ export default {
     },
     getFontFamily: (settingKey = 'subtitleFont') => {
         const font = PlayerSettings.get(settingKey) || '';
+        const fallbackFamily = getFallbackFontFamily(font);
+        if (fallbackFamily) return fallbackFamily;
         switch (font) {
             case 'typewriter':
                 return 'Courier Prime';

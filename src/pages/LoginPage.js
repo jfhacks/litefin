@@ -830,9 +830,16 @@ class LoginPage extends Page {
                 return;
             }
 
-            // Get public users
-            this._users = await api.getPublicUsers();
+            // =================================================================
+            // Public Users Retrieval
+            // =================================================================
+            // Fetch publicly listed user profiles from the server. Ensure the
+            // returned value is an actual Array before inspecting length or mapping.
+            // =================================================================
+            const publicUsers = await api.getPublicUsers();
+            this._users = Array.isArray(publicUsers) ? publicUsers : [];
 
+            // If public users exist, render cards; otherwise redirect to manual login
             if (this._users.length > 0) {
                 this._renderUsers();
                 this._showState(STATE.USERS);
@@ -1020,9 +1027,17 @@ class LoginPage extends Page {
                 return;
             }
 
-            // Get public users
-            this._users = await api.getPublicUsers();
+            // =================================================================
+            // Public Users Retrieval
+            // =================================================================
+            // Fetch publicly visible user profiles for display on login grid.
+            // Defensive array validation prevents runtime crashes if the server
+            // returns an unexpected format or string payload.
+            // =================================================================
+            const publicUsers = await api.getPublicUsers();
+            this._users = Array.isArray(publicUsers) ? publicUsers : [];
 
+            // If public users exist, render cards; otherwise redirect to manual entry
             if (this._users.length > 0) {
                 this._renderUsers();
                 this._showState(STATE.USERS);
@@ -1048,6 +1063,18 @@ class LoginPage extends Page {
     }
 
     _renderUsers() {
+        // =====================================================================
+        // Safeguard Users List
+        // =====================================================================
+        // Validate that this._users is an actual Array before executing .map().
+        // If an invalid type was supplied, fall back to an empty array to prevent
+        // TypeError: this._users.map is not a function.
+        // =====================================================================
+        if (!Array.isArray(this._users)) {
+            log.warn('LoginPage: _renderUsers invoked with non-array _users data', this._users);
+            this._users = [];
+        }
+
         const isModern = layoutManager.isModern();
         const html = this._users
             .map((user, index) => {
@@ -1367,7 +1394,8 @@ class LoginPage extends Page {
             this._cancelQuickConnect();
             return true;
         } else if (this._state === STATE.PASSWORD) {
-            if (this._users.length > 0) {
+            // Check that users array is populated before navigating back to USERS view
+            if (Array.isArray(this._users) && this._users.length > 0) {
                 this._showState(STATE.USERS);
                 this.setActiveSection('login-users');
 

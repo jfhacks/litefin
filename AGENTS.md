@@ -67,12 +67,12 @@ npm run package:webos-ultra-legacy             # webOS Ultra-Legacy package (.ip
 npm run package:webos-ultra-legacy-no-service  # webOS Ultra-Legacy without discovery service
 
 # Desktop (Tauri v2)
-npm run package:desktop                 # Host OS release bundle (.exe/.msi, .deb/.AppImage, .dmg)
+npm run package:desktop                 # Host OS release bundle (.exe/.msi, .deb/.AppImage/.rpm, .dmg)
 npm run package:desktop-debug           # Host OS debug bundle with console logging enabled
 npm run package:windows                 # Windows release installer (.exe) & MSI (.msi)
 npm run package:windows-debug           # Windows debug installer with DevTools
-npm run package:linux                   # Linux release package (.deb) & standalone (.AppImage)
-npm run package:linux-debug             # Linux debug package (.deb) / (.AppImage)
+npm run package:linux                   # Linux release package (.deb, .rpm) & standalone (.AppImage)
+npm run package:linux-debug             # Linux debug package (.deb / .rpm) / (.AppImage)
 npm run package:macos                   # macOS release disk image (.dmg)
 npm run package:macos-debug             # macOS debug disk image (.dmg)
 
@@ -100,7 +100,7 @@ npm run move:tauri                      # Move compiled Tauri artifacts to proje
 ### Clean
 
 ```bash
-npm run clean              # Removes dist/, *.wgt, *.ipk, *.apk, *.exe, *.msi, *.deb, *.AppImage, *.dmg, src-tauri/target/
+npm run clean              # Removes dist/, *.wgt, *.ipk, *.apk, *.exe, *.msi, *.deb, *.AppImage, *.rpm, *.dmg, src-tauri/target/
 ```
 
 

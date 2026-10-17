@@ -19,7 +19,9 @@ import { androidAdapter } from '../android/AndroidAdapter.js';
 import { desktopAdapter } from '../desktop/DesktopAdapter.js';
 import { webAdapter } from '../web/WebAdapter.js';
 import { platformInfo } from '../utils/PlatformInfo.js';
+import { webCodecsProbe } from '../utils/WebCodecsProbe.js';
 import { layoutManager } from '../ui/LayoutManager.js';
+import { isFallbackFont } from '../utils/FallbackFonts.js';
 import { i18n } from '../utils/i18n.js';
 import { syncPlayGroupMenu } from './syncplay/SyncPlayGroupMenu.js';
 import { exitDialog } from '../ui/ExitDialog.js';
@@ -117,6 +119,11 @@ class App {
             webAdapter.init();
         }
 
+        // 1.6.1. Probe WebCodecs AV1 decoding in the background (Movi backend on desktop and web)
+        if ((platformInfo.isDesktop || platformInfo.isWeb) && platformInfo.hasWebCodecsSupport) {
+            webCodecsProbe.probeAV1();
+        }
+
         // 1.7. Initialize Image Cache — opens IndexedDB for homepage blob caching
         // Non-blocking: runs in background, cache degrades gracefully if unavailable
         imageCache.init().catch((err) => log.warn('ImageCache init failed:', err));
@@ -178,9 +185,9 @@ class App {
         await Promise.all([i18nPromise, authPromise]);
 
         // Load UI font if it requires server fallback font
-        if (state.get('user:authenticated') && layoutManager.getUiFont() === 'fallback-font') {
+        if (state.get('user:authenticated') && isFallbackFont(layoutManager.getUiFont())) {
             import('../utils/FontLoader.js').then((module) => {
-                module.default.loadFont('fallback-font');
+                module.default.loadFont(layoutManager.getUiFont());
             });
         }
 
@@ -647,9 +654,9 @@ class App {
             log.info('User logged in - initializing plugin manager');
 
             // If the UI font is fallback-font, load it now that we are authenticated
-            if (layoutManager.getUiFont() === 'fallback-font') {
+            if (isFallbackFont(layoutManager.getUiFont())) {
                 import('../utils/FontLoader.js').then((module) => {
-                    module.default.loadFont('fallback-font');
+                    module.default.loadFont(layoutManager.getUiFont());
                 });
             }
 

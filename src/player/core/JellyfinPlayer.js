@@ -23,9 +23,10 @@ import { buildJellyfinProfile, getDeviceCapabilities } from '../../api/DevicePro
 import SubtitleManager, { DeliveryMethod } from './SubtitleManager.js';
 import { logger } from '../../utils/Logger.js';
 import { PlayerSettings } from '../../utils/PlayerSettings.js';
-import { api } from '../../api/index.js';
+import { api, auth } from '../../api/index.js';
 import { storage } from '../../utils/StorageService.js';
 import { prewarmManager } from './PrewarmManager.js';
+import { webCodecsProbe } from '../../utils/WebCodecsProbe.js';
 import { languageManager } from '../../utils/LanguageManager.js';
 import { AUDIO_FALLBACK_STORAGE_KEYS } from '../../utils/AudioFallbackConfig.js';
 
@@ -398,6 +399,361 @@ export function isAudioTrackNativelyPlayable(track, mediaSource = null, backendT
 }
 
 /**
+ * Matches media stream languages across 2-letter ISO, 3-letter ISO, and regional prefixes
+ * using the centralized LanguageManager cache.
+ *
+ * @param {string} trackLang - Language tag on the media stream (e.g. 'eng', 'en', 'en-US')
+ * @param {string} targetLanguage - Target language tag to match against
+ * @returns {boolean} True if the languages represent a match
+ */
+export const isLanguageMatch = (trackLang, targetLanguage) => {
+    // Immediate validation guard: return false if either parameter is missing or empty
+    if (!trackLang || !targetLanguage) return false;
+
+    // Normalize both strings to lowercase trimmed tokens for consistent baseline comparison
+    const cleanTrack = String(trackLang).trim().toLowerCase();
+    const cleanTarget = String(targetLanguage).trim().toLowerCase();
+
+    // Exact raw token match
+    if (cleanTrack === cleanTarget) return true;
+
+    // Compare normalized ISO codes via languageManager utility
+    if (typeof languageManager !== 'undefined' && typeof languageManager?.normalizeLanguage === 'function') {
+        const normTrack = languageManager.normalizeLanguage(cleanTrack);
+        const normTarget = languageManager.normalizeLanguage(cleanTarget);
+        if (normTrack && normTarget) {
+            // Check 3-letter ISO code match (e.g. 'eng' vs 'eng')
+            if (normTrack.code && normTarget.code && normTrack.code.toLowerCase() === normTarget.code.toLowerCase()) {
+                return true;
+            }
+            // Check 2-letter ISO code match (e.g. 'en' vs 'en')
+            if (normTrack.twoLetter && normTarget.twoLetter && normTrack.twoLetter.toLowerCase() === normTarget.twoLetter.toLowerCase()) {
+                return true;
+            }
+        }
+    }
+
+    // Fallback prefix check for regional locale tags (e.g. 'en-US' matching 'en')
+    if (cleanTrack.length >= 2 && cleanTarget.length >= 2 && cleanTrack.slice(0, 2) === cleanTarget.slice(0, 2)) {
+        return true;
+    }
+
+    return false;
+};
+
+/**
+ * Determine if a subtitle stream is flagged or designated as forced.
+ * Inspects Matroska / MP4 container disposition flags (IsForced, Forced) as well as
+ * track titles and localized display names for common 'forced' descriptor patterns.
+ *
+ * @param {Object} stream - Subtitle stream metadata object
+ * @returns {boolean} True if the track is forced
+ */
+/**
+ * Resolves the effective subtitle mode taking into account the server user's
+ * configured SubtitleMode when Litefin is set to 'Default' (Server Preference).
+ *
+ * @param {string} [mode] - Active client subtitle mode setting
+ * @returns {string} Effective subtitle mode ('None', 'OnlyForced', 'Default', 'Always', 'Smart')
+ */
+export function getEffectiveSubtitleMode(mode) {
+    // Retrieve currently active client subtitle playback mode
+    const activeMode = mode || PlayerSettings.get('subtitleMode') || 'Default';
+
+    // If client mode is 'Default' (Server Preference), defer to the server user's profile
+    if (activeMode === 'Default') {
+        const currentUser = auth?.getCurrentUser?.();
+        const serverMode = currentUser?.Configuration?.SubtitleMode;
+        if (serverMode && serverMode !== 'Default') {
+            return serverMode;
+        }
+    }
+    return activeMode;
+}
+
+/**
+ * Determine if a subtitle stream is flagged or designated as forced.
+ * Inspects Matroska / MP4 container disposition flags (IsForced, Forced) as well as
+ * track titles and localized display names for common 'forced' descriptor patterns.
+ *
+ * Note: Never test LocalizedForced as Jellyfin attaches static localized label tokens to all streams.
+ *
+ * @param {Object} stream - Subtitle stream metadata object
+ * @returns {boolean} True if the track is forced
+ */
+export function isForcedStream(stream) {
+    // Guard against null or non-object stream representations
+    if (!stream || typeof stream !== 'object') return false;
+
+    // Container-level boolean disposition flags
+    if (stream.IsForced === true || stream.Forced === true) return true;
+
+    // Word-boundary regex search across title and display title
+    // e.g. "English (Forced)", "Forced Subtitles", "French [Forced]"
+    const title = stream.Title || '';
+    const displayTitle = stream.DisplayTitle || '';
+
+    // Word-boundary check ensures tracks with words like 'reinforce' aren't falsely flagged
+    return /\bforced\b/i.test(title) || /\bforced\b/i.test(displayTitle);
+}
+
+/**
+ * Automatically resolve the target subtitle track for a media source
+ * based on user subtitle mode, preferred subtitle language, and active audio language.
+ *
+ * Handles all SubtitleMode values:
+ * - 'None': Subtitles explicitly turned off (-1).
+ * - 'Default': Container/server default subtitle track, or first default/forced track (-1 if none).
+ * - 'OnlyForced': Forced tracks only, prioritizing preferred subtitle language, then active audio language (-1 if none).
+ * - 'Always': First track matching preferred subtitle language (or first default/available track).
+ * - 'Smart': Subtitle matching preferred language if audio language differs; forced track if audio matches (-1 if none).
+ *
+ * @param {Object} mediaSource - Jellyfin MediaSource object containing MediaStreams
+ * @param {Object} [options] - Resolution options
+ * @param {number} [options.audioStreamIndex] - Resolved active audio stream index
+ * @param {string} [options.subtitleMode] - Subtitle mode override (defaults to PlayerSettings)
+ * @param {string} [options.prefLang] - Preferred subtitle language override
+ * @returns {number} Resolved stream index, or -1 if subtitles should remain off
+ */
+export function resolveSubtitleStream(mediaSource, options = {}) {
+    // -------------------------------------------------------------------------
+    // 1. MediaSource & Stream Validation
+    // -------------------------------------------------------------------------
+    // Guard against missing media source or malformed streams inventory
+    if (!mediaSource || !Array.isArray(mediaSource.MediaStreams)) {
+        return -1;
+    }
+
+    // Retrieve user subtitle mode setting (None, Default, OnlyForced, Always, Smart)
+    // Resolves server-level user preference when client is configured for 'Default' (Server Preference)
+    const rawMode = options.subtitleMode || PlayerSettings.get('subtitleMode') || 'Default';
+    const subtitleMode = getEffectiveSubtitleMode(rawMode);
+
+    // Subtitle Mode 'None' strictly commands subtitles to remain off (-1)
+    if (subtitleMode === 'None') {
+        return -1;
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. PGS Subtitle Filter Guard
+    // -------------------------------------------------------------------------
+    // Exclude picture-based PGS / PGSSUB tracks if user configured them disabled
+    const disablePgs = PlayerSettings.get('pgsPlaybackMode') === 'disable';
+    const subtitleStreams = mediaSource.MediaStreams.filter((s) => {
+        // We only care about subtitle tracks
+        if (s.Type !== 'Subtitle') return false;
+
+        // Strip PGS if hardware decode or user preference explicitly excludes it
+        if (disablePgs) {
+            const codec = (s.Codec || '').toLowerCase();
+            if (codec === 'pgs' || codec === 'pgssub') return false;
+        }
+        return true;
+    });
+
+    // If no candidate subtitle streams exist on this media item, subtitles stay off
+    if (subtitleStreams.length === 0) {
+        return -1;
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. Format and External Priority Sorting
+    // -------------------------------------------------------------------------
+    // Rank external subtitles above embedded tracks, and prioritize rich styled text (ASS/SSA)
+    // over raw text (SRT/SUBRIP) and bitmap subtitles (PGS).
+    const getCodecPriority = (codec) => {
+        const c = (codec || '').toLowerCase();
+        if (c === 'ass' || c === 'ssa') return 4;
+        if (c === 'srt' || c === 'subrip') return 3;
+        if (c === 'pgs' || c === 'pgssub') return 2;
+        return 1;
+    };
+
+    subtitleStreams.sort((a, b) => {
+        const aExt = !!a.IsExternal;
+        const bExt = !!b.IsExternal;
+        // Prioritize external tracks first
+        if (aExt !== bExt) return aExt ? -1 : 1;
+
+        // Rank by codec fidelity
+        const aPriority = getCodecPriority(a.Codec);
+        const bPriority = getCodecPriority(b.Codec);
+        if (aPriority !== bPriority) return bPriority - aPriority;
+
+        return 0;
+    });
+
+    // -------------------------------------------------------------------------
+    // 4. Mode 'Default' Resolution
+    // -------------------------------------------------------------------------
+    // Honors container and server disposition flags (DefaultSubtitleStreamIndex).
+    if (subtitleMode === 'Default') {
+        const serverDefaultTrack =
+            mediaSource.DefaultSubtitleStreamIndex !== undefined && mediaSource.DefaultSubtitleStreamIndex !== null
+                ? mediaSource.MediaStreams.find((s) => s.Index === mediaSource.DefaultSubtitleStreamIndex)
+                : null;
+        const isServerDefaultPgs =
+            serverDefaultTrack &&
+            ((serverDefaultTrack.Codec || '').toLowerCase() === 'pgs' ||
+                (serverDefaultTrack.Codec || '').toLowerCase() === 'pgssub');
+
+        // Use server default if valid and not a disabled PGS track
+        if (
+            mediaSource.DefaultSubtitleStreamIndex !== undefined &&
+            mediaSource.DefaultSubtitleStreamIndex !== null &&
+            !(disablePgs && isServerDefaultPgs)
+        ) {
+            return mediaSource.DefaultSubtitleStreamIndex;
+        }
+
+        // Search candidate streams for the first default or forced track
+        const subStream = subtitleStreams.find((s) => s.IsDefault || isForcedStream(s));
+        return subStream ? subStream.Index : -1;
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. Context Language Extraction
+    // -------------------------------------------------------------------------
+    // Extract preferred subtitle language and active audio language to evaluate matches.
+    // Fall back to server user profile language if client has no specific language selected ('none').
+    let prefLang = options.prefLang || storage.getItem('pref:subtitleLang') || 'none';
+    if (!prefLang || prefLang === 'none') {
+        const currentUser = auth?.getCurrentUser?.();
+        const serverSubLang = currentUser?.Configuration?.SubtitleLanguagePreference;
+        if (serverSubLang) {
+            prefLang = serverSubLang;
+        }
+    }
+
+    // Resolve audio stream to determine active spoken language
+    const defaultAudioStream =
+        (mediaSource.MediaStreams || []).find((s) => s.Type === 'Audio' && s.IsDefault) ||
+        (mediaSource.MediaStreams || []).find((s) => s.Type === 'Audio' && s.Index === mediaSource.DefaultAudioStreamIndex) ||
+        (mediaSource.MediaStreams || []).find((s) => s.Type === 'Audio');
+
+    const audioStreamIndex =
+        options.audioStreamIndex !== undefined && options.audioStreamIndex !== null
+            ? options.audioStreamIndex
+            : defaultAudioStream?.Index;
+
+    const audioStream = mediaSource.MediaStreams.find(
+        (s) => s.Type === 'Audio' && s.Index === audioStreamIndex
+    );
+    const audioLang = audioStream ? audioStream.Language || 'und' : 'und';
+
+    // -------------------------------------------------------------------------
+    // 6. Mode 'OnlyForced' Resolution
+    // -------------------------------------------------------------------------
+    // Only selects forced tracks (translating foreign dialogue for the spoken language).
+    // If no forced track exists in the file, subtitles MUST resolve to off (-1).
+    if (subtitleMode === 'OnlyForced') {
+        let forced = null;
+
+        // Priority 1: Forced track matching user's preferred subtitle language
+        if (prefLang && prefLang !== 'none') {
+            forced = subtitleStreams.find((s) => isForcedStream(s) && isLanguageMatch(s.Language, prefLang));
+        }
+
+        // Priority 2: Forced track matching the active spoken audio language
+        if (!forced && audioLang && audioLang !== 'und') {
+            forced = subtitleStreams.find((s) => isForcedStream(s) && isLanguageMatch(s.Language, audioLang));
+        }
+
+        // Priority 3: Any forced track available on the media item
+        if (!forced) {
+            forced = subtitleStreams.find((s) => isForcedStream(s));
+        }
+
+        // Return resolved forced track index, or -1 if no forced tracks are present
+        return forced ? forced.Index : -1;
+    }
+
+    // -------------------------------------------------------------------------
+    // 7. Mode 'Always' Resolution
+    // -------------------------------------------------------------------------
+    // Subtitles are always shown. Prioritizes preferred language and external tracks.
+    if (subtitleMode === 'Always') {
+        let best = undefined;
+
+        // If user configured preferExternalSubtitles, scan external pool first
+        if (PlayerSettings.get('preferExternalSubtitles')) {
+            const externalStreams = subtitleStreams.filter((s) => s.IsExternal);
+            if (externalStreams.length > 0) {
+                // External track matching preferred language with default or forced flag
+                if (prefLang && prefLang !== 'none') {
+                    best = externalStreams.find(
+                        (s) => isLanguageMatch(s.Language, prefLang) && (s.IsDefault || isForcedStream(s))
+                    );
+                    if (!best) {
+                        best = externalStreams.find((s) => isLanguageMatch(s.Language, prefLang));
+                    }
+                }
+                // Fallback to undetermined or untagged external stream
+                if (!best) {
+                    best = externalStreams.find((s) => {
+                        const lang = (s.Language || '').toLowerCase();
+                        return !lang || lang === 'und' || lang === 'unknown' || lang === 'none';
+                    });
+                }
+            }
+        }
+
+        // Standard selection fallback across all subtitle streams
+        if (!best) {
+            if (prefLang && prefLang !== 'none') {
+                best = subtitleStreams.find(
+                    (s) => isLanguageMatch(s.Language, prefLang) && (s.IsDefault || isForcedStream(s))
+                );
+                if (!best) {
+                    best = subtitleStreams.find((s) => isLanguageMatch(s.Language, prefLang));
+                }
+            }
+            if (!best) {
+                best = subtitleStreams.find((s) => s.IsDefault || isForcedStream(s));
+            }
+            if (!best && subtitleStreams.length > 0) {
+                best = subtitleStreams[0];
+            }
+        }
+
+        return best ? best.Index : -1;
+    }
+
+    // -------------------------------------------------------------------------
+    // 8. Mode 'Smart' Resolution
+    // -------------------------------------------------------------------------
+    // Smart mode shows full subtitles if the audio language differs from user preference.
+    // When audio matches preferred language, it falls back to showing only forced subtitles.
+    if (subtitleMode === 'Smart') {
+        // Condition: Spoken audio differs from user's preferred subtitle language
+        if (prefLang !== 'none' && !isLanguageMatch(audioLang, prefLang) && audioLang !== 'und') {
+            let best = subtitleStreams.find(
+                (s) => isLanguageMatch(s.Language, prefLang) && (s.IsDefault || isForcedStream(s))
+            );
+            if (!best) {
+                best = subtitleStreams.find((s) => isLanguageMatch(s.Language, prefLang));
+            }
+            if (best) return best.Index;
+        }
+
+        // Spoken audio matches preferred language: show only forced subtitles
+        let forced = null;
+        if (prefLang && prefLang !== 'none') {
+            forced = subtitleStreams.find((s) => isForcedStream(s) && isLanguageMatch(s.Language, prefLang));
+        }
+        if (!forced && audioLang && audioLang !== 'und') {
+            forced = subtitleStreams.find((s) => isForcedStream(s) && isLanguageMatch(s.Language, audioLang));
+        }
+        if (!forced) {
+            forced = subtitleStreams.find((s) => isForcedStream(s));
+        }
+        return forced ? forced.Index : -1;
+    }
+
+    return -1;
+}
+
+/**
  * Automatically resolve the best audio track for a given media source.
  *
  * If the user has 'preferDirectPlayAudio' enabled (default: true) and the default track
@@ -518,38 +874,6 @@ export function resolveBestAudioStream(mediaSource, targetLang, backendType = nu
         return scored[0].track;
     };
 
-    // -------------------------------------------------------------------------
-    // 5. Robust Language Matching Helper
-    // -------------------------------------------------------------------------
-    // Matches media stream languages across 2-letter ISO, 3-letter ISO, and regional prefixes
-    // using the centralized LanguageManager cache.
-    const isLanguageMatch = (trackLang, targetLanguage) => {
-        if (!trackLang || !targetLanguage) return false;
-        const cleanTrack = String(trackLang).trim().toLowerCase();
-        const cleanTarget = String(targetLanguage).trim().toLowerCase();
-        if (cleanTrack === cleanTarget) return true;
-
-        // Compare normalized ISO codes via languageManager
-        if (typeof languageManager !== 'undefined' && typeof languageManager?.normalizeLanguage === 'function') {
-            const normTrack = languageManager.normalizeLanguage(cleanTrack);
-            const normTarget = languageManager.normalizeLanguage(cleanTarget);
-            if (normTrack && normTarget) {
-                if (normTrack.code && normTarget.code && normTrack.code.toLowerCase() === normTarget.code.toLowerCase()) {
-                    return true;
-                }
-                if (normTrack.twoLetter && normTarget.twoLetter && normTrack.twoLetter.toLowerCase() === normTarget.twoLetter.toLowerCase()) {
-                    return true;
-                }
-            }
-        }
-
-        // Fallback prefix check for regional locale tags (e.g. 'en-US' matching 'en')
-        if (cleanTrack.length >= 2 && cleanTarget.length >= 2 && cleanTrack.slice(0, 2) === cleanTarget.slice(0, 2)) {
-            return true;
-        }
-
-        return false;
-    };
 
     // -------------------------------------------------------------------------
     // 6. User Preferences & Settings Resolution
@@ -2008,6 +2332,11 @@ export class JellyfinPlayer extends EventEmitter {
                 profilePlaybackMode = 'remux';
             }
 
+            // The desktop and web profiles depend on the WebCodecs AV1 probe; it is cached after the first run.
+            if ((platformInfo.isDesktop || platformInfo.isWeb) && platformInfo.hasWebCodecsSupport) {
+                await webCodecsProbe.probeAV1();
+            }
+
             // Build device profile once (avoids duplicate logs/work).
             // On an interlaced fallback retry, a pre-built html5 profile is passed in
             // via options._deviceProfile so we don't rebuild with the wrong settings.
@@ -2030,199 +2359,13 @@ export class JellyfinPlayer extends EventEmitter {
                 const fallbackSource = options.item.MediaSources[0];
                 const ms = options.item.MediaSources.find(m => m.Id === options.mediaSourceId) || fallbackSource;
                 if (ms && ms.MediaStreams) {
-                    // =========================================================================
-                    // Retrieve Subtitle Mode Setting
-                    //
-                    // Fetch the user's preferred subtitle mode setting (Default, Always, Smart, etc.).
-                    // Fall back to 'Default' if no preference has been configured yet.
-                    // =========================================================================
+                    // Resolve target subtitle track based on active Subtitle Mode preference
+                    const resolvedSub = resolveSubtitleStream(ms, {
+                        audioStreamIndex: options.audioStreamIndex
+                    });
+                    options.subtitleStreamIndex = resolvedSub;
                     const subtitleMode = PlayerSettings.get('subtitleMode') || 'Default';
-
-                    // =========================================================================
-                    // PGS Subtitle Filter Guard
-                    //
-                    // If the user set PGS playback to "Disable and Hide Completely" in settings,
-                    // they explicitly want PGS subtitles to be ignored. We filter them out of
-                    // the candidate pool of subtitle streams here. This prevents the player from
-                    // auto-selecting a disabled/hidden PGS track and rendering nothing, allowing
-                    // it to instead fallback to a valid, renderable SRT or VTT track.
-                    // =========================================================================
-                                        const disablePgs = PlayerSettings.get('pgsPlaybackMode') === 'disable';
-                    const subtitleStreams = ms.MediaStreams.filter(s => {
-                        // We only care about subtitle streams
-                        if (s.Type !== 'Subtitle') return false;
-                        
-                        // If PGS rendering is disabled, filter out PGS/PGSSUB codecs
-                        if (disablePgs) {
-                            const codec = (s.Codec || '').toLowerCase();
-                            if (codec === 'pgs' || codec === 'pgssub') {
-                                return false;
-                            }
-                        }
-                        return true;
-                    });
-
-                    // =========================================================================
-                    // Prioritize and Sort Subtitle Streams
-                    //
-                    // To resolve selection ambiguity, sort candidate tracks based on type
-                    // and delivery attributes before running the auto-selection queries:
-                    //
-                    // 1. External (EXT) tracks first: External files added explicitly by the user
-                    //    should take priority over embedded/internal streams.
-                    // 2. Codec-level priority: Prefer formats in this order:
-                    //    ASS/SSA (highest styled styling fidelity) -> SRT/SUBRIP -> PGS/PGSSUB -> others.
-                    // =========================================================================
-                    const getCodecPriority = (codec) => {
-                        const c = (codec || '').toLowerCase();
-                        if (c === 'ass' || c === 'ssa') {
-                            return 4; // Styled subtitles preferred first
-                        }
-                        if (c === 'srt' || c === 'subrip') {
-                            return 3; // Clean text-based standard fallback
-                        }
-                        if (c === 'pgs' || c === 'pgssub') {
-                            return 2; // Picture-based subtitle tracks
-                        }
-                        return 1; // Any other uncategorized format
-                    };
-
-                    subtitleStreams.sort((a, b) => {
-                        // Extract external status
-                        const aExt = !!a.IsExternal;
-                        const bExt = !!b.IsExternal;
-
-                        // Check if one is external and the other is internal
-                        if (aExt !== bExt) {
-                            // Put external tracks first
-                            return aExt ? -1 : 1;
-                        }
-
-                        // Determine codec priority for both streams
-                        const aPriority = getCodecPriority(a.Codec);
-                        const bPriority = getCodecPriority(b.Codec);
-
-                        // If priorities differ, place higher priority first
-                        if (aPriority !== bPriority) {
-                            return bPriority - aPriority;
-                        }
-
-                        // Keep original sequence stable if identical priority
-                        return 0;
-                    });
-
-                    let chosenIndex = undefined;
-
-                    // Apply the corresponding selection logic depending on the mode
-                    if (subtitleMode === 'None') {
-                        chosenIndex = -1;
-                    } else if (subtitleMode === 'Default') {
-                        // =====================================================================
-                        // Server Default Track Resolution with PGS Safeguard
-                        //
-                        // Verify if the server-provided default track is a PGS track. If PGS is
-                        // disabled, we discard this track and fall back to searching the rest of
-                        // the filtered candidate streams (which have PGS excluded).
-                        // =====================================================================
-                        const serverDefaultTrack = ms.DefaultSubtitleStreamIndex !== undefined && ms.DefaultSubtitleStreamIndex !== null
-                            ? ms.MediaStreams.find(s => s.Index === ms.DefaultSubtitleStreamIndex)
-                            : null;
-                        const isServerDefaultPgs = serverDefaultTrack && 
-                            ((serverDefaultTrack.Codec || '').toLowerCase() === 'pgs' || (serverDefaultTrack.Codec || '').toLowerCase() === 'pgssub');
-                        
-                        // Use default only if valid and not a disabled PGS track
-                        if (ms.DefaultSubtitleStreamIndex !== undefined && 
-                            ms.DefaultSubtitleStreamIndex !== null && 
-                            !(disablePgs && isServerDefaultPgs)) {
-                            chosenIndex = ms.DefaultSubtitleStreamIndex;
-                        } else {
-                            // Find the first default or forced track from the filtered candidate list
-                            const subStream = subtitleStreams.find(s => s.IsDefault || s.IsForced);
-                            if (subStream) chosenIndex = subStream.Index;
-                        }
-                    } else {
-                        const prefLang = storage.getItem('pref:subtitleLang') || 'none';
-                        const defaultAudioStream = (ms.MediaStreams || []).find(s => s.Type === 'Audio' && s.IsDefault) ||
-                            (ms.MediaStreams || []).find(s => s.Type === 'Audio' && s.Index === ms.DefaultAudioStreamIndex) ||
-                            (ms.MediaStreams || []).find(s => s.Type === 'Audio');
-                        const audioStreamIndex = options.audioStreamIndex !== undefined && options.audioStreamIndex !== null ? options.audioStreamIndex : defaultAudioStream?.Index;
-                        const audioStream = ms.MediaStreams.find(s => s.Type === 'Audio' && s.Index === audioStreamIndex);
-                        const audioLang = audioStream ? (audioStream.Language || 'und') : 'und';
-                        
-                        if (subtitleMode === 'OnlyForced') {
-                            let forced = subtitleStreams.find(s => s.IsForced && s.Language === prefLang);
-                            if (!forced) forced = subtitleStreams.find(s => s.IsForced);
-                            if (forced) chosenIndex = forced.Index;
-                        } else if (subtitleMode === 'Always') {
-                            let best = undefined;
-
-                            // -----------------------------------------------------------------
-                            // Preference check: If 'preferExternalSubtitles' is enabled,
-                            // attempt to isolate and choose external subtitle streams first.
-                            // -----------------------------------------------------------------
-                            if (PlayerSettings.get('preferExternalSubtitles')) {
-                                const externalStreams = subtitleStreams.filter(s => s.IsExternal);
-                                if (externalStreams.length > 0) {
-                                    // 1. Search for external stream matching preferred language (default/forced first)
-                                    best = externalStreams.find(s => s.Language === prefLang && (s.IsDefault || s.IsForced));
-                                    
-                                    // 2. Search for external stream matching preferred language generally
-                                    if (!best) {
-                                        best = externalStreams.find(s => s.Language === prefLang);
-                                    }
-                                    
-                                    // 3. Search for external stream with undetermined/unknown/empty language codes
-                                    if (!best) {
-                                        best = externalStreams.find(s => {
-                                            const lang = (s.Language || '').toLowerCase();
-                                            return !lang || lang === 'und' || lang === 'unknown' || lang === 'none';
-                                        });
-                                    }
-                                }
-                            }
-
-                            // -----------------------------------------------------------------
-                            // Fallback path: If 'preferExternalSubtitles' is disabled or no
-                            // matching external tracks were resolved, run standard selection.
-                            // -----------------------------------------------------------------
-                            if (!best) {
-                                // Prefer internal/external matching user preferred language (default/forced first)
-                                best = subtitleStreams.find(s => s.Language === prefLang && (s.IsDefault || s.IsForced));
-                                // Fallback to matching user preferred language generally
-                                if (!best) {
-                                    best = subtitleStreams.find(s => s.Language === prefLang);
-                                }
-                                // Fallback to default or forced subtitle tracks in general
-                                if (!best) {
-                                    best = subtitleStreams.find(s => s.IsDefault || s.IsForced);
-                                }
-                                // Fallback to the first available track in the list
-                                if (!best && subtitleStreams.length > 0) {
-                                    best = subtitleStreams[0];
-                                }
-                            }
-
-                            if (best) {
-                                chosenIndex = best.Index;
-                            }
-                        } else if (subtitleMode === 'Smart') {
-                            // Smart = Show if audio is NOT in the preferred subtitle language.
-                            if (prefLang !== 'none' && audioLang !== prefLang && audioLang !== 'und') {
-                                let best = subtitleStreams.find(s => s.Language === prefLang && (s.IsDefault || s.IsForced));
-                                if (!best) best = subtitleStreams.find(s => s.Language === prefLang);
-                                if (best) chosenIndex = best.Index;
-                            } else {
-                                let forced = subtitleStreams.find(s => s.IsForced && s.Language === prefLang);
-                                if (!forced) forced = subtitleStreams.find(s => s.IsForced);
-                                if (forced) chosenIndex = forced.Index;
-                            }
-                        }
-                    }
-                    
-                    if (chosenIndex !== undefined) {
-                        options.subtitleStreamIndex = chosenIndex;
-                        log.info(`[SubtitleSelection] Pre-flight Mode: ${subtitleMode}, Chosen Index: ${chosenIndex}`);
-                    }
+                    log.info(`[SubtitleSelection] Pre-flight Mode: ${subtitleMode}, Chosen Index: ${resolvedSub}`);
                 }
             }
 
@@ -2409,6 +2552,57 @@ export class JellyfinPlayer extends EventEmitter {
                 }
             }
 
+            // ================================================================
+            // WebCodecs AV1 Backend Fallback — Movi Auto-Switch
+            //
+            // Some engines advertise AV1 through WebCodecs but fail every decode
+            // (WebKitGTK/WPE up to 2.54.0, see WebCodecsProbe), so Movi cannot play it.
+            // The HTML5 backend decodes through the media element instead of WebCodecs:
+            // it plays AV1 with the engine's own decoders, and the server transcodes when
+            // the engine has none. Restart on it when the conditions below hold. Needed
+            // only until WebKitGTK/WPE releases with the AV1 fixes ship; on those the
+            // probe passes and this is skipped.
+            //
+            //   1. We are currently on the Movi backend
+            //   2. The startup probe showed WebCodecs cannot decode AV1
+            //   3. The video stream is AV1
+            //   4. This fallback has not already been attempted (guard flag)
+            // ================================================================
+            if (
+                this._backendType === 'movi' &&
+                webCodecsProbe.av1Decodes === false &&
+                (videoStream?.Codec || '').toLowerCase() === 'av1' &&
+                !options._webCodecsAV1FallbackAttempted
+            ) {
+                log.info('[WebCodecsAV1Fallback] WebCodecs cannot decode AV1 here — restarting on HTML5 backend.');
+
+                // Movi is not reused: destroy() stops it and also removes its element and event callback.
+                try {
+                    this._backend.destroy();
+                } catch (destroyErr) {
+                    log.warn('[WebCodecsAV1Fallback] Backend destroy() threw during the switch:', destroyErr);
+                }
+
+                this._backend = new HtmlVideoPlayer({
+                    container: this.container,
+                    settings: PlayerSettings,
+                    onEvent: this._handleBackendEvent.bind(this)
+                });
+                this._backendType = 'html5';
+
+                const html5Profile = buildJellyfinProfile({
+                    manualBitrate: this._manualBitrate,
+                    playbackMode: profilePlaybackMode,
+                    backend: 'html5'
+                });
+
+                return this.play({
+                    ...options,
+                    _webCodecsAV1FallbackAttempted: true,
+                    _deviceProfile: html5Profile
+                });
+            }
+
             this._currentMediaSource = mediaSource;
             this._currentItem = options.item || { Id: options.itemId };
 
@@ -2513,9 +2707,16 @@ export class JellyfinPlayer extends EventEmitter {
                 }
             }
 
-            // If not provided (and not resolved pre-flight), subtitles default to off
+            // If not provided (and not resolved pre-flight), resolve target subtitle track
+            // based on the user's active Subtitle Mode preference (Default, OnlyForced, Always, Smart, None)
             if (this._currentSubtitleStreamIndex === undefined) {
-                this._currentSubtitleStreamIndex = -1;
+                if (mediaSource.MediaStreams) {
+                    this._currentSubtitleStreamIndex = resolveSubtitleStream(mediaSource, {
+                        audioStreamIndex: this._currentAudioStreamIndex
+                    });
+                } else {
+                    this._currentSubtitleStreamIndex = -1;
+                }
             }
 
             // -------------------------------------------------------------------------
@@ -2577,7 +2778,7 @@ export class JellyfinPlayer extends EventEmitter {
                 startPositionTicks: streamInfo.playerStartPositionTicks, // Use adjusted start position
                 audioStreamIndex: this._currentAudioStreamIndex,
                 audioTrackListIndex: this._getBackendAudioTrackListIndex(this._currentAudioStreamIndex, mediaSource),
-                subtitleStreamIndex: options.subtitleStreamIndex,
+                subtitleStreamIndex: this._currentSubtitleStreamIndex,
                 // Tell the backend what play method was negotiated — critical so
                 // TizenAVPlayer knows NOT to apply native track selection when
                 // the server is transcoding (audio is baked into the HLS stream).
@@ -4199,11 +4400,20 @@ export class JellyfinPlayer extends EventEmitter {
             this._subtitleManager.refreshStyles();
         }
 
+        /*
+         * ====================================================================
+         * Dual Backend and DOM Subtitle Synchronization
+         * ====================================================================
+         * If the platform backend supports native/hardware subtitle refreshing,
+         * delegate to it. Crucially, always emit the 'refreshsubtitles' event
+         * so PlayerPage can update external SRT, VTT, and secondary subtitle
+         * DOM overlay layers simultaneously.
+         * ====================================================================
+         */
         if (this._backend && this._backend.refreshSubtitles) {
             this._backend.refreshSubtitles();
-        } else {
-             this.emit('refreshsubtitles');
         }
+        this.emit('refreshsubtitles');
     }
 
     /**
@@ -4251,6 +4461,25 @@ export class JellyfinPlayer extends EventEmitter {
      */
     resolveBestAudioStream(mediaSource, targetLang) {
         return resolveBestAudioStream(mediaSource, targetLang, this._backendType);
+    }
+
+    /**
+     * Resolve subtitle stream based on player subtitle mode and preferences
+     * @param {Object} mediaSource - Jellyfin MediaSource object containing MediaStreams
+     * @param {Object} [options] - Resolution options
+     * @returns {number} Resolved stream index, or -1 for off
+     */
+    resolveSubtitleStream(mediaSource, options = {}) {
+        return resolveSubtitleStream(mediaSource, options);
+    }
+
+    /**
+     * Resolve effective subtitle mode taking server user configuration into account
+     * @param {string} [mode] - Optional mode override
+     * @returns {string} Effective subtitle mode
+     */
+    getEffectiveSubtitleMode(mode) {
+        return getEffectiveSubtitleMode(mode);
     }
 
     /**

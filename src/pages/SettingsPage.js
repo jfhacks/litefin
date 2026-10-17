@@ -18,6 +18,7 @@ import { spatialNavigator } from '../ui/SpatialNavigator.js';
 import { imageService } from '../utils/ImageService.js';
 import { PlayerSettings } from '../utils/PlayerSettings.js';
 import FontLoader from '../utils/FontLoader.js';
+import { getFallbackFontId, getFallbackFontName } from '../utils/FallbackFonts.js';
 import { debugOverlay } from '../ui/DebugOverlay.js';
 import { storage } from '../utils/StorageService.js';
 import { logger } from '../utils/Logger.js';
@@ -26,6 +27,7 @@ import { availableLanguages } from '../locales/languages.js';
 import { languageManager } from '../utils/LanguageManager.js';
 import { pluginManager } from '../plugins/PluginManager.js';
 import { platformInfo } from '../utils/PlatformInfo.js';
+import { androidAdapter } from '../android/AndroidAdapter.js';
 import { homeLayoutManager } from '../utils/HomeLayoutManager.js';
 import { sidebarLayoutManager } from '../utils/SidebarLayoutManager.js';
 import { AUDIO_FALLBACK_SLOTS, isAudioFallbackSelect } from '../utils/AudioFallbackConfig.js';
@@ -44,6 +46,12 @@ const log = logger.create('SettingsPage');
 
 // Cache cultures across page instances
 let cachedCultures = null;
+const SERVER_FONT_SELECTS = [
+    'ui-font-select',
+    'subtitle-font-select',
+    'subtitle-font-ass-select',
+    'jellyfin-fallback-font-select'
+];
 
 class SettingsPage extends Page {
     constructor() {
@@ -63,9 +71,12 @@ class SettingsPage extends Page {
 
         // Bound viewport resize listener for orientation transitions
         this._onResize = null;
+        this._fallbackFonts = [];
     }
 
     async onInit() {
+        // Populate the font buttons independently of the culture request.
+        this._loadFallbackFontOptions();
         // If we don't have cultures cached, fetch them
         if (!cachedCultures) {
             try {
@@ -618,6 +629,22 @@ class SettingsPage extends Page {
         )}
                     </div>
                 </div>
+
+                ${platformInfo.isAndroid ? `
+                <div class="setting-item" id="mobile-fullscreen-setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="MobileFullscreen">${i18n.t('MobileFullscreen') || 'Fullscreen Mode'}</span>
+                        <span class="setting-description" data-i18n="MobileFullscreenDescription">${i18n.t('MobileFullscreenDescription') || 'Hide status and navigation bars on mobile devices for an edge-to-edge layout. When disabled, system bars remain visible in safe zone. Video playback always remains in fullscreen.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${androidAdapter.isMobileFullscreenEnabled() ? 'active' : ''}" 
+                                id="toggle-mobile-fullscreen" 
+                                tabindex="0"
+                                aria-label="${i18n.t('MobileFullscreen') || 'Fullscreen Mode'}">
+                        </button>
+                    </div>
+                </div>
+                ` : ''}
 
 
                 <div class="setting-item">
@@ -2861,12 +2888,22 @@ class SettingsPage extends Page {
 
                     /*
                      * ==========================================================
-                     * Choice 3: Immersive Mode (New tvOS-Style Design)
+                     * Choice 3: Immersive Mode (Deep Overlap Design)
                      * ==========================================================
                      * A highly premium, deep full-screen background backdrop
                      * that extends visually beneath the first horizontal row.
                      */
-                    { value: 'immersive', label: i18n.t('StyleImmersive') || 'Immersive' }
+                    { value: 'immersive', label: i18n.t('StyleImmersive') || 'Immersive' },
+
+                    /*
+                     * ==========================================================
+                     * Choice 4: Immersive (Performance) Mode
+                     * ==========================================================
+                     * High-performance immersive variant rendering compact
+                     * right-aligned artwork with circular gradient feathering
+                     * for silky smooth scrolling on smart TV hardware.
+                     */
+                    { value: 'immersive-performance', label: i18n.t('StyleImmersivePerformance') || 'Immersive (Performance)' }
                 ],
                 // Default to 'immersive' style for the hero carousel selector
                 storage.getItem('pref:heroCarouselStyle') || 'immersive'
@@ -3026,6 +3063,19 @@ class SettingsPage extends Page {
                     <div class="setting-control">
                          <button class="toggle-switch ${storage.getItem('pref:heroCarouselZoom') === 'true' ? 'active' : ''}" 
                                  id="toggle-hero-carousel-zoom" 
+                                 tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item" id="hero-carousel-blurhash-fill-item" style="display: ${storage.getItem('pref:heroCarousel') !== 'false' && (storage.getItem('pref:heroCarouselStyle') || 'immersive') === 'immersive-performance' ? '' : 'none'}">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="HeroCarouselBlurhashFill">${i18n.t('HeroCarouselBlurhashFill') || 'BlurHash Color Fill'}</span>
+                        <span class="setting-description" data-i18n="HeroCarouselBlurhashFillDescription">${i18n.t('HeroCarouselBlurhashFillDescription') || 'Fill the rest of the hero carousel background with ambient colors extracted from the artwork BlurHash.'}</span>
+                    </div>
+                    <div class="setting-control">
+                         <button class="toggle-switch ${storage.getItem('pref:heroCarouselBlurhashFill') === 'true' ? 'active' : ''}" 
+                                 id="toggle-hero-carousel-blurhash-fill" 
                                  tabindex="0">
                         </button>
                     </div>
@@ -3315,6 +3365,31 @@ class SettingsPage extends Page {
                 if (val === 'false') return 'visible';
                 return val;
             })()
+        )}
+                    </div>
+                </div>
+
+                <!-- ============================================================= -->
+                <!-- SIDEBAR BACK BUTTON CONFIGURATION                             -->
+                <!-- ============================================================= -->
+                <!-- Configures whether the navigation back button appears above   -->
+                <!-- the logo on secondary routes for desktop/web only, all       -->
+                <!-- platforms (including TV devices), or disabled entirely.       -->
+                <!-- ============================================================= -->
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="SidebarBackButton">${i18n.t('SidebarBackButton') || 'Sidebar Back Button'}</span>
+                        <span class="setting-description" data-i18n="SidebarBackButtonDescription">${i18n.t('SidebarBackButtonDescription') || 'Show a back button above the Litefin logo when navigating sub-pages.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        ${this._renderDropdown(
+            'sidebar-back-button-select',
+            [
+                { value: 'auto', label: i18n.t('OptionSidebarBackButtonAuto') || 'Desktop & Web Only' },
+                { value: 'all', label: i18n.t('OptionSidebarBackButtonAll') || 'All Platforms' },
+                { value: 'disabled', label: i18n.t('OptionSidebarBackButtonDisabled') || 'Disabled' }
+            ],
+            storage.getItem('pref:sidebarBackButton') || 'auto'
         )}
                     </div>
                 </div>
@@ -3772,7 +3847,7 @@ class SettingsPage extends Page {
                     </div>
                 </div>
 
-                <!-- Mark as Watched Completion Threshold (Apple HIG style tactile selector) -->
+                <!-- Mark as Watched Completion Threshold -->
                 <!-- Allows viewer to keep Litefin's 80% credits-friendly default or respect server MaxResumePct -->
                 <div class="setting-item">
                     <div class="setting-label">
@@ -5629,13 +5704,13 @@ class SettingsPage extends Page {
             'library-page-size-select',
             [
                 { value: 25, label: '25' },
-                { value: 50, label: '50' },
+                { value: 50, label: '50 (Default)' },
                 { value: 75, label: '75' },
                 { value: 100, label: '100' },
                 { value: 150, label: '150' },
                 { value: 'unlimited', label: i18n.t('OptionUnlimited') || 'Unlimited (Infinite Scroll)' }
             ],
-            storage.getItem('pref:libraryPageSize') || 100
+            storage.getItem('pref:libraryPageSize') || 50
         )}
                     </div>
                 </div>
@@ -5758,6 +5833,19 @@ class SettingsPage extends Page {
                     <div class="setting-control">
                         <button class="toggle-switch ${layoutManager.getDisableBlurhash() ? 'active' : ''}" 
                                 id="toggle-disable-blurhash" 
+                                tabindex="0">
+                        </button>
+                    </div>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-label">
+                        <span class="setting-name" data-i18n="LabelDisableLibraryBlurHash">${i18n.t('LabelDisableLibraryBlurHash') || 'Disable BlurHash in Library'}</span>
+                        <span class="setting-description" data-i18n="DisableLibraryBlurHashDescription">${i18n.t('DisableLibraryBlurHashDescription') || 'Stop decoding and displaying BlurHash placeholder canvases in library grids. Uses standard dark skeletons instead to maximize navigation and scroll performance on low-power TVs.'}</span>
+                    </div>
+                    <div class="setting-control">
+                        <button class="toggle-switch ${layoutManager.getDisableLibraryBlurhash() ? 'active' : ''}" 
+                                id="toggle-disable-library-blurhash" 
                                 tabindex="0">
                         </button>
                     </div>
@@ -6423,14 +6511,14 @@ class SettingsPage extends Page {
         if (typeof window !== 'undefined' && window.__TAURI_INTERNALS__?.invoke) {
             window.__TAURI_INTERNALS__.invoke('plugin:opener|open_url', { url })
                 .catch(() => {
-                    try { window.open(url, '_blank'); } catch (_) {}
+                    try { window.open(url, '_blank'); } catch (_) { }
                 });
             return;
         }
         if (typeof window !== 'undefined' && window.__TAURI__?.core?.invoke) {
             window.__TAURI__.core.invoke('plugin:opener|open_url', { url })
                 .catch(() => {
-                    try { window.open(url, '_blank'); } catch (_) {}
+                    try { window.open(url, '_blank'); } catch (_) { }
                 });
             return;
         }
@@ -8239,6 +8327,30 @@ class SettingsPage extends Page {
             });
         }
 
+        // =====================================================================
+        // MOBILE FULLSCREEN MODE TOGGLE (Android Devices)
+        // =====================================================================
+        // Toggles immersive mode on Android phones and tablets:
+        // - Inverts current active fullscreen preference.
+        // - Dispatches instruction to AndroidAdapter to toggle system bars and
+        //   adjust WindowInsetsControllerCompat between fullscreen and safe zone.
+        // - Updates toggle switch visual indicator state with CSS transitions.
+        // =====================================================================
+        const mobileFullscreenBtn = this.$('#toggle-mobile-fullscreen');
+        if (mobileFullscreenBtn) {
+            mobileFullscreenBtn.addEventListener('click', () => {
+                // Determine current fullscreen setting state
+                const currentVal = androidAdapter.isMobileFullscreenEnabled();
+                const newVal = !currentVal;
+
+                // Persist new setting and apply to active Android activity window
+                androidAdapter.setMobileFullscreen(newVal);
+
+                // Update toggle switch visual active class
+                mobileFullscreenBtn.classList.toggle('active', newVal);
+            });
+        }
+
         // Reset Settings Button
         const resetSettingsBtn = this.$('#btn-reset-settings');
         if (resetSettingsBtn) {
@@ -8724,6 +8836,7 @@ class SettingsPage extends Page {
                 const compactItem = this.$('#hero-carousel-compact-item');
                 const styleItem = this.$('#hero-carousel-style-item');
                 const zoomItem = this.$('#hero-carousel-zoom-item');
+                const blurhashFillItem = this.$('#hero-carousel-blurhash-fill-item');
                 const heroQualityItem = this.$('#hero-image-quality-item');
                 const indicatorStyleItem = this.$('#hero-carousel-indicator-style-item');
                 const indicatorAnimItem = this.$('#hero-carousel-indicator-animation-item');
@@ -8732,14 +8845,16 @@ class SettingsPage extends Page {
                 const mdbItem = this.$('#hero-carousel-mdb-item');
                 const ignoreWatchedItem = this.$('#hero-carousel-ignore-watched-item');
 
-                // Read current indicator style to determine if animation toggle is applicable
+                // Read current indicator and carousel styles to determine sub-setting visibility
                 const indicatorStyle = storage.getItem('pref:heroCarouselIndicatorStyle') || 'dots';
+                const currentCarouselStyle = storage.getItem('pref:heroCarouselStyle') || 'immersive';
 
                 // Apply transitions/display toggles based on the master toggle value.
                 if (textTitleItem) textTitleItem.style.display = newValue ? '' : 'none';
                 if (compactItem) compactItem.style.display = newValue ? '' : 'none';
                 if (styleItem) styleItem.style.display = newValue ? '' : 'none';
                 if (zoomItem) zoomItem.style.display = newValue ? '' : 'none';
+                if (blurhashFillItem) blurhashFillItem.style.display = newValue && currentCarouselStyle === 'immersive-performance' ? '' : 'none';
                 if (heroQualityItem) heroQualityItem.style.display = newValue ? '' : 'none';
                 if (indicatorStyleItem) indicatorStyleItem.style.display = newValue ? '' : 'none';
                 if (indicatorAnimItem) indicatorAnimItem.style.display = newValue && indicatorStyle === 'progress' ? '' : 'none';
@@ -8835,6 +8950,29 @@ class SettingsPage extends Page {
 
                 // Toggle active class state on the premium UI toggle-switch switch
                 disableBlurhashBtn.classList.toggle('active', newValue);
+            });
+        }
+
+        // =====================================================================
+        // Toggle Disable BlurHash in Library
+        // =====================================================================
+        // Toggles whether BlurHash placeholder canvases are rendered in library grids.
+        // Defaults to true (turned on) to maximize weak device navigation and scroll fluidity.
+        // =====================================================================
+        const disableLibraryBlurhashBtn = this.$('#toggle-disable-library-blurhash');
+        if (disableLibraryBlurhashBtn) {
+            disableLibraryBlurhashBtn.addEventListener('click', () => {
+                // Invert the current Disable Library BlurHash state
+                const newValue = !layoutManager.getDisableLibraryBlurhash();
+
+                // Write setting to LayoutManager which handles DOM, Storage, and CardRenderer cache clearing
+                layoutManager.setDisableLibraryBlurhash(newValue);
+
+                // Toggle active class state on the UI toggle-switch
+                disableLibraryBlurhashBtn.classList.toggle('active', newValue);
+
+                // Clear cached library state so navigating back forces immediate re-render
+                state.delete('library:cache');
             });
         }
 
@@ -9051,6 +9189,29 @@ class SettingsPage extends Page {
                 storage.setItem('pref:heroCarouselZoom', newValue.toString());
                 heroCarouselZoomBtn.classList.toggle('active', newValue);
                 log.info(`Hero Carousel Zoom Effect set to: ${newValue}`);
+            });
+        }
+
+        // =====================================================================
+        // HERO CAROUSEL: BLURHASH AMBIENT COLOR FILL TOGGLE
+        // =====================================================================
+        // Toggles ambient background color filling behind the hero artwork using
+        // low-frequency color coefficients decoded from the item's BlurHash.
+        // Exclusive to the Immersive (Performance) carousel style.
+        // Defaults to OFF unless explicitly toggled on by user preference.
+        const heroCarouselBlurhashFillBtn = this.$('#toggle-hero-carousel-blurhash-fill');
+        if (heroCarouselBlurhashFillBtn) {
+            heroCarouselBlurhashFillBtn.addEventListener('click', () => {
+                // Determine whether blurhash color filling is currently enabled (default: false)
+                const isEnabled = storage.getItem('pref:heroCarouselBlurhashFill') === 'true';
+                const newValue = !isEnabled;
+
+                // Save updated preference key into persistent local storage
+                storage.setItem('pref:heroCarouselBlurhashFill', newValue.toString());
+
+                // Update visual toggle switch state
+                heroCarouselBlurhashFillBtn.classList.toggle('active', newValue);
+                log.info(`Hero Carousel BlurHash Color Fill set to: ${newValue}`);
             });
         }
 
@@ -9963,7 +10124,48 @@ class SettingsPage extends Page {
         });
     }
 
+    _getFontDropdownOptions(id, options, currentValue) {
+        const isFileSelect = id === 'jellyfin-fallback-font-select';
+        if (!SERVER_FONT_SELECTS.includes(id)) {
+            return options;
+        }
+        const fontOptions = this._fallbackFonts.map((font) => ({
+            value: isFileSelect ? font.Name : getFallbackFontId(font.Name),
+            label: font.Name
+        }));
+        // Show the saved filename even before the server responds or while offline.
+        const savedName = isFileSelect ? currentValue : getFallbackFontName(currentValue);
+        if (savedName && !fontOptions.some((option) => option.label === savedName)) {
+            fontOptions.push({ value: currentValue, label: savedName });
+        }
+        const bundledOptions = isFileSelect ? [] : options.filter((option) => !getFallbackFontName(option.value));
+        const fallbackIndex = bundledOptions.findIndex((option) => option.value === 'fallback-font');
+        if (fallbackIndex >= 0) {
+            bundledOptions.splice(fallbackIndex + 1, 0, ...fontOptions);
+            return bundledOptions;
+        }
+        return [...bundledOptions, ...fontOptions];
+    }
+
+    async _loadFallbackFontOptions() {
+        try {
+            this._fallbackFonts = await FontLoader.getFallbackFonts();
+            this.$$('.select-btn').forEach((btn) => {
+                const id = btn.dataset.id;
+                if (!SERVER_FONT_SELECTS.includes(id)) return;
+                const options = this._getFontDropdownOptions(id, JSON.parse(btn.dataset.options), btn.dataset.value);
+                btn.dataset.options = JSON.stringify(options);
+                const selected = options.find((option) => String(option.value) === String(btn.dataset.value));
+                const label = btn.querySelector('.btn-label');
+                if (selected && label) label.innerText = i18n.ensureBiDi(selected.label);
+            });
+        } catch (err) {
+            log.warn('Failed to load fallback font options:', err);
+        }
+    }
+
     _renderDropdown(id, options, currentValue, disabled = false) {
+        options = this._getFontDropdownOptions(id, options, currentValue);
         // Find current label (using String conversion to match storage strings with number options)
         const currentOption = options.find((o) => String(o.value) === String(currentValue)) || options[0];
         const currentLabel = currentOption ? escapeHtml(i18n.ensureBiDi(currentOption.label)) : i18n.t('Select');
@@ -9972,8 +10174,8 @@ class SettingsPage extends Page {
         return `
             <button class="setting-action-btn select-btn ${disabled ? 'disabled' : ''}" id="${id}-btn" 
                     data-id="${id}" 
-                    data-value="${currentValue}"
-                    data-options='${JSON.stringify(options).replace(/'/g, '&#39;')}'
+                    data-value="${escapeHtml(String(currentValue))}"
+                    data-options='${escapeHtml(JSON.stringify(options))}'
                     tabindex="${disabled ? '-1' : '0'}"
                     ${disabled ? 'disabled' : ''}
                     data-focusable="${disabled ? 'false' : 'true'}">
@@ -10061,7 +10263,7 @@ class SettingsPage extends Page {
 
                     return `
                         <button class="modal-option-btn ${String(opt.value) === String(currentValue) ? 'selected' : ''}" 
-                                data-value="${opt.value}"
+                                data-value="${escapeHtml(String(opt.value))}"
                                 tabindex="0">
                             <span class="modal-option-label">${escapeHtml(i18n.ensureBiDi(opt.label))}</span>
                             ${badge}
@@ -10427,7 +10629,14 @@ class SettingsPage extends Page {
                 : { value: 'none', label: i18n.t('None') || 'None' };
 
             // Languages filtered according to active filter tab
-            const filteredLanguages = activeFilter === 'favorites'
+            // Dynamically verify if any languages are in favorites
+            const hasFavorites = languageManager.hasFavorites();
+            if (!hasFavorites && activeFilter === 'favorites') {
+                activeFilter = 'all';
+            }
+
+            // Languages filtered according to active filter tab
+            const filteredLanguages = (hasFavorites && activeFilter === 'favorites')
                 ? languageManager.filterOptions(validLanguages)
                 : validLanguages;
 
@@ -10438,35 +10647,38 @@ class SettingsPage extends Page {
             const favoritesCount = validLanguages.filter((o) => languageManager.isFavorite(o)).length;
             const allCount = validLanguages.length;
 
-            // Tier 1: 2 Filter Tabs (Favorites vs All Languages)
-            const filterPillsHtml = `
-                <div class="modal-filter-pills has-slot-subrow" id="modal-lang-filter-pills">
-                    <button class="modal-filter-pill ${activeFilter === 'favorites' ? 'active' : ''}" 
-                            data-filter="favorites" 
-                            tabindex="0">
-                        ★ ${i18n.t('FavoritesOnly') || 'Favorites'} (${favoritesCount})
-                    </button>
-                    <button class="modal-filter-pill ${activeFilter === 'all' ? 'active' : ''}" 
-                            data-filter="all" 
-                            tabindex="0">
-                        ${i18n.t('AllLanguages') || 'All Languages'} (${allCount})
-                    </button>
-                </div>
-            `;
+            // Tier 1: 2 Filter Tabs (Favorites vs All Languages) — only rendered if favorites exist
+            let filterPillsHtml = '';
+            if (hasFavorites) {
+                filterPillsHtml = `
+                    <div class="modal-filter-pills has-slot-subrow" id="modal-lang-filter-pills">
+                        <button class="modal-filter-pill ${activeFilter === 'favorites' ? 'active' : ''}" 
+                                data-filter="favorites" 
+                                tabindex="0">
+                            ★ ${i18n.t('FavoritesOnly') || 'Favorites'} (${favoritesCount})
+                        </button>
+                        <button class="modal-filter-pill ${activeFilter === 'all' ? 'active' : ''}" 
+                                data-filter="all" 
+                                tabindex="0">
+                            ${i18n.t('AllLanguages') || 'All Languages'} (${allCount})
+                        </button>
+                    </div>
+                `;
+            }
 
             // Tier 2: 4 Slot Tabs (Preferred, Fallback 1, Fallback 2, Fallback 3)
             const slotPillsHtml = `
                 <div class="modal-slot-pills" id="modal-audio-slot-pills">
                     ${SLOTS.map((slot) => {
-                        const isActive = slot === activeSlot;
-                        const info = getSlotValueAndLabel(slot);
+                const isActive = slot === activeSlot;
+                const info = getSlotValueAndLabel(slot);
 
-                        // Concise tab title prefix: "Preferred" or "Fallback 1", "Fallback 2", etc.
-                        const displayTitle = slot === 'pref'
-                            ? (i18n.t('Preferred') || 'Preferred')
-                            : `${i18n.t('Fallback') || 'Fallback'} ${slot}`;
+                // Concise tab title prefix: "Preferred" or "Fallback 1", "Fallback 2", etc.
+                const displayTitle = slot === 'pref'
+                    ? (i18n.t('Preferred') || 'Preferred')
+                    : `${i18n.t('Fallback') || 'Fallback'} ${slot}`;
 
-                        return `
+                return `
                             <button class="modal-filter-pill modal-slot-pill ${isActive ? 'active' : ''}" 
                                     data-slot="${slot}" 
                                     tabindex="0"
@@ -10475,7 +10687,7 @@ class SettingsPage extends Page {
                                 <span class="slot-pill-val">${escapeHtml(info.shortLabel)}</span>
                             </button>
                         `;
-                    }).join('')}
+            }).join('')}
                 </div>
             `;
 
@@ -10536,12 +10748,19 @@ class SettingsPage extends Page {
                         const val = starBtn.dataset.value;
                         const matchedOpt = validLanguages.find((o) => String(o.value) === String(val)) || val;
                         const isNowFav = languageManager.toggleFavorite(matchedOpt);
+                        const currentHasFavorites = languageManager.hasFavorites();
+
+                        // If favorites presence changed (empty vs non-empty), re-render modal to toggle tabs
+                        if (currentHasFavorites !== hasFavorites) {
+                            renderModal('options');
+                            return;
+                        }
 
                         if (activeFilter === 'all') {
                             // Update star in-place without rebuilding options
                             starBtn.classList.toggle('active', isNowFav);
                             starBtn.textContent = isNowFav ? '★' : '☆';
-                            // Update Favorites count pill in Row 1
+                            // Update Favorites count pill in Row 1 if present
                             const favPill = overlay.querySelector('.modal-filter-pill[data-filter="favorites"]');
                             if (favPill) {
                                 const newCount = validLanguages.filter((o) => languageManager.isFavorite(o)).length;
@@ -10634,35 +10853,39 @@ class SettingsPage extends Page {
                 return false;
             };
 
-            // Register Focus Section 1: Tier 1 Filter Pills (Favorites vs All)
-            this.registerFocusSection('modal-filter-pills', overlay.querySelector('#modal-lang-filter-pills'), {
-                orientation: 'horizontal',
-                leaveDown: 'modal-slot-pills',
-                onMove: (direction) => {
-                    const isRtl = document.documentElement.getAttribute('dir') === 'rtl';
-                    if (direction === 'left') {
-                        const targetFilter = isRtl ? 'all' : 'favorites';
-                        if (activeFilter !== targetFilter) {
-                            activeFilter = targetFilter;
-                            renderModal('filter-pills');
-                            return true;
+            // Register Focus Section 1: Tier 1 Filter Pills (Favorites vs All) only if rendered
+            if (hasFavorites && overlay.querySelector('#modal-lang-filter-pills')) {
+                this.registerFocusSection('modal-filter-pills', overlay.querySelector('#modal-lang-filter-pills'), {
+                    orientation: 'horizontal',
+                    leaveDown: 'modal-slot-pills',
+                    onMove: (direction) => {
+                        const isRtl = document.documentElement.getAttribute('dir') === 'rtl';
+                        if (direction === 'left') {
+                            const targetFilter = isRtl ? 'all' : 'favorites';
+                            if (activeFilter !== targetFilter) {
+                                activeFilter = targetFilter;
+                                renderModal('filter-pills');
+                                return true;
+                            }
+                        } else if (direction === 'right') {
+                            const targetFilter = isRtl ? 'favorites' : 'all';
+                            if (activeFilter !== targetFilter) {
+                                activeFilter = targetFilter;
+                                renderModal('filter-pills');
+                                return true;
+                            }
                         }
-                    } else if (direction === 'right') {
-                        const targetFilter = isRtl ? 'favorites' : 'all';
-                        if (activeFilter !== targetFilter) {
-                            activeFilter = targetFilter;
-                            renderModal('filter-pills');
-                            return true;
-                        }
+                        return false;
                     }
-                    return false;
-                }
-            });
+                });
+            } else {
+                focusManager.unregister('modal-filter-pills');
+            }
 
             // Register Focus Section 2: Tier 2 Slot Pills (Preferred, 1, 2, 3)
             this.registerFocusSection('modal-slot-pills', overlay.querySelector('#modal-audio-slot-pills'), {
                 orientation: 'horizontal',
-                leaveUp: 'modal-filter-pills',
+                leaveUp: hasFavorites ? 'modal-filter-pills' : null,
                 leaveDown: 'modal-options',
                 onMove: (direction) => {
                     if (direction === 'left' || direction === 'right') {
@@ -10693,13 +10916,13 @@ class SettingsPage extends Page {
             });
 
             // Apply focus according to target
-            if (focusTarget === 'filter-pills') {
+            if (focusTarget === 'filter-pills' && hasFavorites) {
                 focusManager.setActiveSection('modal-filter-pills');
                 setTimeout(() => {
                     const activePill = overlay.querySelector(`#modal-lang-filter-pills .modal-filter-pill[data-filter="${activeFilter}"]`);
                     if (activePill) focusManager.focusElement(activePill);
                 }, 40);
-            } else if (focusTarget === 'slot-pills') {
+            } else if (focusTarget === 'slot-pills' || (focusTarget === 'filter-pills' && !hasFavorites)) {
                 focusManager.setActiveSection('modal-slot-pills');
                 setTimeout(() => {
                     const activePill = overlay.querySelector(`#modal-audio-slot-pills .modal-slot-pill[data-slot="${activeSlot}"]`);
@@ -11546,6 +11769,7 @@ class SettingsPage extends Page {
             'expanded-sidebar-color-select': { key: 'pref:expandedSidebarColor', type: 'local', triggerEvent: true },
             'bottom-nav-bar-color-select': { key: 'pref:bottomNavBarColor', type: 'local', triggerEvent: true },
             'sidebar-logo-settings-select': { key: 'pref:logoSettings', type: 'local', triggerEvent: true },
+            'sidebar-back-button-select': { key: 'pref:sidebarBackButton', type: 'local', triggerEvent: true },
             'sidebar-items-align-select': { key: 'pref:sidebarItemsAlign', type: 'local', triggerEvent: true },
             'trending-movies-collection-select': { key: 'pref:trendingMoviesCollection', type: 'local', triggerEvent: true },
             'trending-series-collection-select': { key: 'pref:trendingSeriesCollection', type: 'local', triggerEvent: true },
@@ -11608,22 +11832,12 @@ class SettingsPage extends Page {
                     } finally {
                         btn.classList.remove('disabled');
                     }
-                } else if (id === 'jellyfin-fallback-font-select') {
+                } else if (SERVER_FONT_SELECTS.includes(id)) {
                     btn.classList.add('disabled');
                     try {
-                        const fontsList = await api.get('/FallbackFont/Fonts');
-                        console.log('Jellyfin Fallback Fonts response:', fontsList);
-                        log.info('Jellyfin Fallback Fonts response:', fontsList);
-
-                        if (fontsList && fontsList.length > 0) {
-                            options = fontsList.map((f) => ({
-                                value: f.Name,
-                                label: f.Name
-                            }));
-                            btn.dataset.options = JSON.stringify(options);
-                        } else {
-                            options = [];
-                        }
+                        await this._loadFallbackFontOptions();
+                        options = this._getFontDropdownOptions(id, options, currentValue);
+                        btn.dataset.options = JSON.stringify(options);
                     } catch (err) {
                         log.warn('Failed to load fallback fonts list on click:', err);
                     } finally {
@@ -11704,6 +11918,7 @@ class SettingsPage extends Page {
                         } else if (id === 'jellyfin-fallback-font-select') {
                             // SPECIAL CASE: Reload fallback font on change
                             storage.setItem('pref:jellyfinFallbackFont', newValue);
+                            storage.flush();
                             FontLoader.loadFont('fallback-font', true);
                         } else if (id === 'text-scale-select') {
                             // SPECIAL CASE: Text Scale handled by LayoutManager
@@ -11810,6 +12025,19 @@ class SettingsPage extends Page {
                                     const isCarouselEnabled = storage.getItem('pref:heroCarousel') !== 'false';
                                     animToggleItem.style.display = isCarouselEnabled && newValue === 'progress' ? '' : 'none';
                                 }
+                                // Invalidate spatial navigation focus map to register the dynamic indicator animation toggle
+                                focusManager.invalidateCache('settings-content');
+                            }
+
+                            // Cascade visibility for BlurHash fill toggle (exclusive to immersive-performance style)
+                            if (settingConfig.key === 'pref:heroCarouselStyle') {
+                                const blurhashFillItem = this.$('#hero-carousel-blurhash-fill-item');
+                                if (blurhashFillItem) {
+                                    const isCarouselEnabled = storage.getItem('pref:heroCarousel') !== 'false';
+                                    blurhashFillItem.style.display = isCarouselEnabled && newValue === 'immersive-performance' ? '' : 'none';
+                                }
+                                // Invalidate spatial navigation focus cache so the newly revealed BlurHash toggle can be focused
+                                focusManager.invalidateCache('settings-content');
                             }
 
                             /* -------------------------------------------------------------
@@ -12011,17 +12239,17 @@ class SettingsPage extends Page {
                             }
 
                             // FONT LOADING: Trigger download if needed (forcing reload for explicit user change)
-                            if (
-                                (settingConfig.key === 'subtitleFont' || settingConfig.key === 'subtitleFontAss') &&
-                                newValue
-                            ) {
-                                FontLoader.loadFont(newValue, true).then((loaded) => {
-                                    if (loaded) {
-                                        log.debug(`Font loaded: ${newValue}`);
-                                    } else {
-                                        log.warn(`Failed to load font: ${newValue}`);
-                                    }
-                                });
+                            if (settingConfig.key === 'subtitleFont' || settingConfig.key === 'subtitleFontAss') {
+                                storage.flush();
+                                if (newValue) {
+                                    FontLoader.loadFont(newValue, true).then((loaded) => {
+                                        if (loaded) {
+                                            log.debug(`Font loaded: ${newValue}`);
+                                        } else {
+                                            log.warn(`Failed to load font: ${newValue}`);
+                                        }
+                                    });
+                                }
                             }
                         } else if (settingConfig.type === 'debug') {
                             storage.setItem(settingConfig.key, newValue);

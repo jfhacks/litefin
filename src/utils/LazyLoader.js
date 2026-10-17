@@ -30,11 +30,13 @@ class LazyLoader {
          * ---------------------------------------------------------------- */
         this._shimmerObserver = null;
 
-        // Track the native scroll debounce timer context
+        /* ----------------------------------------------------------------
+         * SCROLL ACTIVITY STATE & BLURHASH THROTTLING
+         * Track scroll state exclusively for heavy mathematical operations
+         * such as BlurHash DCT decoding. Network and image fetches proceed
+         * unimpeded through IntersectionObserver rootMargin ahead of time.
+         * ---------------------------------------------------------------- */
         this._scrollTimeout = null;
-
-        // Queue elements that intersect during active scrolling animations or events
-        this._pendingLoads = new Map();
 
         // ── BlurHash decode queue ───────────────────────────────────────────
         // Prevents micro-freeze storms on low-end TV CPUs by throttling
@@ -57,9 +59,9 @@ class LazyLoader {
                 // Debounce check: scrolling is considered stopped after 150ms of silence
                 this._scrollTimeout = setTimeout(() => {
                     this._scrollTimeout = null;
-                    // If no scroll animations are still active, process all queued loads
+                    // Resume deferred BlurHash decoding once viewport scrolling settles
                     if (!this._isScrolling()) {
-                        this._processPendingLoads();
+                        this._processBlurHashQueue();
                     }
                 }, 150);
             },
@@ -71,7 +73,6 @@ class LazyLoader {
             // Tiny buffer allows subsequent animation frames to settle or register
             setTimeout(() => {
                 if (!this._isScrolling()) {
-                    this._processPendingLoads();
                     // Resume deferred BlurHash decoding once scrolling transitions settle
                     this._processBlurHashQueue();
                 }
@@ -167,33 +168,32 @@ class LazyLoader {
                     entries.forEach((entry) => {
                         const target = entry.target;
 
+                        // ====================================================
+                        // IMMEDIATE INTERSECTION LOADING
+                        // ====================================================
+                        // Load immediately as soon as cards touch the rootMargin
+                        // (~0.35 screens ahead, approx 1 row). Pre-fetching images just ahead
+                        // of the viewport ensures adjacent cards are ready without saturating
+                        // the browser's HTTP connection pool with distant off-screen decodes.
+                        // ====================================================
                         if (entry.isIntersecting) {
-                            const type = target.hasAttribute('data-lazy-row') ? 'row' : 'image';
-
-                            // Defer loading if a scroll or animation is actively running
-                            if (this._isScrolling()) {
-                                this._pendingLoads.set(target, type);
+                            if (target.hasAttribute('data-lazy-row')) {
+                                this._loadRow(target);
                             } else {
-                                if (type === 'row') {
-                                    this._loadRow(target);
-                                } else {
-                                    this._loadImage(target);
-                                    this._batchPreloadImages(target);
-                                }
+                                // Load this specific intersecting image directly.
+                                // Do NOT cascade _batchPreloadImages here: directional batch preloading
+                                // is managed exclusively by active focus navigation (focus:changed) to avoid
+                                // exponential duplicate preload storms during rapid scrolling.
+                                this._loadImage(target);
                             }
-                        } else {
-                            // OPTIMIZATION: If the element exits viewport before scroll stops,
-                            // remove it from queue so we never allocate decoders/requests for it.
-                            this._pendingLoads.delete(target);
                         }
                     });
                 },
                 {
-                    // Preload ~0.8 screens ahead — enough to have the next row ready
-                    // before it scrolls into view, without triggering a burst of 60+
-                    // simultaneous decode requests on page load.
-                    // VirtualCardRow handles home-screen card preloading internally via forceLoad()
-                    rootMargin: `${Math.ceil(window.innerHeight * 0.8)}px`,
+                    // Calibrated lookahead cushion (~0.35 screens / approx 1 row ahead).
+                    // Prevents focus-driven preloads and virtual grid pre-warming from competing
+                    // for limited HTTP connections and CPU decode bandwidth on low-power TVs.
+                    rootMargin: `${Math.ceil(window.innerHeight * 0.35)}px`,
                     threshold: 0.01
                 }
             );
@@ -253,27 +253,6 @@ class LazyLoader {
         return this._scrollTimeout !== null;
     }
 
-    /**
-     * Process all queued intersections once scrolling has come to a stop
-     * @private
-     */
-    _processPendingLoads() {
-        if (this._pendingLoads.size === 0) return;
-
-        log.info(`Processing ${this._pendingLoads.size} pending lazy loads after scroll stop.`);
-
-        // Execute batch loads for all queued elements
-        this._pendingLoads.forEach((type, target) => {
-            if (type === 'row') {
-                this._loadRow(target);
-            } else {
-                this._loadImage(target);
-                this._batchPreloadImages(target);
-            }
-        });
-
-        this._pendingLoads.clear();
-    }
 
     /**
      * Helper to load all images in a row container
@@ -526,21 +505,18 @@ class LazyLoader {
 
     /**
      * Forcibly load an image immediately, bypassing IntersectionObserver bounding box checks.
-     * Required for GPU hardware-accelerated containers (`translate3d`) where old webkits
-     * fail to intersect bounding rects correctly.
-     * @param {HTMLElement} img
+     * Required for GPU hardware-accelerated containers (`translate3d`) where older web engines
+     * fail to intersect bounding rects reliably.
+     * @param {HTMLElement} img - The image element to load
+     * @param {boolean} [forceImmediate=false] - Retained for backward API compatibility
      */
-    forceLoad(img) {
+    forceLoad(img, forceImmediate = false) {
         if (!img) return;
 
-        // If scrolling or vertical navigation animation is active on screen,
-        // queue this load into pendingLoads to avoid competing with compositor frames,
-        // unless this card is currently focused (focus always gets instant image resolution).
-        if (this._isScrolling() && !img.closest('.media-card.focused')) {
-            this._pendingLoads.set(img, 'image');
-            return;
-        }
-
+        // --------------------------------------------------------------------
+        // DIRECT IMAGE PIPELINE
+        // Hand off directly to image loader without artificial scroll holds.
+        // --------------------------------------------------------------------
         this._loadImage(img);
     }
 
@@ -554,25 +530,7 @@ class LazyLoader {
     _batchPreloadImages(startImg) {
         if (!startImg) return;
 
-        // If scrolling or vertical navigation animation is active on screen,
-        // defer batch preloading until motion settles cleanly to avoid competing
-        // with 60fps compositor animation frames on TV hardware.
-        if (this._isScrolling()) {
-            this._pendingPreloadTarget = startImg;
-            if (!this._scrollPreloadHandler) {
-                this._scrollPreloadHandler = () => {
-                    this._scrollPreloadHandler = null;
-                    const target = this._pendingPreloadTarget;
-                    this._pendingPreloadTarget = null;
-                    if (target && !this._isScrolling()) {
-                        this._batchPreloadImages(target);
-                    }
-                };
-                eventBus.once('scroll:finished', this._scrollPreloadHandler);
-            }
-            return;
-        }
-
+        // Locate parent media card container for sibling traversal
         const currentCard = startImg.closest('.media-card');
         if (!currentCard) return;
 
@@ -664,16 +622,35 @@ class LazyLoader {
 
         const images = container.querySelectorAll('img[data-src]');
 
-        // LEGACY FIX: Eagerly load the first 25 images in the container.
-        // If view mode is small-poster, load 2 more items (27 total).
-        // This ensures the initial viewport is populated even if IntersectionObserver fails.
-        let eagerLoadCount = 25;
-        if (container.classList.contains('view-small-poster')) {
-            eagerLoadCount += 2;
-        }
+        /*
+         * ====================================================================
+         * ROW-ALIGNED EAGER INITIAL LOAD
+         * ====================================================================
+         * Read explicit column count directly from the grid container dataset,
+         * or derive safe defaults based on layout class modifiers.
+         *
+         * Always calculate eager image load counts in complete row multiples.
+         * Hardcoded values (e.g. 25 or 27) slice across mid-row boundaries on
+         * 4, 5, 7, or 8 column layouts, causing visible half-row loading states.
+         * ====================================================================
+         */
+        const gridCols =
+            parseInt(container.dataset.gridColumns, 10) ||
+            (container.classList.contains('view-small-poster')
+                ? 8
+                : container.classList.contains('view-thumb') || container.classList.contains('landscape-grid')
+                  ? 4
+                  : container.classList.contains('view-list')
+                    ? 1
+                    : 7);
+
+        // Preload 4 full rows to saturate the initial viewport and forward scroll cushion
+        const eagerRows = container.classList.contains('view-list') ? 15 : 4;
+        const eagerLoadCount = gridCols * eagerRows;
 
         for (let i = 0; i < Math.min(images.length, eagerLoadCount); i++) {
-            this.forceLoad(images[i]);
+            // Force immediate network/cache load for initial visible rows
+            this.forceLoad(images[i], true);
         }
 
         // If no observer (older browser?), we are done.
@@ -718,12 +695,6 @@ class LazyLoader {
             this._deferredPreloadFrameId = null;
         }
 
-        // Remove pending loads that belong to this container
-        this._pendingLoads.forEach((type, target) => {
-            if (container.contains(target)) {
-                this._pendingLoads.delete(target);
-            }
-        });
 
         // Unobserve all images tracked by the main observer
         if (this.observer) {
